@@ -120,35 +120,37 @@ namespace MediaMonitor
             for (int i = startIdx; i < _lyric.Lines.Count && currentRow < lineLimit; i++)
             {
                 var line = _lyric.Lines[i];
+                // 关键：指纹包含内容和它当前在屏幕上的行号
                 string f = $"R{currentRow}_{line.Content}_{ChkAdvancedMode.IsChecked}";
 
-                // 增量校验
+                // 【增量核心】如果开启增量且指纹已存在，证明这行已经在硬件屏幕对应位置了，直接跳过
                 if (ChkIncremental.IsChecked == true && _fingerprints.TryGetValue(currentRow, out string last) && last == f)
                 {
                     currentRow++;
+                    // 翻译行同理
                     if (currentRow < lineLimit && ChkTransOccupies.IsChecked == true && !string.IsNullOrEmpty(line.Translation)) currentRow++;
                     continue;
                 }
 
+                // 记录新快照
                 _fingerprints[currentRow] = f;
 
-                // 准备歌词包
+                // 发送新行数据
                 byte[] data = (ChkAdvancedMode.IsChecked == true && line.Words.Count > 0)
                     ? _serial.BuildWordByWord((ushort)currentRow, line.Words, line.Time)
                     : _serial.BuildLyricWithIndex(0x12, (ushort)currentRow, line.Content);
 
-                SendAndLog(data, false);
+                SendAndLog(data);
                 currentRow++;
 
-                // 准备翻译包
+                // 处理翻译行的增量发送
                 if (currentRow < lineLimit && ChkTransOccupies.IsChecked == true && !string.IsNullOrEmpty(line.Translation))
                 {
                     string tf = $"R{currentRow}_T_{line.Translation}";
                     if (ChkIncremental.IsChecked == false || !_fingerprints.ContainsKey(currentRow) || _fingerprints[currentRow] != tf)
                     {
                         _fingerprints[currentRow] = tf;
-                        var tData = _serial.BuildLyricWithIndex(0x13, (ushort)currentRow, line.Translation);
-                        SendAndLog(tData, false);
+                        SendAndLog(_serial.BuildLyricWithIndex(0x13, (ushort)currentRow, line.Translation));
                     }
                     currentRow++;
                 }
