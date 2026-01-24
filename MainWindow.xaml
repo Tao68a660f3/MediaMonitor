@@ -78,7 +78,7 @@
 
                         <WrapPanel Margin="0,8">
                             <CheckBox x:Name="ChkAdvancedMode" Content="高级协议(0xAA)" IsChecked="True" Margin="0,0,10,0"/>
-                            <CheckBox x:Name="ChkIncremental" Content="增量发送" IsChecked="True" Margin="0,0,10,0"/>
+                            <CheckBox x:Name="ChkIncremental" Content="增量发送" IsChecked="True" Visibility="Collapsed" Margin="0,0,10,0"/>
                             <CheckBox x:Name="ChkTransOccupies" Content="翻译占行" IsChecked="True"/>
                         </WrapPanel>
 
