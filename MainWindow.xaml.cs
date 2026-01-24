@@ -46,6 +46,7 @@ namespace MediaMonitor
             _smtc.OnMediaUpdated += (props) => Dispatcher.Invoke(() => {
                 TxtTitle.Text = props.Title;
                 TxtArtist.Text = props.Artist;
+                TxtAlbum.Text = props.AlbumTitle;
                 _lyric.LoadAndParse(props.Title, props.Artist);
                 TxtLrcStatus.Text = _lyric.CurrentLyricPath != null ? "歌词已载入" : "未找到歌词";
                 Invalidate();
