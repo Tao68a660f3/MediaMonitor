@@ -24,48 +24,87 @@ namespace MediaMonitor
 
         public void LoadAndParse(string title, string artist)
         {
-            Lines.Clear(); CurrentLyricPath = null;
-            if (!Directory.Exists(LyricFolder)) return;
-            string sT = Regex.Replace(title, @"[\/?:*""<>|]", "_");
-            string sA = Regex.Replace(artist ?? "", @"[\/?:*""<>|]", "_");
-            var files = Directory.GetFiles(LyricFolder, "*.lrc");
-            foreach (var p in FileNamePatterns)
+            Lines.Clear();
+            CurrentLyricPath = null;
+
+            if (string.IsNullOrWhiteSpace(LyricFolder) || !Directory.Exists(LyricFolder)) return;
+
+            // 1. 寻找物理文件
+            string sT = Regex.Replace(title, @"[\/?:*""<>|]", "_").Trim();
+            string sA = Regex.Replace(artist ?? "", @"[\/?:*""<>|]", "_").Trim();
+
+            var files = Directory.GetFiles(LyricFolder, "*.lrc", SearchOption.TopDirectoryOnly);
+
+            foreach (var pattern in FileNamePatterns)
             {
-                string target = p.Replace("{Artist}", sA).Replace("{Title}", sT) + ".lrc";
-                var m = files.FirstOrDefault(f => Path.GetFileName(f).Equals(target, StringComparison.OrdinalIgnoreCase));
-                if (m != null) { CurrentLyricPath = m; break; }
+                string targetName = pattern.Replace("{Artist}", sA).Replace("{Title}", sT) + ".lrc";
+                var match = files.FirstOrDefault(f => Path.GetFileName(f).Equals(targetName, StringComparison.OrdinalIgnoreCase));
+                if (match != null)
+                {
+                    CurrentLyricPath = match;
+                    break;
+                }
             }
+
+            // 如果模式匹配失败，尝试模糊匹配 (标题包含即可)
+            if (CurrentLyricPath == null)
+            {
+                CurrentLyricPath = files.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Contains(sT, StringComparison.OrdinalIgnoreCase));
+            }
+
             if (CurrentLyricPath == null) return;
 
-            var raw = File.ReadAllLines(CurrentLyricPath);
-            var lRegex = new Regex(@"^\[(?<t>\d{2,}:\d{2}(?:\.\d{2,3})?)\](?<c>.*)$");
-            var wRegex = new Regex(@"<(?<t>\d{2,}:\d{2}\.\d{2,3})>(?<w>[^<]*)");
+            // 2. 解析 LRC
+            ParseFile(CurrentLyricPath);
+        }
+
+        private void ParseFile(string path)
+        {
+            var raw = File.ReadAllLines(path);
+            // 修改点 1：去掉行首锚定 ^，并将括号匹配改为支持 [ ] 和 < >
+            var lRegex = new Regex(@"[\[\<](?<t>\d{2,}:\d{2}(?:\.\d{2,3})?)[\]\>](?<c>.*)$");
+            // 修改点 2：逐字正则同样支持 [ ] 和 < >
+            var wRegex = new Regex(@"[\[\<](?<t>\d{2,}:\d{2}\.\d{2,3})[\]\>](?<w>[^\[\<]*)");
 
             foreach (var line in raw)
             {
+                // 逻辑保持原样，仅正则表达式变得更宽容
                 var m = lRegex.Match(line.Trim());
                 if (!m.Success) continue;
+
                 if (TimeSpan.TryParse("00:" + m.Groups["t"].Value, out TimeSpan t))
                 {
-                    string c = m.Groups["c"].Value.Trim();
-                    var exist = Lines.FirstOrDefault(l => Math.Abs((l.Time - t).TotalMilliseconds) < 50);
-                    if (exist != null && !wRegex.IsMatch(c)) { exist.Translation = c; continue; }
-                    var nl = new LyricLine { Time = t };
-                    var wm = wRegex.Matches(c);
-                    if (wm.Count > 0)
+                    string contentBody = m.Groups["c"].Value.Trim();
+
+                    // 处理翻译逻辑保持原样
+                    var existing = Lines.FirstOrDefault(l => Math.Abs((l.Time - t).TotalMilliseconds) < 50);
+                    if (existing != null && !wRegex.IsMatch(contentBody))
                     {
-                        foreach (Match w in wm)
+                        existing.Translation = contentBody;
+                        continue;
+                    }
+
+                    var newLine = new LyricLine { Time = t };
+                    var wordMatches = wRegex.Matches(contentBody);
+
+                    if (wordMatches.Count > 0)
+                    {
+                        foreach (Match w in wordMatches)
                         {
                             if (TimeSpan.TryParse("00:" + w.Groups["t"].Value, out TimeSpan wt))
-                                nl.Words.Add(new WordInfo { Time = wt, Word = w.Groups["w"].Value });
+                                // 保持你原始的字段名 Word 和 Time
+                                newLine.Words.Add(new WordInfo { Time = wt, Word = w.Groups["w"].Value });
                         }
-                        nl.Content = string.Join("", nl.Words.Select(x => x.Word));
+                        newLine.Content = string.Join("", newLine.Words.Select(x => x.Word));
                     }
-                    else { nl.Content = c; }
-                    Lines.Add(nl);
+                    else
+                    {
+                        newLine.Content = contentBody;
+                    }
+                    Lines.Add(newLine);
                 }
             }
-            Lines = Lines.OrderBy(x => x.Time).ToList();
+            Lines = Lines.OrderBy(l => l.Time).ToList();
         }
     }
 }
