@@ -1,106 +1,111 @@
 ﻿<Window x:Class="MediaMonitor.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="媒体同步控制中心 V1.2" Height="800" Width="500" Background="#F3F3F3">
-    <Grid Margin="15">
-        <ScrollViewer VerticalScrollBarVisibility="Auto">
+        Title="媒体同步调试终端 V1.3" Height="850" Width="520" Background="#F0F0F0">
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <DockPanel Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock Text="媒体源:" VerticalAlignment="Center" FontWeight="Bold" Margin="0,0,10,0"/>
+            <ComboBox x:Name="ComboSessions" DisplayMemberPath="SourceAppUserModelId" SelectionChanged="ComboSessions_SelectionChanged"/>
+        </DockPanel>
+
+        <Border Grid.Row="1" Background="White" CornerRadius="5" Padding="15" Margin="0,0,0,10">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="5" Color="#DDDDDD" ShadowDepth="1" Opacity="0.5"/>
+            </Border.Effect>
             <StackPanel>
-                <TextBlock Text="选择媒体源:" FontWeight="Bold" Margin="0,0,0,5"/>
-                <ComboBox x:Name="ComboSessions" DisplayMemberPath="SourceAppUserModelId" SelectionChanged="ComboSessions_SelectionChanged" Margin="0,0,0,15"/>
+                <TextBlock x:Name="TxtTitle" Text="未检测到播放" FontSize="20" FontWeight="Bold"/>
+                <TextBlock x:Name="TxtArtist" Text="-" Foreground="#666666"/>
+                <ProgressBar x:Name="PrgBar" Height="6" Margin="0,10" Foreground="#0078D7" Background="#E5E5E5"/>
+                <TextBlock x:Name="TxtLyricDisplay" Text="等待数据..." FontSize="16" Foreground="#0078D7" TextAlignment="Center" Margin="5"/>
+                <TextBlock x:Name="TxtAlbum" Visibility="Collapsed"/>
+                <TextBlock x:Name="TxtLyricTranslation" Visibility="Collapsed"/>
+                <TextBlock x:Name="TxtNextLyric" Visibility="Collapsed"/>
+            </StackPanel>
+        </Border>
 
-                <Border Background="White" CornerRadius="8" Padding="15">
-                    <Border.Effect>
-                        <DropShadowEffect BlurRadius="10" Color="#CCCCCC" Direction="270" ShadowDepth="2" Opacity="0.5"/>
-                    </Border.Effect>
+        <StackPanel Grid.Row="2">
+            <Expander Header="通信与显示参数配置" IsExpanded="False" Background="#E1E1E1" Margin="0,0,0,5">
+                <Border Background="#F9F9F9" Padding="10">
                     <StackPanel>
-                        <TextBlock x:Name="TxtTitle" Text="暂无播放" FontSize="22" FontWeight="Bold" TextTrimming="CharacterEllipsis"/>
-                        <TextBlock x:Name="TxtArtist" Text="-" FontSize="16" Foreground="#666666" Margin="0,5,0,0"/>
-                        <TextBlock x:Name="TxtAlbum" Text="-" FontSize="12" Foreground="#999999" Margin="0,2,0,0"/>
+                        <UniformGrid Columns="2">
+                            <StackPanel Margin="2">
+                                <TextBlock Text="串口号:"/>
+                                <ComboBox x:Name="ComboPorts"/>
+                            </StackPanel>
+                            <StackPanel Margin="2">
+                                <TextBlock Text="波特率:"/>
+                                <ComboBox x:Name="ComboBaud">
+                                    <ComboBoxItem Content="9600"/>
+                                    <ComboBoxItem Content="115200" IsSelected="True"/>
+                                </ComboBox>
+                            </StackPanel>
+                        </UniformGrid>
 
-                        <ProgressBar x:Name="PrgBar" Height="8" Margin="0,15,0,5" Foreground="#2196F3"/>
-                        <Grid>
-                            <TextBlock x:Name="TxtStatus" Text="状态: -" FontSize="11" Foreground="Gray"/>
-                            <TextBlock x:Name="TxtTime" Text="00:00 / 00:00" FontSize="11" Foreground="Gray" HorizontalAlignment="Right"/>
+                        <TextBlock Text="文本编码:" Margin="2,5,0,0"/>
+                        <ComboBox x:Name="ComboEncoding" Margin="2">
+                            <ComboBoxItem Content="UTF8" IsSelected="True"/>
+                            <ComboBoxItem Content="GB2312"/>
+                        </ComboBox>
+
+                        <Grid Margin="0,5">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="歌词路径:"/>
+                                <TextBox x:Name="TxtLrcPath" Text="C:\Lyrics"/>
+                            </StackPanel>
+                            <Button Grid.Column="1" Content=" 浏览 " Click="BtnBrowse_Click" Margin="5,15,0,0" VerticalAlignment="Top"/>
                         </Grid>
 
+                        <TextBlock Text="文件名模式:"/>
+                        <TextBox x:Name="TxtPatterns" Text="{}{Artist} - {Title};{Title}"/>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                            <TextBlock Text="歌词状态: " FontWeight="Bold" FontSize="12"/>
+                            <TextBlock x:Name="TxtLrcStatus" Text="等待匹配..." Foreground="Gray" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+
                         <Separator Margin="0,10"/>
-                        <TextBlock x:Name="TxtLyricDisplay" Text="..." FontSize="18" Foreground="#2196F3" TextAlignment="Center" FontWeight="SemiBold"/>
-                        <TextBlock x:Name="TxtLyricTranslation" Text="" FontSize="14" Foreground="#666666" TextAlignment="Center" Margin="0,5,0,0"/>
-                        <TextBlock x:Name="TxtNextLyric" Text="" FontSize="12" Foreground="#AAAAAA" TextAlignment="Center" Margin="0,10,0,0"/>
+                        <WrapPanel>
+                            <CheckBox x:Name="ChkAdvancedMode" Content="协议模式" IsChecked="True" Margin="0,0,15,0"/>
+                            <CheckBox x:Name="ChkIncremental" Content="增量预览" IsChecked="True" Margin="0,0,15,0"/>
+                            <CheckBox x:Name="ChkTransOccupies" Content="翻译占行" IsChecked="True"/>
+                        </WrapPanel>
+
+                        <UniformGrid Columns="2" Margin="0,5">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="屏行数:" VerticalAlignment="Center"/>
+                                <TextBox x:Name="TxtScreenLines" Text="3" Width="40" Margin="5,0"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="偏移:" VerticalAlignment="Center"/>
+                                <TextBox x:Name="TxtOffset" Text="1" Width="40" Margin="5,0"/>
+                            </StackPanel>
+                        </UniformGrid>
+
+                        <Button x:Name="BtnSerialConn" Content="连接串口" Height="30" Margin="0,10,0,0" Click="BtnSerialConn_Click" Background="#0078D7" Foreground="White" BorderThickness="0"/>
                     </StackPanel>
                 </Border>
+            </Expander>
+        </StackPanel>
 
-                <Expander Header="串口与显示策略" IsExpanded="True" Margin="0,15">
-                    <Border Background="#E9E9E9" CornerRadius="5" Padding="10">
-                        <StackPanel>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition/>
-                                    <ColumnDefinition/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Margin="0,0,5,0">
-                                    <TextBlock Text="串口号:"/>
-                                    <ComboBox x:Name="ComboPorts" Margin="0,2"/>
-                                    <TextBlock Text="波特率:"/>
-                                    <ComboBox x:Name="ComboBaud" Margin="0,2">
-                                        <ComboBoxItem Content="9600"/>
-                                        <ComboBoxItem Content="115200" IsSelected="True"/>
-                                    </ComboBox>
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Margin="5,0,0,0">
-                                    <TextBlock Text="文本编码:"/>
-                                    <ComboBox x:Name="ComboEncoding" Margin="0,2">
-                                        <ComboBoxItem Content="UTF8"/>
-                                        <ComboBoxItem Content="GB2312"/>
-                                    </ComboBox>
-                                    <Button x:Name="BtnSerialConn" Content="连接串口" Margin="0,12,0,0" Height="28" Click="BtnSerialConn_Click"/>
-                                </StackPanel>
-                            </Grid>
+        <TextBlock Grid.Row="3" Text="实时数据监控:" FontWeight="Bold" Margin="0,5"/>
 
-                            <Separator Margin="0,10"/>
-
-                            <StackPanel Orientation="Horizontal">
-                                <CheckBox x:Name="ChkAdvancedMode" Content="协议模式" IsChecked="True" VerticalAlignment="Center"/>
-                                <CheckBox x:Name="ChkIncremental" Content="增量发送" IsChecked="True" VerticalAlignment="Center" Margin="15,0,0,0"/>
-                                <CheckBox x:Name="ChkTransOccupies" Content="翻译占行" IsChecked="True" VerticalAlignment="Center" Margin="15,0,0,0"/>
-                            </StackPanel>
-
-                            <Grid Margin="0,8,0,0">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition/>
-                                    <ColumnDefinition/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="屏幕行数:" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="TxtScreenLines" Text="3" Width="30" Margin="5,0,0,0" TextAlignment="Center"/>
-                                </StackPanel>
-                                <StackPanel Grid.Column="1" Orientation="Horizontal">
-                                    <TextBlock Text="当前行偏移:" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="TxtOffset" Text="1" Width="30" Margin="5,0,0,0" TextAlignment="Center"/>
-                                </StackPanel>
-                            </Grid>
-                        </StackPanel>
-                    </Border>
-                </Expander>
-
-                <Expander Header="歌词搜索设置" Margin="0,0,0,15">
-                    <Border Background="#E9E9E9" CornerRadius="5" Padding="10">
-                        <StackPanel>
-                            <TextBlock Text="歌词路径:"/>
-                            <DockPanel Margin="0,5">
-                                <Button Content=" 浏览 " Click="BtnBrowse_Click" DockPanel.Dock="Right" Margin="5,0,0,0"/>
-                                <TextBox x:Name="TxtLrcPath" Text="C:\Lyrics" VerticalAlignment="Center"/>
-                            </DockPanel>
-                            <TextBlock Text="匹配模式 (分号隔开):"/>
-                            <TextBox x:Name="TxtPatterns" Text="{}{Artist} - {Title};{Title} - {Artist};{Title}" Margin="0,5"/>
-                            <TextBlock x:Name="TxtLrcStatus" Text="状态: 等待匹配" Foreground="Gray" FontSize="11"/>
-                        </StackPanel>
-                    </Border>
-                </Expander>
-
-                <TextBlock Text="数据流预览 (HEX):" FontWeight="Bold"/>
-                <RichTextBox x:Name="HexPreview" Height="120" Background="#1E1E1E" FontFamily="Consolas" IsReadOnly="True" VerticalScrollBarVisibility="Auto" Margin="0,5"/>
-            </StackPanel>
-        </ScrollViewer>
+        <RichTextBox Grid.Row="4" x:Name="HexPreview" Background="#1E1E1E" Foreground="White" 
+                     FontFamily="Consolas" IsReadOnly="True" VerticalScrollBarVisibility="Auto">
+            <FlowDocument>
+                <Paragraph x:Name="InitialPara">等待同步...</Paragraph>
+            </FlowDocument>
+        </RichTextBox>
     </Grid>
 </Window>
