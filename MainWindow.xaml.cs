@@ -1,4 +1,5 @@
 ﻿using System;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
@@ -10,167 +11,122 @@ namespace MediaMonitor
 {
     public partial class MainWindow : Window
     {
-        private GlobalSystemMediaTransportControlsSessionManager? _manager;
-        private GlobalSystemMediaTransportControlsSession? _selectedSession;
+        private readonly SmtcService _smtc = new SmtcService();
+        private readonly LyricService _lyric = new LyricService();
         private DispatcherTimer _uiTimer;
 
         public MainWindow()
         {
             InitializeComponent();
 
-            // 初始化定时器：用于平滑更新进度条
-            _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-            _uiTimer.Tick += (s, e) => UpdateTimelineUI();
+            // 1. 初始化定时器 (50ms 频率以支持平滑进度和逐字歌词)
+            _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+            _uiTimer.Tick += (s, e) => UpdateUIProgress();
 
-            this.Loaded += async (s, e) => await InitSmtcAsync();
+            // 2. 窗口加载后启动 SMTC
+            this.Loaded += async (s, e) => {
+                await _smtc.InitializeAsync();
+
+                // 监听 Session 列表变化
+                _smtc.SessionsListChanged += async () => {
+                    var sessions = _smtc.GetSessions();
+                    await Dispatcher.InvokeAsync(() => {
+                        ComboSessions.ItemsSource = sessions;
+                        if (sessions.Count > 0 && ComboSessions.SelectedIndex == -1)
+                            ComboSessions.SelectedIndex = 0;
+                    });
+                };
+
+                // 初始加载一次列表
+                var initialSessions = _smtc.GetSessions();
+                ComboSessions.ItemsSource = initialSessions;
+                if (initialSessions.Count > 0) ComboSessions.SelectedIndex = 0;
+            };
         }
 
-        private async Task InitSmtcAsync()
+        private void ComboSessions_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            try
-            {
-                _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+            var selected = ComboSessions.SelectedItem as GlobalSystemMediaTransportControlsSession;
+            if (selected == null) return;
 
-                // 当系统中媒体会话列表变化（App打开/关闭）时刷新下拉框
-                _manager.SessionsChanged += async (s, e) => await RefreshSessionList();
+            _smtc.SelectSession(selected);
 
-                await RefreshSessionList();
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"初始化 SMTC 失败: {ex.Message}");
-            }
+            // 绑定媒体更新事件
+            _smtc.OnMediaUpdated = (props) => {
+                Dispatcher.BeginInvoke(new Action(() => {
+                    // 更新基础信息
+                    TxtTitle.Text = props.Title ?? "未知曲目";
+                    TxtArtist.Text = props.Artist ?? "未知艺术家";
+                    TxtAlbum.Text = props.AlbumTitle ?? "";
+
+                    // 同步设置并加载歌词
+                    _lyric.LyricFolder = TxtLrcPath.Text;
+                    _lyric.LoadAndParse(props.Title, props.Artist);
+
+                    // 更新歌词匹配状态 UI
+                    UpdateLrcUIStatus();
+                }));
+            };
+
+            _uiTimer.Start();
         }
 
-        private async Task RefreshSessionList()
+        private void UpdateUIProgress()
         {
-            if (_manager == null) return;
+            // 获取包含“推算位置”的进度信息
+            var info = _smtc.GetCurrentProgress();
+            if (info == null) return;
 
-            var sessions = _manager.GetSessions();
+            // 更新进度条和时间
+            PrgBar.Maximum = info.TotalSeconds;
+            PrgBar.Value = info.CurrentSeconds;
+            TxtTime.Text = $"{info.CurrentStr} / {info.TotalStr}";
+            TxtStatus.Text = $"状态: {info.Status}";
 
-            await Dispatcher.InvokeAsync(() =>
+            // 更新歌词逻辑
+            var currentPos = TimeSpan.FromSeconds(info.CurrentSeconds);
+            _lyric.UpdateCurrentStatus(currentPos);
+
+            if (_lyric.CurrentLine != null)
             {
-                // 记录当前选中的 ID，以便刷新后尝试恢复选择
-                var currentId = (_ComboSelectedSession)?.SourceAppUserModelId;
-
-                ComboSessions.ItemsSource = sessions;
-
-                if (sessions.Count > 0)
-                {
-                    // 尝试匹配之前选中的，或者默认选第一个
-                    var target = sessions.FirstOrDefault(s => s.SourceAppUserModelId == currentId) ?? sessions[0];
-                    ComboSessions.SelectedItem = target;
-                }
-            });
-        }
-
-        private GlobalSystemMediaTransportControlsSession? _ComboSelectedSession => ComboSessions.SelectedItem as GlobalSystemMediaTransportControlsSession;
-
-        private async void ComboSessions_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            // 1. 断开旧的事件订阅
-            if (_selectedSession != null)
-            {
-                _selectedSession.MediaPropertiesChanged -= OnMediaChanged;
-                _selectedSession.TimelinePropertiesChanged -= OnTimelineChanged;
-                _selectedSession.PlaybackInfoChanged -= OnPlaybackChanged;
-            }
-
-            // 2. 锁定新选中的 Session
-            _selectedSession = _ComboSelectedSession;
-
-            if (_selectedSession != null)
-            {
-                // 3. 订阅新事件
-                _selectedSession.MediaPropertiesChanged += OnMediaChanged;
-                _selectedSession.TimelinePropertiesChanged += OnTimelineChanged;
-                _selectedSession.PlaybackInfoChanged += OnPlaybackChanged;
-
-                // 4. 立即刷新一次 UI
-                await RefreshStaticInfo(_selectedSession);
-                UpdateTimelineUI();
-                _uiTimer.Start();
+                TxtLyricDisplay.Text = _lyric.CurrentLine.Content;
+                TxtLyricTranslation.Text = _lyric.CurrentLine.Translation;
+                TxtNextLyric.Text = _lyric.NextLine != null ? "下一句: " + _lyric.NextLine.Content : "";
             }
             else
             {
-                _uiTimer.Stop();
-                ClearUI();
+                // 如果没有匹配到当前时间的歌词，清空显示
+                TxtLyricDisplay.Text = _lyric.Lines.Count > 0 ? "..." : "(未加载歌词)";
+                TxtLyricTranslation.Text = "";
+                TxtNextLyric.Text = "";
             }
         }
 
-        // 事件响应：歌曲属性改变（切歌）
-        private async void OnMediaChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs args)
-            => await RefreshStaticInfo(sender);
-
-        // 事件响应：播放状态改变（播放/暂停）
-        private void OnPlaybackChanged(GlobalSystemMediaTransportControlsSession sender, PlaybackInfoChangedEventArgs args)
-            => Dispatcher.Invoke(UpdateTimelineUI);
-
-        // 事件响应：时间线跳变（用户拉进度条）
-        private void OnTimelineChanged(GlobalSystemMediaTransportControlsSession sender, TimelinePropertiesChangedEventArgs args)
-            => Dispatcher.Invoke(UpdateTimelineUI);
-
-        private async Task RefreshStaticInfo(GlobalSystemMediaTransportControlsSession session)
+        private void UpdateLrcUIStatus()
         {
-            try
+            if (_lyric.CurrentLyricPath != null)
             {
-                var props = await session.TryGetMediaPropertiesAsync();
-                Dispatcher.Invoke(() =>
-                {
-                    TxtTitle.Text = props.Title ?? "未知曲目";
-                    TxtArtist.Text = props.Artist ?? "未知艺术家";
-                    TxtAlbum.Text = props.AlbumTitle ?? "未知专辑";
-                });
+                TxtLrcStatus.Text = "找到: " + Path.GetFileName(_lyric.CurrentLyricPath);
+                TxtLrcStatus.Foreground = System.Windows.Media.Brushes.DarkGreen;
             }
-            catch { /* 忽略读取冲突 */ }
-        }
-
-        private void UpdateTimelineUI()
-        {
-            if (_selectedSession == null) return;
-
-            try
+            else
             {
-                var timeline = _selectedSession.GetTimelineProperties();
-                var playback = _selectedSession.GetPlaybackInfo();
-
-                TimeSpan actualPos;
-                if (playback.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
-                {
-                    // 加上自上次更新以来的时间差
-                    var timePassed = DateTimeOffset.Now - timeline.LastUpdatedTime;
-                    actualPos = timeline.Position + TimeSpan.FromTicks((long)(timePassed.Ticks * (playback.PlaybackRate ?? 1.0)));
-                }
-                else
-                {
-                    actualPos = timeline.Position;
-                }
-
-                // 修正溢出
-                if (actualPos > timeline.EndTime) actualPos = timeline.EndTime;
-                if (actualPos < TimeSpan.Zero) actualPos = TimeSpan.Zero;
-
-                Dispatcher.Invoke(() =>
-                {
-                    TxtStatus.Text = $"状态: {playback.PlaybackStatus}";
-                    PrgBar.Maximum = timeline.EndTime.TotalSeconds;
-                    PrgBar.Value = actualPos.TotalSeconds;
-                    TxtTime.Text = $"{FormatTime(actualPos)} / {FormatTime(timeline.EndTime)}";
-                });
+                TxtLrcStatus.Text = "未找到歌词文件";
+                TxtLrcStatus.Foreground = System.Windows.Media.Brushes.Red;
+                // 没找到文件时，彻底清空歌词区
+                TxtLyricDisplay.Text = "";
+                TxtLyricTranslation.Text = "";
+                TxtNextLyric.Text = "";
             }
-            catch { }
         }
 
-        private void ClearUI()
+        private void BtnBrowse_Click(object sender, RoutedEventArgs e)
         {
-            Dispatcher.Invoke(() => {
-                TxtTitle.Text = "暂无播放内容";
-                TxtArtist.Text = "-";
-                TxtStatus.Text = "状态: Stopped";
-                PrgBar.Value = 0;
-            });
+            var dialog = new Microsoft.Win32.OpenFileDialog { CheckFileExists = false, FileName = "选择此文件夹" };
+            if (dialog.ShowDialog() == true)
+            {
+                TxtLrcPath.Text = Path.GetDirectoryName(dialog.FileName);
+            }
         }
-
-        private string FormatTime(TimeSpan t) => $"{(int)t.TotalMinutes:D2}:{t.Seconds:D2}";
     }
 }
