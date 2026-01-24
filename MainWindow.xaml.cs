@@ -156,19 +156,16 @@ namespace MediaMonitor
         }
 
         // 修复点 3：找回各种数据包的 HEX 预览和协议解析预览
-        private void SendAndLog(byte[] data, bool force)
+        private void SendAndLog(byte[] data, bool force = false)
         {
-            if (data == null) return;
+            if (data == null || !_serial.IsOpen) return;
             _serial.SendRaw(data);
 
             Dispatcher.Invoke(() => {
-                var p = new Paragraph { Margin = new Thickness(0, 2, 0, 2) };
+                var p = new Paragraph { Margin = new Thickness(0, 0, 0, 8) };
                 string hex = BitConverter.ToString(data).Replace("-", " ");
-
-                // 1. 第一行：显示 16 进制原始数据
                 p.Inlines.Add(new Run(hex + "\n") { Foreground = Brushes.DimGray, FontSize = 10 });
 
-                // 2. 第二行：显示协议深度解析
                 if (data.Length > 2 && data[0] == 0xAA)
                 {
                     byte type = data[1];
@@ -177,50 +174,53 @@ namespace MediaMonitor
 
                     switch (type)
                     {
-                        case 0x10:
-                            p.Inlines.Add(new Run("┃ [元数据] 更新标题/艺人") { Foreground = Brushes.Gold });
+                        case 0x10: // 元数据：解析 标题、艺人、唱片集
+                            try
+                            {
+                                int tLen = data[3];
+                                string title = enc.GetString(data, 4, tLen);
+                                int aLen = data[4 + tLen];
+                                string artist = enc.GetString(data, 5 + tLen, aLen);
+                                int albLen = data[5 + tLen + aLen];
+                                string album = enc.GetString(data, 6 + tLen + aLen, albLen);
+                                p.Inlines.Add(new Run($"┃ [元数据] 🎵:{title}  👤:{artist}  💿:{album}") { Foreground = Brushes.Gold});
+                            }
+                            catch { p.Inlines.Add(new Run("┃ [元数据] 解析失败")); }
                             break;
-                        case 0x12:
-                            string lrc = enc.GetString(data, 5, len - 2);
-                            p.Inlines.Add(new Run($"┃ [歌词] 行{data[3]}: {lrc}") { Foreground = Brushes.LimeGreen });
+
+                        case 0x11: // 同步包
+                            uint cMs = BitConverter.ToUInt16(data, 4); // 这里根据你 Smtc 的定义取值
+                            p.Inlines.Add(new Run($"┃ [同步] 状态:{(data[3] == 1 ? "播放" : "暂停")} 进度:{cMs}ms") { Foreground = Brushes.DeepSkyBlue });
                             break;
-                        case 0x13:
-                            string trans = enc.GetString(data, 5, len - 2);
-                            p.Inlines.Add(new Run($"┃ [翻译] 行{data[3]}: {trans}") { Foreground = Brushes.Orange });
+
+                        case 0x12: // 普通歌词
+                            p.Inlines.Add(new Run($"┃ [歌词] 行{data[3]}: {enc.GetString(data, 5, len - 2)}") { Foreground = Brushes.LimeGreen });
                             break;
-                        case 0x14:
+
+                        case 0x13: // 翻译
+                            p.Inlines.Add(new Run($"┃ [翻译] 行{data[3]}: {enc.GetString(data, 5, len - 2)}") { Foreground = Brushes.Orange });
+                            break;
+
+                        case 0x14: // 逐字深度解析
                             ushort row = BitConverter.ToUInt16(data, 3);
                             int wordCount = data[5];
-                            p.Inlines.Add(new Run($"┃ [逐字行{row}] 词数:{wordCount} -> ") { Foreground = Brushes.Cyan });
-
-                            // 深度解析逐字流
+                            p.Inlines.Add(new Run($"┃ [逐字{row}] ") { Foreground = Brushes.Cyan });
                             int ptr = 6;
                             for (int i = 0; i < wordCount; i++)
                             {
                                 if (ptr + 3 > data.Length) break;
                                 ushort offset = BitConverter.ToUInt16(data, ptr);
                                 byte wLen = data[ptr + 2];
-                                if (ptr + 3 + wLen > data.Length) break;
-
-                                string word = enc.GetString(data, ptr + 3, wLen);
-                                p.Inlines.Add(new Run($"{word}") { Foreground = Brushes.White });
-                                p.Inlines.Add(new Run($"({offset}ms) ") { Foreground = Brushes.Gray, FontSize = 9 });
-
+                                string wText = enc.GetString(data, ptr + 3, wLen);
+                                p.Inlines.Add(new Run(wText) { Foreground = Brushes.White });
+                                p.Inlines.Add(new Run($"<{offset}> ") { Foreground = Brushes.Gray, FontSize = 9 });
                                 ptr += (3 + wLen);
                             }
                             break;
-                        default:
-                            p.Inlines.Add(new Run($"┃ [未知] Type:0x{type:X2}"));
-                            break;
                     }
                 }
-
                 HexPreview.Document.Blocks.Add(p);
-
-                // 限制日志行数，防止 UI 内存溢出导致卡顿
-                if (HexPreview.Document.Blocks.Count > 60)
-                    HexPreview.Document.Blocks.Remove(HexPreview.Document.Blocks.FirstBlock);
-
+                if (HexPreview.Document.Blocks.Count > 50) HexPreview.Document.Blocks.Remove(HexPreview.Document.Blocks.FirstBlock);
                 HexPreview.ScrollToEnd();
             });
         }
