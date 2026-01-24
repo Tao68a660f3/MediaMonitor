@@ -27,7 +27,7 @@ namespace MediaMonitor
             if (_serialPort.IsOpen && data != null) _serialPort.Write(data, 0, data.Length);
         }
 
-        private byte[] GetEncodedBytes(string text)
+        public byte[] GetEncodedBytes(string text)
         {
             Encoding enc = SelectedEncoding == EncodingType.UTF8 ? Encoding.UTF8 : Encoding.GetEncoding("GB2312");
             return enc.GetBytes(text ?? "");
