@@ -61,11 +61,14 @@ namespace MediaMonitor
         private void ParseFile(string path)
         {
             var raw = File.ReadAllLines(path);
-            var lRegex = new Regex(@"^\[(?<t>\d{2,}:\d{2}(?:\.\d{2,3})?)\](?<c>.*)$");
-            var wRegex = new Regex(@"<(?<t>\d{2,}:\d{2}\.\d{2,3})>(?<w>[^<]*)");
+            // 修改点 1：去掉行首锚定 ^，并将括号匹配改为支持 [ ] 和 < >
+            var lRegex = new Regex(@"[\[\<](?<t>\d{2,}:\d{2}(?:\.\d{2,3})?)[\]\>](?<c>.*)$");
+            // 修改点 2：逐字正则同样支持 [ ] 和 < >
+            var wRegex = new Regex(@"[\[\<](?<t>\d{2,}:\d{2}\.\d{2,3})[\]\>](?<w>[^\[\<]*)");
 
             foreach (var line in raw)
             {
+                // 逻辑保持原样，仅正则表达式变得更宽容
                 var m = lRegex.Match(line.Trim());
                 if (!m.Success) continue;
 
@@ -73,7 +76,7 @@ namespace MediaMonitor
                 {
                     string contentBody = m.Groups["c"].Value.Trim();
 
-                    // 处理翻译（如果同一时间点已有行，视为翻译）
+                    // 处理翻译逻辑保持原样
                     var existing = Lines.FirstOrDefault(l => Math.Abs((l.Time - t).TotalMilliseconds) < 50);
                     if (existing != null && !wRegex.IsMatch(contentBody))
                     {
@@ -89,6 +92,7 @@ namespace MediaMonitor
                         foreach (Match w in wordMatches)
                         {
                             if (TimeSpan.TryParse("00:" + w.Groups["t"].Value, out TimeSpan wt))
+                                // 保持你原始的字段名 Word 和 Time
                                 newLine.Words.Add(new WordInfo { Time = wt, Word = w.Groups["w"].Value });
                         }
                         newLine.Content = string.Join("", newLine.Words.Select(x => x.Word));
