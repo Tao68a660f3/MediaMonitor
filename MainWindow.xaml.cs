@@ -1,6 +1,8 @@
 ﻿using System;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Threading;
 using Windows.Media.Control;
 
@@ -9,13 +11,14 @@ namespace MediaMonitor
     public partial class MainWindow : Window
     {
         private GlobalSystemMediaTransportControlsSessionManager? _manager;
-        private DispatcherTimer _uiTimer; // 用于平滑更新进度条
+        private GlobalSystemMediaTransportControlsSession? _selectedSession;
+        private DispatcherTimer _uiTimer;
 
         public MainWindow()
         {
             InitializeComponent();
 
-            // 初始化定时器，每秒更新一次UI进度
+            // 初始化定时器：用于平滑更新进度条
             _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             _uiTimer.Tick += (s, e) => UpdateTimelineUI();
 
@@ -24,106 +27,147 @@ namespace MediaMonitor
 
         private async Task InitSmtcAsync()
         {
-            _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-            _manager.CurrentSessionChanged += async (s, e) => await UpdateAllAsync();
-            await UpdateAllAsync();
+            try
+            {
+                _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+
+                // 当系统中媒体会话列表变化（App打开/关闭）时刷新下拉框
+                _manager.SessionsChanged += async (s, e) => await RefreshSessionList();
+
+                await RefreshSessionList();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"初始化 SMTC 失败: {ex.Message}");
+            }
         }
 
-        private async Task UpdateAllAsync()
+        private async Task RefreshSessionList()
         {
-            var session = _manager?.GetCurrentSession();
-            if (session != null)
+            if (_manager == null) return;
+
+            var sessions = _manager.GetSessions();
+
+            await Dispatcher.InvokeAsync(() =>
             {
-                // 1. 订阅所有事件
-                session.MediaPropertiesChanged -= OnMediaChanged;
-                session.MediaPropertiesChanged += OnMediaChanged;
+                // 记录当前选中的 ID，以便刷新后尝试恢复选择
+                var currentId = (_ComboSelectedSession)?.SourceAppUserModelId;
 
-                session.TimelinePropertiesChanged -= OnTimelineChanged;
-                session.TimelinePropertiesChanged += OnTimelineChanged;
+                ComboSessions.ItemsSource = sessions;
 
-                session.PlaybackInfoChanged -= OnPlaybackChanged;
-                session.PlaybackInfoChanged += OnPlaybackChanged;
+                if (sessions.Count > 0)
+                {
+                    // 尝试匹配之前选中的，或者默认选第一个
+                    var target = sessions.FirstOrDefault(s => s.SourceAppUserModelId == currentId) ?? sessions[0];
+                    ComboSessions.SelectedItem = target;
+                }
+            });
+        }
 
-                // 2. 初始刷新
-                await RefreshStaticInfo(session);
+        private GlobalSystemMediaTransportControlsSession? _ComboSelectedSession => ComboSessions.SelectedItem as GlobalSystemMediaTransportControlsSession;
+
+        private async void ComboSessions_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            // 1. 断开旧的事件订阅
+            if (_selectedSession != null)
+            {
+                _selectedSession.MediaPropertiesChanged -= OnMediaChanged;
+                _selectedSession.TimelinePropertiesChanged -= OnTimelineChanged;
+                _selectedSession.PlaybackInfoChanged -= OnPlaybackChanged;
+            }
+
+            // 2. 锁定新选中的 Session
+            _selectedSession = _ComboSelectedSession;
+
+            if (_selectedSession != null)
+            {
+                // 3. 订阅新事件
+                _selectedSession.MediaPropertiesChanged += OnMediaChanged;
+                _selectedSession.TimelinePropertiesChanged += OnTimelineChanged;
+                _selectedSession.PlaybackInfoChanged += OnPlaybackChanged;
+
+                // 4. 立即刷新一次 UI
+                await RefreshStaticInfo(_selectedSession);
                 UpdateTimelineUI();
                 _uiTimer.Start();
             }
             else
             {
                 _uiTimer.Stop();
-                Dispatcher.Invoke(() => TxtTitle.Text = "无活动会话");
+                ClearUI();
             }
         }
 
-        // 静态信息：歌名、歌手、专辑
+        // 事件响应：歌曲属性改变（切歌）
+        private async void OnMediaChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs args)
+            => await RefreshStaticInfo(sender);
+
+        // 事件响应：播放状态改变（播放/暂停）
+        private void OnPlaybackChanged(GlobalSystemMediaTransportControlsSession sender, PlaybackInfoChangedEventArgs args)
+            => Dispatcher.Invoke(UpdateTimelineUI);
+
+        // 事件响应：时间线跳变（用户拉进度条）
+        private void OnTimelineChanged(GlobalSystemMediaTransportControlsSession sender, TimelinePropertiesChangedEventArgs args)
+            => Dispatcher.Invoke(UpdateTimelineUI);
+
         private async Task RefreshStaticInfo(GlobalSystemMediaTransportControlsSession session)
         {
-            var props = await session.TryGetMediaPropertiesAsync();
-            var playback = session.GetPlaybackInfo();
-
-            Dispatcher.Invoke(() => {
-                TxtTitle.Text = props.Title;
-                TxtArtist.Text = props.Artist;
-                TxtAlbum.Text = props.AlbumTitle;
-                TxtStatus.Text = $"状态: {playback.PlaybackStatus} | 倍速: {playback.PlaybackRate}x";
-            });
+            try
+            {
+                var props = await session.TryGetMediaPropertiesAsync();
+                Dispatcher.Invoke(() =>
+                {
+                    TxtTitle.Text = props.Title ?? "未知曲目";
+                    TxtArtist.Text = props.Artist ?? "未知艺术家";
+                    TxtAlbum.Text = props.AlbumTitle ?? "未知专辑";
+                });
+            }
+            catch { /* 忽略读取冲突 */ }
         }
 
-        // 事件：媒体改变
-        private async void OnMediaChanged(GlobalSystemMediaTransportControlsSession s, MediaPropertiesChangedEventArgs a)
-            => await RefreshStaticInfo(s);
-
-        // 事件：播放状态改变（播放/暂停/快进）
-        private void OnPlaybackChanged(GlobalSystemMediaTransportControlsSession s, PlaybackInfoChangedEventArgs a)
-        {
-            // 状态一切换，立即执行一次进度更新，而不是等定时器触发
-            Dispatcher.Invoke(() => UpdateTimelineUI());
-
-            var info = s.GetPlaybackInfo();
-            Dispatcher.Invoke(() => TxtStatus.Text = $"状态: {info.PlaybackStatus}");
-        }
-
-        // 事件：时间线改变（手动拉进度条、切歌）
-        private void OnTimelineChanged(GlobalSystemMediaTransportControlsSession s, TimelinePropertiesChangedEventArgs a)
-            => UpdateTimelineUI();
-
-        // 核心：计算并展示时间线
         private void UpdateTimelineUI()
         {
-            var session = _manager?.GetCurrentSession();
-            if (session == null) return;
+            if (_selectedSession == null) return;
 
-            var timeline = session.GetTimelineProperties();
-            var playbackInfo = session.GetPlaybackInfo(); // 获取播放状态
-
-            TimeSpan actualPosition;
-
-            // 关键逻辑：判断是否正在播放
-            if (playbackInfo.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+            try
             {
-                // 正在播放：计算偏移量（基准位置 + 经历的时间 * 倍速）
-                var timePassed = DateTimeOffset.Now - timeline.LastUpdatedTime;
-                double rate = playbackInfo.PlaybackRate ?? 1.0;
-                actualPosition = timeline.Position + TimeSpan.FromTicks((long)(timePassed.Ticks * rate));
-            }
-            else
-            {
-                // 已暂停或停止：直接使用 Windows 记录的最后位置，不再累加时间
-                actualPosition = timeline.Position;
-            }
+                var timeline = _selectedSession.GetTimelineProperties();
+                var playback = _selectedSession.GetPlaybackInfo();
 
-            // 边界检查：不要超过总时长，也不要小于0
-            if (actualPosition > timeline.EndTime) actualPosition = timeline.EndTime;
-            if (actualPosition < TimeSpan.Zero) actualPosition = TimeSpan.Zero;
+                TimeSpan actualPos;
+                if (playback.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                {
+                    // 加上自上次更新以来的时间差
+                    var timePassed = DateTimeOffset.Now - timeline.LastUpdatedTime;
+                    actualPos = timeline.Position + TimeSpan.FromTicks((long)(timePassed.Ticks * (playback.PlaybackRate ?? 1.0)));
+                }
+                else
+                {
+                    actualPos = timeline.Position;
+                }
 
+                // 修正溢出
+                if (actualPos > timeline.EndTime) actualPos = timeline.EndTime;
+                if (actualPos < TimeSpan.Zero) actualPos = TimeSpan.Zero;
+
+                Dispatcher.Invoke(() =>
+                {
+                    TxtStatus.Text = $"状态: {playback.PlaybackStatus}";
+                    PrgBar.Maximum = timeline.EndTime.TotalSeconds;
+                    PrgBar.Value = actualPos.TotalSeconds;
+                    TxtTime.Text = $"{FormatTime(actualPos)} / {FormatTime(timeline.EndTime)}";
+                });
+            }
+            catch { }
+        }
+
+        private void ClearUI()
+        {
             Dispatcher.Invoke(() => {
-                PrgBar.Maximum = timeline.EndTime.TotalSeconds;
-                PrgBar.Value = actualPosition.TotalSeconds;
-                TxtTime.Text = $"{FormatTime(actualPosition)} / {FormatTime(timeline.EndTime)}";
-
-                // 【串口预留】如果你要发给硬件，可以在这里判断：
-                // if(playbackInfo.PlaybackStatus == ...Playing) SendToSerial(actualPosition);
+                TxtTitle.Text = "暂无播放内容";
+                TxtArtist.Text = "-";
+                TxtStatus.Text = "状态: Stopped";
+                PrgBar.Value = 0;
             });
         }
 

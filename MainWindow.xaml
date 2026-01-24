@@ -1,20 +1,31 @@
 ﻿<Window x:Class="MediaMonitor.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:MediaMonitor"
-        mc:Ignorable="d"
-        Title="MainWindow" Height="450" Width="800">
-    <Grid>
-        <StackPanel Margin="20">
-            <TextBlock x:Name="TxtTitle" FontSize="20" FontWeight="Bold" Text="歌名"/>
-            <TextBlock x:Name="TxtArtist" FontSize="16" Foreground="Gray" Text="歌手"/>
-            <TextBlock x:Name="TxtAlbum" FontSize="14" Text="专辑"/>
-            <Separator Margin="0,10"/>
-            <TextBlock x:Name="TxtStatus" Text="状态: Unknown"/>
-            <ProgressBar x:Name="PrgBar" Height="10" Margin="0,5"/>
-            <TextBlock x:Name="TxtTime" HorizontalAlignment="Right" Text="00:00 / 00:00"/>
+        Title="SMTC 媒体监控助手" Height="350" Width="450" Background="#F3F3F3">
+    <Grid Margin="20">
+        <StackPanel>
+            <TextBlock Text="选择媒体源:" FontWeight="Bold" Margin="0,0,0,5"/>
+            <ComboBox x:Name="ComboSessions" 
+                      DisplayMemberPath="SourceAppUserModelId" 
+                      SelectionChanged="ComboSessions_SelectionChanged" 
+                      Margin="0,0,0,20"/>
+
+            <Border Background="White" CornerRadius="8" Padding="15">
+                <StackPanel>
+                    <TextBlock x:Name="TxtTitle" Text="暂无播放" FontSize="22" FontWeight="Bold" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="TxtArtist" Text="-" FontSize="16" Foreground="#666666" Margin="0,5,0,0"/>
+                    <TextBlock x:Name="TxtAlbum" Text="-" FontSize="12" Foreground="#999999" Margin="0,2,0,10"/>
+
+                    <Grid>
+                        <TextBlock x:Name="TxtStatus" Text="状态: Stopped" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="TxtTime" Text="00:00 / 00:00" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                    </Grid>
+
+                    <ProgressBar x:Name="PrgBar" Height="8" Margin="0,10,0,0" Foreground="#0078D4" Background="#E5E5E5" BorderThickness="0"/>
+                </StackPanel>
+            </Border>
+
+            <TextBlock Text="提示：若列表为空，请尝试播放一段音频。" Margin="0,15,0,0" Foreground="Gray" FontSize="11" HorizontalAlignment="Center"/>
         </StackPanel>
     </Grid>
 </Window>
