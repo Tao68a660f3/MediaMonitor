@@ -32,7 +32,7 @@ namespace MediaMonitor
             _uiTimer.Tick += (s, e) => UpdateStep();
 
             ChkAdvancedMode.Click += (s, e) => Invalidate();
-            ChkIncremental.Click += (s, e) => Invalidate();
+            // ChkIncremental 已经在 XAML 中隐藏
 
             InitApp();
             LoadSettings();
@@ -43,6 +43,10 @@ namespace MediaMonitor
         private async void InitApp()
         {
             await _smtc.InitializeAsync();
+
+            // 使用你代码中已有的 SessionsListChanged 事件
+            _smtc.SessionsListChanged += () => Dispatcher.Invoke(() => RefreshSessions());
+
             _smtc.OnMediaUpdated += (props) => Dispatcher.Invoke(() => {
                 TxtTitle.Text = props.Title;
                 TxtArtist.Text = props.Artist;
@@ -58,56 +62,72 @@ namespace MediaMonitor
             ComboEncoding.SelectionChanged += (s, e) => {
                 if (_serial != null)
                 {
-                    // 同步串口对象的编码
                     _serial.SelectedEncoding = (EncodingType)ComboEncoding.SelectedIndex;
-                    // 清空预览，防止旧的乱码干扰视线
                     HexPreview.Document.Blocks.Clear();
-                    // 重置增量指纹，强制触发一次全量发送
                     Invalidate();
                 }
             };
 
-            ComboSessions.ItemsSource = _smtc.GetSessions();
+            RefreshSessions();
             _uiTimer.Start();
         }
 
         private void UpdateStep()
         {
-            var p = _smtc.GetCurrentProgress();
-            if (p == null) return;
-
-            // UI 基础进度刷新
-            PbProgress.Maximum = p.TotalSeconds;
-            PbProgress.Value = p.CurrentSeconds;
-            TxtTime.Text = $"{p.CurrentStr} / {p.TotalStr}";
-
-            TimeSpan curTime = TimeSpan.FromSeconds(p.CurrentSeconds);
-            int cIdx = _lyric.Lines.FindLastIndex(l => l.Time <= curTime);
-
-            // 【补回歌词预览】刷新界面上的 TextBlock
-            if (cIdx != -1)
+            try
             {
-                var line = _lyric.Lines[cIdx];
-                TxtLyricDisplay.Text = line.Content + (string.IsNullOrEmpty(line.Translation) ? "" : "\n" + line.Translation);
+                var p = _smtc.GetCurrentProgress(); //
+                if (p == null)
+                {
+                    ResetUI();
+                    return;
+                }
+
+                PbProgress.Maximum = p.TotalSeconds;
+                PbProgress.Value = p.CurrentSeconds;
+                TxtTime.Text = $"{p.CurrentStr} / {p.TotalStr}";
+
+                TimeSpan curTime = TimeSpan.FromSeconds(p.CurrentSeconds);
+                int cIdx = _lyric.Lines.FindLastIndex(l => l.Time <= curTime);
+
+                if (cIdx != -1)
+                {
+                    var line = _lyric.Lines[cIdx];
+                    TxtLyricDisplay.Text = line.Content + (string.IsNullOrEmpty(line.Translation) ? "" : "\n" + line.Translation);
+                }
+                else { TxtLyricDisplay.Text = ""; }
+
+                if (!_serial.IsOpen) return;
+
+                if (ChkAdvancedMode.IsChecked == true)
+                {
+                    _syncTick++;
+                    if (_syncTick % 10 == 0)
+                        _serial.SendRaw(_serial.BuildSync(p.Status == "Playing", (uint)curTime.TotalMilliseconds, (uint)p.TotalSeconds * 1000));
+                }
+
+                if (cIdx != _lastProcessedCIdx)
+                {
+                    _lastProcessedCIdx = cIdx;
+                    HandleOutput(cIdx);
+                }
             }
-            else { TxtLyricDisplay.Text = ""; }
-
-            if (!_serial.IsOpen) return;
-
-            // 同步包逻辑
-            if (ChkAdvancedMode.IsChecked == true)
+            catch
             {
-                _syncTick++;
-                if (_syncTick % 10 == 0)
-                    _serial.SendRaw(_serial.BuildSync(p.Status == "Playing", (uint)curTime.TotalMilliseconds, (uint)p.TotalSeconds * 1000));
+                ResetUI();
             }
+        }
 
-            // 歌词处理
-            if (cIdx != _lastProcessedCIdx)
-            {
-                _lastProcessedCIdx = cIdx;
-                HandleOutput(cIdx);
-            }
+        private void ResetUI()
+        {
+            if (TxtTitle.Text == "无媒体") return;
+            Dispatcher.Invoke(() => {
+                TxtTitle.Text = "无媒体";
+                TxtArtist.Text = "等待播放器开启...";
+                TxtLyricDisplay.Text = "";
+                PbProgress.Value = 0;
+                _lastProcessedCIdx = -2;
+            });
         }
 
         private void HandleOutput(int cIdx)
@@ -115,20 +135,16 @@ namespace MediaMonitor
             if (cIdx == -1 || cIdx >= _lyric.Lines.Count) return;
             var line = _lyric.Lines[cIdx];
 
-            // --- 模式 A: 纯文本模式 ---
             if (ChkAdvancedMode.IsChecked == false)
             {
                 string fullContent = line.Content;
-                // 如果勾选了翻译占用，把翻译拼在正文后面（或者你可以选择分两次裸发）
                 if (ChkTransOccupies.IsChecked == true && !string.IsNullOrEmpty(line.Translation))
                     fullContent += " " + line.Translation;
 
                 if (ChkIncremental.IsChecked == true && _lastSentFingerprints.TryGetValue(-1, out string old) && old == fullContent) return;
                 _lastSentFingerprints[-1] = fullContent;
-
                 SendAndLog(_serial.GetEncodedBytes(fullContent), isRawText: true);
             }
-            // --- 模式 B: 高级协议模式 ---
             else
             {
                 int lineLimit = int.TryParse(TxtScreenLines.Text, out int sl) ? sl : 3;
@@ -139,8 +155,6 @@ namespace MediaMonitor
                 for (int i = startIdx; i < _lyric.Lines.Count && currentRow < lineLimit; i++)
                 {
                     var l = _lyric.Lines[i];
-
-                    // 1. 发送主歌词 (0x12 或 0x14)
                     string f1 = $"R{currentRow}_{l.Content}";
                     if (!(ChkIncremental.IsChecked == true && _lastSentFingerprints.TryGetValue(currentRow, out string o1) && o1 == f1))
                     {
@@ -152,7 +166,6 @@ namespace MediaMonitor
                     }
                     currentRow++;
 
-                    // 2. 发送翻译 (0x13) - 只有开启占用行且有翻译时才发
                     if (currentRow < lineLimit && ChkTransOccupies.IsChecked == true && !string.IsNullOrEmpty(l.Translation))
                     {
                         string f2 = $"R{currentRow}_T_{l.Translation}";
@@ -173,62 +186,29 @@ namespace MediaMonitor
             _serial.SendRaw(data);
 
             Dispatcher.Invoke(() => {
-                var p = new Paragraph { Margin = new Thickness(0, 0, 0, 5) };
+                var p = new Paragraph { Margin = new Thickness(0, 0, 0, 2) };
+                Encoding viewEnc = (ComboEncoding.SelectedIndex == 1) ? Encoding.GetEncoding("GB2312") : Encoding.UTF8;
 
-                // --- 核心修复：每次发送时实时获取当前 UI 选定的编码 ---
-                Encoding viewEnc;
-                try
-                {
-                    // 根据 ComboBox 指数实时选择编码
-                    viewEnc = (ComboEncoding.SelectedIndex == 1)
-                        ? Encoding.GetEncoding("GB2312")
-                        : Encoding.UTF8;
-                }
-                catch
-                {
-                    viewEnc = Encoding.UTF8; // 保底方案
-                }
-
-                // 1. 显示原始 HEX (无论如何不会乱码)
                 string hex = BitConverter.ToString(data).Replace("-", " ");
                 p.Inlines.Add(new Run(hex + "\n") { Foreground = Brushes.DimGray, FontSize = 10 });
 
-                // 2. 文本解析部分
                 if (isRawText)
                 {
-                    // 纯文本模式：直接用当前编码还原
-                    string text = viewEnc.GetString(data);
-                    p.Inlines.Add(new Run($"┃ [纯文本发送] {text}") { Foreground = Brushes.White, FontWeight = FontWeights.Bold });
+                    p.Inlines.Add(new Run($"┃ [纯文本] {viewEnc.GetString(data)}") { Foreground = Brushes.White });
                 }
                 else if (data.Length > 2 && data[0] == 0xAA)
                 {
                     byte type = data[1];
                     switch (type)
                     {
-                        case 0x10: // 元数据
-                            p.Inlines.Add(new Run(DecodeMeta(data, viewEnc)) { Foreground = Brushes.Gold });
-                            break;
-                        case 0x12: // 协议歌词
-                            string lyric = viewEnc.GetString(data, 5, data[2] - 2);
-                            p.Inlines.Add(new Run($"┃ [协议歌词] {lyric}") { Foreground = Brushes.LimeGreen });
-                            break;
-                        case 0x13: // 翻译包
-                            string trans = viewEnc.GetString(data, 5, data[2] - 2);
-                            p.Inlines.Add(new Run($"┃ [协议翻译] 行{data[3]}: {trans}") { Foreground = Brushes.Orange });
-                            break;
-                        case 0x14: // 逐字包
-                            p.Inlines.Add(new Run($"┃ [协议逐字] 行{data[3]}: ") { Foreground = Brushes.Cyan });
-                            p.Inlines.Add(new Run(DecodeWords(data, viewEnc)));
-                            break;
+                        case 0x10: p.Inlines.Add(new Run(DecodeMeta(data, viewEnc)) { Foreground = Brushes.Gold }); break;
+                        case 0x12: p.Inlines.Add(new Run($"┃ [歌词] {viewEnc.GetString(data, 5, data[2] - 2)}") { Foreground = Brushes.LimeGreen }); break;
+                        case 0x13: p.Inlines.Add(new Run($"┃ [翻译] {viewEnc.GetString(data, 5, data[2] - 2)}") { Foreground = Brushes.Orange }); break;
+                        case 0x14: p.Inlines.Add(new Run($"┃ [逐字] {DecodeWords(data, viewEnc)}") { Foreground = Brushes.Cyan }); break;
                     }
                 }
-
                 HexPreview.Document.Blocks.Add(p);
-
-                // 自动清理，防止内存占用过高
-                if (HexPreview.Document.Blocks.Count > 100)
-                    HexPreview.Document.Blocks.Remove(HexPreview.Document.Blocks.FirstBlock);
-
+                if (HexPreview.Document.Blocks.Count > 50) HexPreview.Document.Blocks.Remove(HexPreview.Document.Blocks.FirstBlock);
                 HexPreview.ScrollToEnd();
             });
         }
@@ -260,12 +240,77 @@ namespace MediaMonitor
             return sb.ToString();
         }
 
-        private void RefreshSessions() { ComboSessions.ItemsSource = _smtc.GetSessions(); if (ComboSessions.Items.Count > 0) ComboSessions.SelectedIndex = 0; }
-        private void ComboSessions_SelectionChanged(object sender, SelectionChangedEventArgs e) => _smtc.SelectSession(ComboSessions.SelectedItem as GlobalSystemMediaTransportControlsSession);
-        private void BtnSerialConn_Click(object sender, RoutedEventArgs e) { try { if (!_serial.IsOpen) { _serial.SelectedEncoding = (EncodingType)ComboEncoding.SelectedIndex; _serial.Connect(ComboPorts.Text, 115200); BtnSerialConn.Content = "断开串口"; } else { _serial.Disconnect(); BtnSerialConn.Content = "连接串口"; } } catch (Exception ex) { MessageBox.Show(ex.Message); } }
-        private void LoadSettings() { var cfg = ConfigService.Load(); ComboPorts.ItemsSource = _serial.GetPortNames(); ComboPorts.Text = cfg.PortName; ComboEncoding.SelectedIndex = cfg.EncodingIndex; TxtLrcPath.Text = cfg.LyricPath; TxtPatterns.Text = cfg.Patterns; TxtScreenLines.Text = cfg.ScreenLines.ToString(); TxtOffset.Text = cfg.Offset.ToString(); ChkAdvancedMode.IsChecked = cfg.AdvancedMode; ChkIncremental.IsChecked = cfg.Incremental; ChkTransOccupies.IsChecked = cfg.TransOccupies; _lyric.LyricFolder = cfg.LyricPath; }
-        private void SaveAppSettings() { ConfigService.Save(new AppConfig { PortName = ComboPorts.Text, EncodingIndex = ComboEncoding.SelectedIndex, LyricPath = TxtLrcPath.Text, Patterns = TxtPatterns.Text, ScreenLines = int.TryParse(TxtScreenLines.Text, out int sl) ? sl : 3, Offset = int.TryParse(TxtOffset.Text, out int os) ? os : 1, AdvancedMode = ChkAdvancedMode.IsChecked ?? true, Incremental = ChkIncremental.IsChecked ?? true, TransOccupies = ChkTransOccupies.IsChecked ?? true }); }
-        private void BtnBrowse_Click(object sender, RoutedEventArgs e) { var d = new Microsoft.Win32.OpenFileDialog { CheckFileExists = false, FileName = "选择目录" }; if (d.ShowDialog() == true) TxtLrcPath.Text = Path.GetDirectoryName(d.FileName); }
-        protected override void OnClosing(System.ComponentModel.CancelEventArgs e) { SaveAppSettings(); base.OnClosing(e); }
+        private void RefreshSessions()
+        {
+            var sessions = _smtc.GetSessions(); //
+            ComboSessions.ItemsSource = sessions;
+            if (ComboSessions.SelectedIndex == -1 && sessions.Any()) ComboSessions.SelectedIndex = 0;
+        }
+
+        private void ComboSessions_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+            _smtc.SelectSession(ComboSessions.SelectedItem as GlobalSystemMediaTransportControlsSession); //
+
+        private void BtnSerialConn_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (!_serial.IsOpen)
+                {
+                    _serial.SelectedEncoding = (EncodingType)ComboEncoding.SelectedIndex;
+                    _serial.Connect(ComboPorts.Text, 115200);
+                    BtnSerialConn.Content = "断开串口";
+                }
+                else
+                {
+                    _serial.Disconnect();
+                    BtnSerialConn.Content = "连接串口";
+                }
+            }
+            catch (Exception ex) { MessageBox.Show(ex.Message); }
+        }
+
+        private void LoadSettings()
+        {
+            var cfg = ConfigService.Load();
+            ComboPorts.ItemsSource = _serial.GetPortNames();
+            ComboPorts.Text = cfg.PortName;
+            ComboEncoding.SelectedIndex = cfg.EncodingIndex;
+            TxtLrcPath.Text = cfg.LyricPath;
+            TxtPatterns.Text = cfg.Patterns;
+            TxtScreenLines.Text = cfg.ScreenLines.ToString();
+            TxtOffset.Text = cfg.Offset.ToString();
+            ChkAdvancedMode.IsChecked = cfg.AdvancedMode;
+            ChkIncremental.IsChecked = cfg.Incremental;
+            ChkTransOccupies.IsChecked = cfg.TransOccupies;
+            _lyric.LyricFolder = cfg.LyricPath;
+        }
+
+        private void SaveAppSettings()
+        {
+            ConfigService.Save(new AppConfig
+            {
+                PortName = ComboPorts.Text,
+                EncodingIndex = ComboEncoding.SelectedIndex,
+                LyricPath = TxtLrcPath.Text,
+                Patterns = TxtPatterns.Text,
+                ScreenLines = int.TryParse(TxtScreenLines.Text, out int sl) ? sl : 3,
+                Offset = int.TryParse(TxtOffset.Text, out int os) ? os : 1,
+                AdvancedMode = ChkAdvancedMode.IsChecked ?? true,
+                Incremental = ChkIncremental.IsChecked ?? true,
+                TransOccupies = ChkTransOccupies.IsChecked ?? true
+            });
+        }
+
+        private void BtnBrowse_Click(object sender, RoutedEventArgs e)
+        {
+            var d = new Microsoft.Win32.OpenFileDialog { CheckFileExists = false, FileName = "选择目录" };
+            if (d.ShowDialog() == true) TxtLrcPath.Text = Path.GetDirectoryName(d.FileName);
+        }
+
+        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+        {
+            SaveAppSettings();
+            base.OnClosing(e);
+        }
     }
 }
