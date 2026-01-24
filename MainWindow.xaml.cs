@@ -111,19 +111,23 @@ namespace MediaMonitor
 
         private void HandleOutput(int cIdx)
         {
-            if (cIdx == -1) return;
+            if (cIdx == -1 || cIdx >= _lyric.Lines.Count) return;
             var line = _lyric.Lines[cIdx];
 
-            // 模式 A: 纯文本模式 (独立裸发)
+            // --- 模式 A: 纯文本模式 ---
             if (ChkAdvancedMode.IsChecked == false)
             {
-                if (ChkIncremental.IsChecked == true && _lastSentFingerprints.TryGetValue(-1, out string old) && old == line.Content) return;
-                _lastSentFingerprints[-1] = line.Content;
+                string fullContent = line.Content;
+                // 如果勾选了翻译占用，把翻译拼在正文后面（或者你可以选择分两次裸发）
+                if (ChkTransOccupies.IsChecked == true && !string.IsNullOrEmpty(line.Translation))
+                    fullContent += " " + line.Translation;
 
-                byte[] rawData = _serial.GetEncodedBytes(line.Content);
-                SendAndLog(rawData, isRawText: true);
+                if (ChkIncremental.IsChecked == true && _lastSentFingerprints.TryGetValue(-1, out string old) && old == fullContent) return;
+                _lastSentFingerprints[-1] = fullContent;
+
+                SendAndLog(_serial.GetEncodedBytes(fullContent), isRawText: true);
             }
-            // 模式 B: 高级协议模式
+            // --- 模式 B: 高级协议模式 ---
             else
             {
                 int lineLimit = int.TryParse(TxtScreenLines.Text, out int sl) ? sl : 3;
@@ -134,20 +138,30 @@ namespace MediaMonitor
                 for (int i = startIdx; i < _lyric.Lines.Count && currentRow < lineLimit; i++)
                 {
                     var l = _lyric.Lines[i];
-                    string finger = $"R{currentRow}_{l.Content}";
 
-                    if (ChkIncremental.IsChecked == true && _lastSentFingerprints.TryGetValue(currentRow, out string old) && old == finger)
+                    // 1. 发送主歌词 (0x12 或 0x14)
+                    string f1 = $"R{currentRow}_{l.Content}";
+                    if (!(ChkIncremental.IsChecked == true && _lastSentFingerprints.TryGetValue(currentRow, out string o1) && o1 == f1))
                     {
-                        currentRow++; continue;
+                        _lastSentFingerprints[currentRow] = f1;
+                        byte[] d1 = (l.Words.Count > 0)
+                            ? _serial.BuildWordByWord((ushort)currentRow, l.Words, l.Time)
+                            : _serial.BuildLyricWithIndex(0x12, (ushort)currentRow, l.Content);
+                        SendAndLog(d1);
                     }
-
-                    _lastSentFingerprints[currentRow] = finger;
-                    byte[] data = (l.Words.Count > 0)
-                        ? _serial.BuildWordByWord((ushort)currentRow, l.Words, l.Time)
-                        : _serial.BuildLyricWithIndex(0x12, (ushort)currentRow, l.Content);
-
-                    SendAndLog(data);
                     currentRow++;
+
+                    // 2. 发送翻译 (0x13) - 只有开启占用行且有翻译时才发
+                    if (currentRow < lineLimit && ChkTransOccupies.IsChecked == true && !string.IsNullOrEmpty(l.Translation))
+                    {
+                        string f2 = $"R{currentRow}_T_{l.Translation}";
+                        if (!(ChkIncremental.IsChecked == true && _lastSentFingerprints.TryGetValue(currentRow, out string o2) && o2 == f2))
+                        {
+                            _lastSentFingerprints[currentRow] = f2;
+                            SendAndLog(_serial.BuildLyricWithIndex(0x13, (ushort)currentRow, l.Translation));
+                        }
+                        currentRow++;
+                    }
                 }
             }
         }
@@ -196,6 +210,10 @@ namespace MediaMonitor
                         case 0x12: // 协议歌词
                             string lyric = viewEnc.GetString(data, 5, data[2] - 2);
                             p.Inlines.Add(new Run($"┃ [协议歌词] {lyric}") { Foreground = Brushes.LimeGreen });
+                            break;
+                        case 0x13: // 翻译包
+                            string trans = viewEnc.GetString(data, 5, data[2] - 2);
+                            p.Inlines.Add(new Run($"┃ [协议翻译] 行{data[3]}: {trans}") { Foreground = Brushes.Orange });
                             break;
                         case 0x14: // 逐字包
                             p.Inlines.Add(new Run($"┃ [协议逐字] 行{data[3]}: ") { Foreground = Brushes.Cyan });
