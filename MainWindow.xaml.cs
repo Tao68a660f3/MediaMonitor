@@ -34,7 +34,8 @@ namespace MediaMonitor
             _uiTimer.Tick += (s, e) => UpdateStep();
 
             // 核心：创建一个通用的刷新动作
-            Action refreshAction = () => {
+            Action refreshAction = () =>
+            {
                 Invalidate();
                 var p = _smtc.GetCurrentProgress();
                 if (p != null)
@@ -51,11 +52,23 @@ namespace MediaMonitor
             ChkTransOccupies.Click += (s, e) => Invalidate();
 
             // 绑定编码切换事件
-            ComboEncoding.SelectionChanged += (s, e) => {
+            ComboEncoding.SelectionChanged += (s, e) =>
+            {
                 if (_serial != null)
                 {
                     _serial.SelectedEncoding = ComboEncoding.SelectedIndex == 1 ? EncodingType.GB2312 : EncodingType.UTF8;
                     refreshAction();
+                }
+            };
+            // 动态监听刷新率变化（失去焦点时生效）
+            TxtUpdateRate.LostFocus += (s, e) =>
+            {
+                if (int.TryParse(TxtUpdateRate.Text, out int ur))
+                {
+                    if (ur < 10) ur = 10; // 安全下限
+                    if (ur > 5000) ur = 5000; // 安全上限
+                    _uiTimer.Interval = TimeSpan.FromMilliseconds(ur);
+                    TxtUpdateRate.Text = ur.ToString();
                 }
             };
 
@@ -74,7 +87,8 @@ namespace MediaMonitor
             _smtc.PlaybackChanged += (status) => Dispatcher.Invoke(() => SyncPlaybackState(status));
 
             // 媒体内容改变监听
-            _smtc.OnMediaUpdated += (props) => Dispatcher.Invoke(() => {
+            _smtc.OnMediaUpdated += (props) => Dispatcher.Invoke(() =>
+            {
                 TxtTitle.Text = props.Title;
                 TxtArtist.Text = props.Artist;
                 TxtAlbum.Text = props.AlbumTitle; // 重新接回专辑显示
@@ -88,6 +102,37 @@ namespace MediaMonitor
 
             RefreshSessions();
             _uiTimer.Start();
+        }
+
+        // 1. 拦截键盘输入（包括空格）
+        private void OnlyNumber_PreviewTextInput(object sender, System.Windows.Input.TextCompositionEventArgs e)
+        {
+            e.Handled = !System.Text.RegularExpressions.Regex.IsMatch(e.Text, @"^[0-9]+$");
+        }
+
+        // 2. 拦截非法字符粘贴和中文 IME 确认后的输入
+        private void NumberTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (sender is TextBox textBox)
+            {
+                string rawText = textBox.Text;
+                // 过滤掉所有非数字字符
+                string cleanText = System.Text.RegularExpressions.Regex.Replace(rawText, @"[^0-9]", "");
+
+                if (rawText != cleanText)
+                {
+                    int selectionStart = textBox.SelectionStart; // 记录光标位置
+                    textBox.Text = cleanText;
+                    // 恢复光标位置，防止打字时跳格
+                    textBox.SelectionStart = Math.Max(0, selectionStart - (rawText.Length - cleanText.Length));
+                }
+
+                // 如果是偏移量或行数改变，触发同步池重置
+                if (textBox.Name == "TxtOffset" || textBox.Name == "TxtScreenLines")
+                {
+                    Invalidate(); // 调用已有的重置逻辑
+                }
+            }
         }
 
         private void SyncMetadata(string title, string artist, string album)
@@ -124,6 +169,12 @@ namespace MediaMonitor
                 _smtc.SelectSession(session);
                 Invalidate(); // 切换会话时，清空同步池重新发送新歌信息
             }
+        }
+
+        private void TxtOffset_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            // 当偏移量改变时，清空同步池，强制重新计算显示内容
+            Invalidate();
         }
 
         private void UpdateStep()
@@ -242,7 +293,8 @@ namespace MediaMonitor
             _serial.SendRaw(data);
             if (data[1] == 0x11) return; // 忽略同步包日志
 
-            Dispatcher.Invoke(() => {
+            Dispatcher.Invoke(() =>
+            {
                 Encoding enc = _serial.CurrentEncoding;
                 var p = new Paragraph { Margin = new Thickness(0, 0, 0, 8) };
                 string hex = BitConverter.ToString(data).Replace("-", " ");
@@ -318,7 +370,8 @@ namespace MediaMonitor
 
         private void LogToPreview(string msg, Brush color)
         {
-            Dispatcher.Invoke(() => {
+            Dispatcher.Invoke(() =>
+            {
                 HexPreview.Document.Blocks.Add(new Paragraph(new Run(msg) { Foreground = color }));
                 HexPreview.ScrollToEnd();
             });
@@ -365,6 +418,13 @@ namespace MediaMonitor
             ChkAdvancedMode.IsChecked = cfg.AdvancedMode;
             ChkIncremental.IsChecked = cfg.Incremental;
             ChkTransOccupies.IsChecked = cfg.TransOccupies;
+            // 加载刷新率并实时应用到定时器
+            int rate = cfg.UpdateRate > 0 ? cfg.UpdateRate : 50;
+            TxtUpdateRate.Text = rate.ToString();
+            if (_uiTimer != null)
+            {
+                _uiTimer.Interval = TimeSpan.FromMilliseconds(rate);
+            }
             _lyric.LyricFolder = cfg.LyricPath;
         }
 
@@ -378,6 +438,7 @@ namespace MediaMonitor
                 Patterns = TxtPatterns.Text,
                 ScreenLines = int.TryParse(TxtScreenLines.Text, out int sl) ? sl : 3,
                 Offset = int.TryParse(TxtOffset.Text, out int os) ? os : 1,
+                UpdateRate = int.TryParse(TxtUpdateRate.Text, out int ur) ? ur : 50, // 保存刷新率
                 AdvancedMode = ChkAdvancedMode.IsChecked ?? true,
                 Incremental = ChkIncremental.IsChecked ?? true,
                 TransOccupies = ChkTransOccupies.IsChecked ?? true

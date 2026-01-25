@@ -1,7 +1,6 @@
 ﻿<Window x:Class="MediaMonitor.MainWindow"
-        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="媒体同步调试终端 V1.6" Height="850" Width="520" Background="#F0F0F0">
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="媒体同步调试终端 V2.0" Height="850" Width="520" Background="#F0F0F0">
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -31,8 +30,7 @@
                     <TextBlock x:Name="TxtLrcStatus" Text="等待加载歌词..." FontSize="11" Foreground="DarkOrange" HorizontalAlignment="Right"/>
                 </DockPanel>
 
-                <TextBlock x:Name="TxtLyricDisplay" Text="(当前歌词预览)" Margin="0,15,0,0" 
-                           HorizontalAlignment="Center" FontSize="16" FontWeight="Medium" Foreground="#333333" TextWrapping="Wrap" TextAlignment="Center"/>
+                <TextBlock x:Name="TxtLyricDisplay" Text="(当前歌词预览)" Margin="0,15,0,0" HorizontalAlignment="Center" FontSize="16" FontWeight="Medium" Foreground="#333333" TextWrapping="Wrap" TextAlignment="Center"/>
             </StackPanel>
         </Border>
 
@@ -82,19 +80,22 @@
                             <CheckBox x:Name="ChkTransOccupies" Content="翻译占行" IsChecked="True"/>
                         </WrapPanel>
 
-                        <UniformGrid Columns="2" Margin="0,0,0,10">
+                        <UniformGrid Columns="3" Margin="0,0,0,10">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="屏行数:" VerticalAlignment="Center"/>
-                                <TextBox x:Name="TxtScreenLines" Text="3" Width="35" Margin="5,0"/>
+                                <TextBox x:Name="TxtScreenLines" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged" InputMethod.IsInputMethodEnabled="False" Text="3" Width="35" Margin="5,0"/>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="偏移:" VerticalAlignment="Center"/>
-                                <TextBox x:Name="TxtOffset" Text="1" Width="35" Margin="5,0"/>
+                                <TextBox x:Name="TxtOffset" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged" InputMethod.IsInputMethodEnabled="False" Text="1" Width="35" Margin="5,0"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="刷新率(ms):" VerticalAlignment="Center"/>
+                                <TextBox x:Name="TxtUpdateRate" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged" InputMethod.IsInputMethodEnabled="False" Text="50" Width="40" Margin="5,0"/>
                             </StackPanel>
                         </UniformGrid>
 
-                        <Button x:Name="BtnSerialConn" Content="连接串口" Height="35" Click="BtnSerialConn_Click" 
-                                Background="#0078D7" Foreground="White" BorderThickness="0" FontWeight="Bold"/>
+                        <Button x:Name="BtnSerialConn" Content="连接串口" Height="35" Click="BtnSerialConn_Click" Background="#0078D7" Foreground="White" BorderThickness="0" FontWeight="Bold"/>
                     </StackPanel>
                 </Border>
             </Expander>
@@ -102,8 +103,7 @@
 
         <TextBlock Grid.Row="3" Text="真·串口协议解析流 (TX):" FontWeight="Bold" Margin="0,10,0,5" Foreground="#444444"/>
 
-        <RichTextBox Grid.Row="4" x:Name="HexPreview" Background="#1E1E1E" Foreground="#CCCCCC" 
-                     FontFamily="Consolas" IsReadOnly="True" VerticalScrollBarVisibility="Auto">
+        <RichTextBox Grid.Row="4" x:Name="HexPreview" Background="#1E1E1E" Foreground="#CCCCCC" FontFamily="Consolas" IsReadOnly="True" VerticalScrollBarVisibility="Auto">
             <FlowDocument>
                 <Paragraph>
                     <Run Text="等待串口数据发送..." Foreground="#555555"/>

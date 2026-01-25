@@ -13,6 +13,7 @@ namespace MediaMonitor
         public string Patterns { get; set; } = "{Artist} - {Title};{Title} - {Artist};{Title}";
         public int ScreenLines { get; set; } = 3;
         public int Offset { get; set; } = 1;
+        public int UpdateRate { get; set; } = 50; // 新增：刷新率（毫秒）
         public bool AdvancedMode { get; set; } = true;
         public bool Incremental { get; set; } = true;
         public bool TransOccupies { get; set; } = true;
