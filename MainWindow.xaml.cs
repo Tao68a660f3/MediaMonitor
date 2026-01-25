@@ -165,64 +165,55 @@ namespace MediaMonitor
             if (!_serial.IsOpen) return;
 
             int lineLimit = int.TryParse(TxtScreenLines.Text, out int sl) ? sl : 3;
-            int offset = int.TryParse(TxtOffset.Text, out int os) ? os : 1;
+            int offset = int.TryParse(TxtOffset.Text, out int os) ? os : 0;
             bool isAdvanced = ChkAdvancedMode.IsChecked == true;
             bool transOccupies = ChkTransOccupies.IsChecked == true;
 
             var targetSlots = new HashSet<string>();
             var dataToSync = new Dictionary<string, (byte[] AdvData, string RawText)>();
 
-            // --- 动态填充算法 ---
             int currentPhysicalRow = 0;
-            // 逻辑起始点：cIdx 是当前行，减去 offset 得到屏幕第一行对应的歌词索引
             int lyricIdx = cIdx - offset;
 
             while (currentPhysicalRow < lineLimit)
             {
                 var line = _lyric.GetLine(lyricIdx);
 
-                // 1. 添加原文槽位 (必须存在)
+                // --- 1. 原文 (0x12/0x14)：无条件进入队列 ---
                 string mKey = $"{lyricIdx}_0x12";
                 targetSlots.Add(mKey);
-                dataToSync[mKey] = (line.Words.Count > 0
+                string mText = line.Content ?? "";
+                dataToSync[mKey] = (isAdvanced ? (line.Words.Count > 0
                     ? _serial.BuildWordByWord((short)lyricIdx, line.Time, line.Words)
-                    : _serial.BuildLyricLine((short)lyricIdx, line.Time, line.Content),
-                    line.Content);
+                    : _serial.BuildLyricLine((short)lyricIdx, line.Time, mText)) : null, mText);
 
-                currentPhysicalRow++; // 原文占一行
+                currentPhysicalRow++;
 
-                // 2. 处理翻译槽位
-                if (currentPhysicalRow < lineLimit) // 还没填满屏幕
+                // --- 2. 翻译 (0x13)：必须判断非空 ---
+                string tText = line.Translation ?? "";
+                if (!string.IsNullOrEmpty(tText))
                 {
-                    if (!string.IsNullOrEmpty(line.Translation))
-                    {
-                        // 有翻译，且用户勾选了占行模式
-                        if (transOccupies)
-                        {
-                            string tKey = $"{lyricIdx}_0x13";
-                            targetSlots.Add(tKey);
-                            dataToSync[tKey] = (_serial.BuildTranslationLine((short)lyricIdx, line.Time, line.Translation), line.Translation);
+                    string tKey = $"{lyricIdx}_0x13";
+                    targetSlots.Add(tKey);
+                    dataToSync[tKey] = (isAdvanced ? _serial.BuildTranslationLine((short)lyricIdx, line.Time, tText) : null, tText);
 
-                            currentPhysicalRow++; // 翻译占一行
-                        }
-                        else
-                        {
-                            // 有翻译但不占行，我们依然把数据发出去（池子同步），但不增加 physicalRow 计数
-                            string tKey = $"{lyricIdx}_0x13";
-                            targetSlots.Add(tKey);
-                            dataToSync[tKey] = (_serial.BuildTranslationLine((short)lyricIdx, line.Time, line.Translation), line.Translation);
-                        }
+                    // 只有翻译非空且用户勾选了占行，才消耗物理行计数
+                    if (transOccupies)
+                    {
+                        currentPhysicalRow++;
                     }
-                    // 如果没有翻译，直接跳过，physicalRow 不增加，下一轮循环会处理下一个 lyricIdx
                 }
 
                 lyricIdx++;
+
+                // 安全退出
+                if (lyricIdx > _lyric.Lines.Count + lineLimit) break;
             }
 
-            // --- 执行发送 (增量逻辑) ---
-            IEnumerable<string> toNotify = (ChkIncremental.IsChecked == true)
-                                           ? targetSlots.Except(_syncedSlots)
-                                           : targetSlots;
+            // 差分/全量发送
+            var toNotify = (ChkIncremental.IsChecked == true)
+                           ? targetSlots.Except(_syncedSlots).ToList()
+                           : targetSlots.ToList();
 
             foreach (var slot in toNotify)
             {
@@ -230,18 +221,15 @@ namespace MediaMonitor
 
                 if (isAdvanced)
                 {
-                    SendAndLog(pack.AdvData);
+                    if (pack.AdvData != null) SendAndLog(pack.AdvData);
                 }
                 else
                 {
-                    if (!string.IsNullOrEmpty(pack.RawText))
-                    {
-                        _serial.SendRaw(_serial.GetEncodedBytes(pack.RawText + "\n"));
-                        LogToPreview($"[RAW] {pack.RawText}", Brushes.Yellow);
-                    }
+                    // RAW 模式：原文空行会发 \n，翻译空行因为上面没进列表，所以不会发
+                    _serial.SendRaw(_serial.GetEncodedBytes(pack.RawText + "\n"));
+                    LogToPreview($"[RAW] {pack.RawText}", Brushes.Yellow);
                 }
             }
-
             _syncedSlots = targetSlots;
         }
 
