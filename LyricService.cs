@@ -20,7 +20,7 @@ namespace MediaMonitor
     public class LyricService
     {
         public string LyricFolder { get; set; } = "";
-        public string[] FileNamePatterns { get; set; } = { "{Artist} - {Title}", "{Title}" };
+        public string[] FileNamePatterns { get; set; } = { "{Artist} - {Title}", "{Title} - {Artist}", "{Title}" };
         public string? CurrentLyricPath { get; private set; }
         public List<LyricLine> Lines { get; private set; } = new List<LyricLine>();
 
@@ -37,18 +37,45 @@ namespace MediaMonitor
             CurrentLyricPath = null;
             if (string.IsNullOrWhiteSpace(LyricFolder) || !Directory.Exists(LyricFolder)) return;
 
+            // 1. 原有的非法字符过滤
             string sT = Regex.Replace(title, @"[\/?:*""<>|]", "_").Trim();
             string sA = Regex.Replace(artist ?? "", @"[\/?:*""<>|]", "_").Trim();
+
+            // 2. 新增：清洗标题后缀（只删除括号及其内容）
+            string cT = Regex.Replace(sT, @"\s*[\(\[].*?[\)\]]\s*", "").Trim();
+
             var files = Directory.GetFiles(LyricFolder, "*.lrc", SearchOption.TopDirectoryOnly);
 
+            // 3. 搜索逻辑：优先用清洗后的标题 cT，找不到再用原标题 sT
             foreach (var pattern in FileNamePatterns)
             {
-                string targetName = pattern.Replace("{Artist}", sA).Replace("{Title}", sT) + ".lrc";
-                var match = files.FirstOrDefault(f => Path.GetFileName(f).Equals(targetName, StringComparison.OrdinalIgnoreCase));
-                if (match != null) { CurrentLyricPath = match; break; }
+                string[] titlesToTry = { cT, sT };
+                foreach (var t in titlesToTry.Distinct())
+                {
+                    // 1. 生成预期的目标文件名
+                    string targetName = pattern.Replace("{Artist}", sA).Replace("{Title}", t) + ".lrc";
+
+                    // 2. 核心修改：匹配时忽略空格和大小写
+                    // 将目标名和硬盘里的文件名都去掉空格后再对比
+                    string targetNoSpace = targetName.Replace(" ", "").ToLower();
+
+                    var match = files.FirstOrDefault(f => {
+                        string actualName = Path.GetFileName(f).Replace(" ", "").ToLower();
+                        return actualName == targetNoSpace;
+                    });
+
+                    if (match != null)
+                    {
+                        CurrentLyricPath = match;
+                        ParseFile(CurrentLyricPath);
+                        return;
+                    }
+                }
             }
+
+            // 4. 模糊匹配逻辑
             if (CurrentLyricPath == null)
-                CurrentLyricPath = files.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Contains(sT, StringComparison.OrdinalIgnoreCase));
+                CurrentLyricPath = files.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Contains(cT, StringComparison.OrdinalIgnoreCase));
 
             if (CurrentLyricPath != null) ParseFile(CurrentLyricPath);
         }
@@ -84,6 +111,14 @@ namespace MediaMonitor
 
                     if (wordMatches.Count > 0) // 逐字模式
                     {
+                        // --- 修复首字丢失：检查第一个标签前是否有文字 ---
+                        string headText = contentBody.Substring(0, wordMatches[0].Index).Trim();
+                        if (!string.IsNullOrEmpty(headText))
+                        {
+                            // 第一个字的时间就是整行的起始时间 t (即偏移量为0)
+                            newLine.Words.Add(new WordInfo { Time = t, Word = headText });
+                        }
+
                         foreach (Match w in wordMatches)
                         {
                             if (TimeSpan.TryParse("00:" + w.Groups["t"].Value, out TimeSpan wt))

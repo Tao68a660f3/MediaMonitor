@@ -94,8 +94,7 @@ namespace MediaMonitor
                 TxtAlbum.Text = props.AlbumTitle; // 重新接回专辑显示
 
                 _lyric.LoadAndParse(props.Title, props.Artist);
-                TxtLrcStatus.Text = _lyric.CurrentLyricPath != null ? "歌词载入成功" : "未找到歌词";
-
+                TxtLrcStatus.Text = _lyric.CurrentLyricPath != null ? $"已载入: {System.IO.Path.GetFileName(_lyric.CurrentLyricPath)}" : "未找到本地歌词";
                 Invalidate();
                 SyncMetadata(props.Title, props.Artist, props.AlbumTitle);
             });
@@ -423,7 +422,7 @@ namespace MediaMonitor
             ComboPorts.Text = cfg.PortName;
             ComboEncoding.SelectedIndex = cfg.EncodingIndex;
             TxtLrcPath.Text = cfg.LyricPath;
-            TxtPatterns.Text = cfg.Patterns;
+            //TxtPatterns.Text = cfg.Patterns;
             TxtScreenLines.Text = cfg.ScreenLines.ToString();
             TxtOffset.Text = cfg.Offset.ToString();
             ChkAdvancedMode.IsChecked = cfg.AdvancedMode;
@@ -446,7 +445,7 @@ namespace MediaMonitor
                 PortName = ComboPorts.Text,
                 EncodingIndex = ComboEncoding.SelectedIndex,
                 LyricPath = TxtLrcPath.Text,
-                Patterns = TxtPatterns.Text,
+                //Patterns = TxtPatterns.Text,
                 ScreenLines = int.TryParse(TxtScreenLines.Text, out int sl) ? sl : 3,
                 Offset = int.TryParse(TxtOffset.Text, out int os) ? os : 1,
                 UpdateRate = int.TryParse(TxtUpdateRate.Text, out int ur) ? ur : 50, // 保存刷新率
