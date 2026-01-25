@@ -170,18 +170,52 @@ namespace MediaMonitor
 
         private void SendAndLog(byte[] data)
         {
-            if (data == null || data.Length == 0) return;
+            if (data == null || data.Length < 2) return;
+
+            // 发送数据
             _serial.SendRaw(data);
 
+            // 过滤频繁的同步包，避免日志刷屏
+            if (data[1] == 0x11) return;
+
             Dispatcher.Invoke(() => {
-                var p = new Paragraph { Margin = new Thickness(0, 0, 0, 4) };
+                var p = new Paragraph { Margin = new Thickness(0, 0, 0, 8) };
+                Encoding viewEnc = (ComboEncoding.SelectedIndex == 1) ? Encoding.GetEncoding("GB2312") : Encoding.UTF8;
 
-                // 第一行：Hex 原始数据
+                // 1. Hex 原始数据 (灰字小号)
                 string hex = BitConverter.ToString(data).Replace("-", " ");
-                p.Inlines.Add(new Run(hex + "\n") { Foreground = Brushes.DimGray, FontSize = 10, FontFamily = new FontFamily("Consolas") });
+                p.Inlines.Add(new Run($" {hex}\n") { Foreground = Brushes.DimGray, FontSize = 10, FontFamily = new FontFamily("Consolas") });
 
-                // 第二行：详细解析内容
-                p.Inlines.Add(new Run(DecodePacket(data)) { Foreground = Brushes.White, FontWeight = FontWeights.Medium });
+                // 2. 解析逻辑
+                byte cmd = data[1];
+                Run tag = new Run();
+                string detail = "";
+
+                switch (cmd)
+                {
+                    case 0x10:
+                        tag = new Run(" [元数据] ") { Background = Brushes.DarkBlue, Foreground = Brushes.White };
+                        detail = DecodeMetadata(data, viewEnc);
+                        break;
+                    case 0x12:
+                        tag = new Run(" [主体行] ") { Background = Brushes.DarkGreen, Foreground = Brushes.White };
+                        detail = DecodeStandard(data, viewEnc);
+                        break;
+                    case 0x13:
+                        tag = new Run(" [翻译行] ") { Background = Brushes.DarkSlateBlue, Foreground = Brushes.White };
+                        detail = DecodeStandard(data, viewEnc);
+                        break;
+                    case 0x14:
+                        tag = new Run(" [逐字行] ") { Background = Brushes.DarkRed, Foreground = Brushes.White };
+                        detail = DecodeWordByWord(data, viewEnc);
+                        break;
+                    default:
+                        tag = new Run($" [未知:0x{cmd:X2}] ") { Background = Brushes.Gray };
+                        break;
+                }
+
+                p.Inlines.Add(tag);
+                p.Inlines.Add(new Run(" " + detail) { Foreground = Brushes.White });
 
                 HexPreview.Document.Blocks.Add(p);
                 if (HexPreview.Document.Blocks.Count > 50) HexPreview.Document.Blocks.Remove(HexPreview.Document.Blocks.FirstBlock);
@@ -189,39 +223,62 @@ namespace MediaMonitor
             });
         }
 
-        // 完善的预览逻辑：根据你要求的结构拆解
-        private string DecodePacket(byte[] data)
+        // 0x10 元数据全解包
+        private string DecodeMetadata(byte[] data, Encoding enc)
         {
             try
             {
-                if (data[0] != 0xAA) return "┃ [错误] 非法帧头";
-                byte cmd = data[1];
-                Encoding viewEnc = (ComboEncoding.SelectedIndex == 1) ? Encoding.GetEncoding("GB2312") : Encoding.UTF8;
-
-                if (cmd == 0x11) return "┃ [同步] 播放状态同步";
-                if (cmd == 0x10) return "┃ [元数据] 歌曲标题/艺术家更新";
-
-                // 处理核心歌词指令 (均包含 Int16 Index 和 UInt32 Time)
-                short absIdx = BitConverter.ToInt16(data, 3);
-                uint startTime = BitConverter.ToUInt32(data, 5);
-                string head = $"┃ [行:{absIdx:D3} @{startTime}ms] ";
-
-                switch (cmd)
+                int ptr = 3;
+                // 依次读取 Title, Artist, Album 的 [长度 + 内容]
+                List<string> parts = new List<string>();
+                for (int i = 0; i < 3; i++)
                 {
-                    case 0x12:
-                        string txt = viewEnc.GetString(data, 9, data.Length - 10);
-                        return head + (string.IsNullOrEmpty(txt) ? "<空行/擦除>" : $"原文: {txt}");
-                    case 0x13:
-                        string trans = viewEnc.GetString(data, 9, data.Length - 10);
-                        return head + (string.IsNullOrEmpty(trans) ? "<无翻译/擦除>" : $"翻译: {trans}");
-                    case 0x14:
-                        int wCount = data[9];
-                        return head + $"逐字模式 ({wCount}个词片段)";
-                    default:
-                        return $"┃ [未知] 指令: 0x{cmd:X2}";
+                    if (ptr >= data.Length) break;
+                    int len = data[ptr];
+                    parts.Add(enc.GetString(data, ptr + 1, len));
+                    ptr += (1 + len);
                 }
+                return string.Join(" | ", parts);
             }
-            catch { return "┃ [解析] 数据包长度不足或编码异常"; }
+            catch { return "元数据解析失败"; }
+        }
+
+        // 0x12/0x13 格式化解析: (Index) [Time] 内容
+        private string DecodeStandard(byte[] data, Encoding enc)
+        {
+            try
+            {
+                short idx = BitConverter.ToInt16(data, 3);
+                uint time = BitConverter.ToUInt32(data, 5);
+                string content = enc.GetString(data, 9, data.Length - 10);
+                return $"({idx:D3}) [{time}ms] {(string.IsNullOrEmpty(content) ? "<擦除>" : content)}";
+            }
+            catch { return "解析失败"; }
+        }
+
+        // 0x14 逐字格式化解析: (Index) [Time] 词<偏移>...
+        private string DecodeWordByWord(byte[] data, Encoding enc)
+        {
+            try
+            {
+                short idx = BitConverter.ToInt16(data, 3);
+                uint time = BitConverter.ToUInt32(data, 5);
+                int wCount = data[9];
+                StringBuilder sb = new StringBuilder();
+                sb.Append($"({idx:D3}) [{time}ms] ");
+
+                int ptr = 10;
+                for (int i = 0; i < wCount; i++)
+                {
+                    ushort offset = BitConverter.ToUInt16(data, ptr);
+                    byte len = data[ptr + 2];
+                    string word = enc.GetString(data, ptr + 3, len);
+                    sb.Append($"{word}<{offset}ms> ");
+                    ptr += (3 + len);
+                }
+                return sb.ToString();
+            }
+            catch { return "逐字解析错误"; }
         }
 
         private void ResetUI()
