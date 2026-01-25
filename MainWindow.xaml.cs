@@ -179,7 +179,7 @@ namespace MediaMonitor
             {
                 var line = _lyric.GetLine(lyricIdx);
 
-                // --- 1. 原文 (0x12/0x14)：无条件进入队列 ---
+                // 1. 原文槽位 (强制占用 1 行)
                 string mKey = $"{lyricIdx}_0x12";
                 targetSlots.Add(mKey);
                 string mText = line.Content ?? "";
@@ -187,26 +187,29 @@ namespace MediaMonitor
                     ? _serial.BuildWordByWord((short)lyricIdx, line.Time, line.Words)
                     : _serial.BuildLyricLine((short)lyricIdx, line.Time, mText)) : null, mText);
 
-                currentPhysicalRow++;
+                currentPhysicalRow++; // 原文占掉一行
 
-                // --- 2. 翻译 (0x13)：必须判断非空 ---
+                // --- 关键修正点 ---
+                // 2. 翻译槽位：只有当屏幕还有空余行，或者翻译不额外占行时，才允许发送
                 string tText = line.Translation ?? "";
                 if (!string.IsNullOrEmpty(tText))
                 {
-                    string tKey = $"{lyricIdx}_0x13";
-                    targetSlots.Add(tKey);
-                    dataToSync[tKey] = (isAdvanced ? _serial.BuildTranslationLine((short)lyricIdx, line.Time, tText) : null, tText);
-
-                    // 只有翻译非空且用户勾选了占行，才消耗物理行计数
-                    if (transOccupies)
+                    // 如果【翻译占行】，则必须要求当前屏幕还没被占满 (currentPhysicalRow < lineLimit)
+                    // 如果【翻译不占行】，则无论屏幕满没满都发（因为单片机可以同屏显示）
+                    if (!transOccupies || currentPhysicalRow < lineLimit)
                     {
-                        currentPhysicalRow++;
+                        string tKey = $"{lyricIdx}_0x13";
+                        targetSlots.Add(tKey);
+                        dataToSync[tKey] = (isAdvanced ? _serial.BuildTranslationLine((short)lyricIdx, line.Time, tText) : null, tText);
+
+                        if (transOccupies)
+                        {
+                            currentPhysicalRow++; // 翻译占掉下一行
+                        }
                     }
                 }
 
                 lyricIdx++;
-
-                // 安全退出
                 if (lyricIdx > _lyric.Lines.Count + lineLimit) break;
             }
 
