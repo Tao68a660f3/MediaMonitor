@@ -13,6 +13,7 @@ namespace MediaMonitor
         private GlobalSystemMediaTransportControlsSessionManager? _manager;
         private GlobalSystemMediaTransportControlsSession? _currentSession;
 
+        public event Action<GlobalSystemMediaTransportControlsSessionPlaybackStatus>? PlaybackChanged;
         public Action<GlobalSystemMediaTransportControlsSessionMediaProperties>? OnMediaUpdated;
         public event Action? SessionsListChanged;
 
@@ -39,6 +40,12 @@ namespace MediaMonitor
                 // 立即触发一次更新
                 Session_MediaPropertiesChanged(_currentSession, null);
             }
+            // 关键：订阅播放信息改变事件
+            session.PlaybackInfoChanged += (sender, args) =>
+            {
+                var status = sender.GetPlaybackInfo().PlaybackStatus;
+                PlaybackChanged?.Invoke(status);
+            };
         }
 
         private async void Session_MediaPropertiesChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs? args)
