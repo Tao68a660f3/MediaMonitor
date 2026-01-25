@@ -323,10 +323,22 @@ namespace MediaMonitor
 
                 p.Inlines.Add(tag);
                 p.Inlines.Add(new Run(" " + detail) { Foreground = Brushes.White });
-                HexPreview.Document.Blocks.Add(p);
-                if (HexPreview.Document.Blocks.Count > 50) HexPreview.Document.Blocks.Remove(HexPreview.Document.Blocks.FirstBlock);
-                HexPreview.ScrollToEnd();
+                AppendLog(p);
             });
+        }
+
+        private void AppendLog(Block block)
+        {
+            // 自动清理：超过 100 行（Block）就清空，像控制台一样
+            if (HexPreview.Document.Blocks.Count > 100)
+            {
+                HexPreview.Document.Blocks.Clear();
+                // 可选：清空后留一个提示，知道它刚被重置过
+                HexPreview.Document.Blocks.Add(new Paragraph(new Run("--- 缓冲区已自动清空 ---") { Foreground = Brushes.Gray }));
+            }
+
+            HexPreview.Document.Blocks.Add(block);
+            HexPreview.ScrollToEnd();
         }
 
         private string DecodeMeta(byte[] data, Encoding enc)
@@ -372,8 +384,7 @@ namespace MediaMonitor
         {
             Dispatcher.Invoke(() =>
             {
-                HexPreview.Document.Blocks.Add(new Paragraph(new Run(msg) { Foreground = color }));
-                HexPreview.ScrollToEnd();
+                AppendLog(new Paragraph(new Run(msg) { Foreground = color }));
             });
         }
 
