@@ -26,8 +26,10 @@ namespace MediaMonitor
 
         public void Disconnect() => _port.Close();
 
-        public byte[] GetEncodedBytes(string text) =>
-            (SelectedEncoding == EncodingType.GB2312 ? Encoding.GetEncoding("GB2312") : Encoding.UTF8).GetBytes(text);
+        public Encoding CurrentEncoding =>
+            SelectedEncoding == EncodingType.GB2312 ? Encoding.GetEncoding("GB2312") : Encoding.UTF8;
+
+        public byte[] GetEncodedBytes(string text) => CurrentEncoding.GetBytes(text);
 
         // 基础打包逻辑：AA [Cmd] [Len] [Payload] [Check]
         public byte[] BuildPacket(byte cmd, byte[] payload)

@@ -33,10 +33,31 @@ namespace MediaMonitor
             _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
             _uiTimer.Tick += (s, e) => UpdateStep();
 
+            // 核心：创建一个通用的刷新动作
+            Action refreshAction = () => {
+                Invalidate();
+                var p = _smtc.GetCurrentProgress();
+                if (p != null)
+                {
+                    TimeSpan curTime = TimeSpan.FromSeconds(p.CurrentSeconds);
+                    int cIdx = _lyric.Lines.FindLastIndex(l => l.Time <= curTime);
+                    HandleOutput(cIdx); // 立即重发当前歌词
+                }
+            };
+
             // 绑定 UI 交互事件，触发同步池重置
             ChkAdvancedMode.Click += (s, e) => Invalidate();
             ChkIncremental.Click += (s, e) => Invalidate();
             ChkTransOccupies.Click += (s, e) => Invalidate();
+
+            // 绑定编码切换事件
+            ComboEncoding.SelectionChanged += (s, e) => {
+                if (_serial != null)
+                {
+                    _serial.SelectedEncoding = ComboEncoding.SelectedIndex == 1 ? EncodingType.GB2312 : EncodingType.UTF8;
+                    refreshAction();
+                }
+            };
 
             InitApp();
             LoadSettings();
@@ -231,11 +252,11 @@ namespace MediaMonitor
             if (data[1] == 0x11) return; // 忽略同步包日志
 
             Dispatcher.Invoke(() => {
+                Encoding enc = _serial.CurrentEncoding;
                 var p = new Paragraph { Margin = new Thickness(0, 0, 0, 8) };
                 string hex = BitConverter.ToString(data).Replace("-", " ");
                 p.Inlines.Add(new Run($"{hex}\n") { Foreground = Brushes.DimGray, FontSize = 10 });
 
-                Encoding enc = (ComboEncoding.SelectedIndex == 1) ? Encoding.GetEncoding("GB2312") : Encoding.UTF8;
                 byte cmd = data[1];
                 Run tag = new Run { Foreground = Brushes.White };
                 string detail = "";
