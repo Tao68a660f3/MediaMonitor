@@ -7,91 +7,99 @@ using System.Text;
 namespace MediaMonitor
 {
     public enum EncodingType { UTF8, GB2312 }
+
     public class SerialService
     {
-        private SerialPort _serialPort = new SerialPort();
+        private SerialPort _port = new SerialPort();
+        public bool IsOpen => _port.IsOpen;
         public EncodingType SelectedEncoding { get; set; } = EncodingType.UTF8;
-        public bool IsOpen => _serialPort.IsOpen;
+
         public string[] GetPortNames() => SerialPort.GetPortNames();
 
         public void Connect(string portName, int baudRate)
         {
-            if (_serialPort.IsOpen) _serialPort.Close();
-            _serialPort.PortName = portName;
-            _serialPort.BaudRate = baudRate;
-            _serialPort.Open();
-        }
-        public void Disconnect() => _serialPort.Close();
-        public void SendRaw(byte[] data)
-        {
-            if (_serialPort.IsOpen && data != null) _serialPort.Write(data, 0, data.Length);
+            if (_port.IsOpen) _port.Close();
+            _port.PortName = portName;
+            _port.BaudRate = baudRate;
+            _port.Open();
         }
 
-        public byte[] GetEncodedBytes(string text)
+        public void Disconnect() => _port.Close();
+
+        public byte[] GetEncodedBytes(string text) =>
+            (SelectedEncoding == EncodingType.GB2312 ? Encoding.GetEncoding("GB2312") : Encoding.UTF8).GetBytes(text);
+
+        // 基础打包逻辑：AA [Cmd] [Len] [Payload] [Check]
+        public byte[] BuildPacket(byte cmd, byte[] payload)
         {
-            Encoding enc = SelectedEncoding == EncodingType.UTF8 ? Encoding.UTF8 : Encoding.GetEncoding("GB2312");
-            return enc.GetBytes(text ?? "");
+            List<byte> frame = new List<byte> { 0xAA, cmd, (byte)payload.Length };
+            frame.AddRange(payload);
+            byte check = 0;
+            foreach (var b in payload) check ^= b;
+            frame.Add(check);
+            return frame.ToArray();
         }
 
-        public byte[] BuildPacket(byte type, byte[] payload)
+        // 统一 Header 构建：Index(2B) + StartTime(4B)
+        private List<byte> BuildHeader(short absIdx, uint startTimeMs)
         {
-            byte[] frame = new byte[payload.Length + 4];
-            frame[0] = 0xAA;
-            frame[1] = type;
-            frame[2] = (byte)payload.Length;
-            Array.Copy(payload, 0, frame, 3, payload.Length);
-            byte crc = 0;
-            for (int i = 0; i < payload.Length + 3; i++) crc ^= frame[i];
-            frame[frame.Length - 1] = crc;
-            return frame;
+            var header = new List<byte>();
+            header.AddRange(BitConverter.GetBytes(absIdx));      // Int16, 2B
+            header.AddRange(BitConverter.GetBytes(startTimeMs)); // UInt32, 4B
+            return header;
         }
 
-        public byte[] BuildSync(bool isPlaying, uint currentMs, uint totalMs)
+        // 0x12: 原文包
+        public byte[] BuildLyricLine(short absIdx, TimeSpan startTime, string content)
         {
-            byte[] p = new byte[9];
-            p[0] = (byte)(isPlaying ? 1 : 0);
-            Array.Copy(BitConverter.GetBytes(currentMs), 0, p, 1, 4);
-            Array.Copy(BitConverter.GetBytes(totalMs), 0, p, 5, 4);
-            return BuildPacket(0x11, p);
+            var p = BuildHeader(absIdx, (uint)startTime.TotalMilliseconds);
+            p.AddRange(GetEncodedBytes(content));
+            return BuildPacket(0x12, p.ToArray());
         }
 
-        public byte[] BuildLyricWithIndex(byte type, ushort row, string text)
+        // 0x13: 翻译包
+        public byte[] BuildTranslationLine(short absIdx, TimeSpan startTime, string translation)
         {
-            byte[] b = GetEncodedBytes(text);
-            byte[] p = new byte[2 + b.Length];
-            Array.Copy(BitConverter.GetBytes(row), 0, p, 0, 2);
-            Array.Copy(b, 0, p, 2, b.Length);
-            return BuildPacket(type, p);
+            var p = BuildHeader(absIdx, (uint)startTime.TotalMilliseconds);
+            p.AddRange(GetEncodedBytes(translation));
+            return BuildPacket(0x13, p.ToArray());
         }
 
-        public byte[] BuildWordByWord(ushort row, List<WordInfo> words, TimeSpan lineStartTime)
+        // 0x14: 逐字包
+        public byte[] BuildWordByWord(short absIdx, TimeSpan startTime, List<WordInfo> words)
         {
-            List<byte> p = new List<byte>();
-            p.AddRange(BitConverter.GetBytes(row));
-            p.Add((byte)words.Count);
+            var p = BuildHeader(absIdx, (uint)startTime.TotalMilliseconds);
+            p.Add((byte)words.Count); // 词数 (1B)
             foreach (var w in words)
             {
-                ushort offset = (ushort)Math.Max(0, (w.Time - lineStartTime).TotalMilliseconds);
+                ushort offset = (ushort)Math.Max(0, (w.Time - startTime).TotalMilliseconds);
                 byte[] wordBytes = GetEncodedBytes(w.Word);
-                p.AddRange(BitConverter.GetBytes(offset));
-                p.Add((byte)wordBytes.Length);
-                p.AddRange(wordBytes);
+                p.AddRange(BitConverter.GetBytes(offset)); // 偏移 (2B)
+                p.Add((byte)wordBytes.Length);             // 长度 (1B)
+                p.AddRange(wordBytes);                     // 文本
             }
             return BuildPacket(0x14, p.ToArray());
         }
 
+        // 0x11: 同步包 (播放状态)
+        public byte[] BuildSync(bool isPlaying, uint currentMs, uint totalMs)
+        {
+            List<byte> p = new List<byte> { (byte)(isPlaying ? 1 : 0) };
+            p.AddRange(BitConverter.GetBytes(currentMs));
+            p.AddRange(BitConverter.GetBytes(totalMs));
+            return BuildPacket(0x11, p.ToArray());
+        }
+
+        // 0x10: 媒体元数据
         public byte[] BuildMetadata(string title, string artist, string album)
         {
-            var b1 = GetEncodedBytes(title);
-            var b2 = GetEncodedBytes(artist);
-            var b3 = GetEncodedBytes(album);
-            byte[] p = new byte[3 + b1.Length + b2.Length + b3.Length];
-            p[0] = (byte)b1.Length; Array.Copy(b1, 0, p, 1, b1.Length);
-            int cur = 1 + b1.Length;
-            p[cur] = (byte)b2.Length; Array.Copy(b2, 0, p, cur + 1, b2.Length);
-            cur += 1 + b2.Length;
-            p[cur] = (byte)b3.Length; Array.Copy(b3, 0, p, cur + 1, b3.Length);
-            return BuildPacket(0x10, p);
+            List<byte> p = new List<byte>();
+            byte[] t = GetEncodedBytes(title); p.Add((byte)t.Length); p.AddRange(t);
+            byte[] r = GetEncodedBytes(artist); p.Add((byte)r.Length); p.AddRange(r);
+            byte[] b = GetEncodedBytes(album); p.Add((byte)b.Length); p.AddRange(b);
+            return BuildPacket(0x10, p.ToArray());
         }
+
+        public void SendRaw(byte[] data) { if (_port.IsOpen) _port.Write(data, 0, data.Length); }
     }
 }
