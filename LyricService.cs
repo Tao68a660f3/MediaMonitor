@@ -41,22 +41,21 @@ namespace MediaMonitor
             string sT = Regex.Replace(title, @"[\/?:*""<>|]", "_").Trim();
             string sA = Regex.Replace(artist ?? "", @"[\/?:*""<>|]", "_").Trim();
 
-            // 2. 新增：清洗标题后缀（只删除括号及其内容）
-            string cT = Regex.Replace(sT, @"\s*[\(\[].*?[\)\]]\s*", "").Trim();
+            // 2. 增强清洗：
+            // a) 先去掉常见的音频扩展名（如 .mp3, .flac, .wav 等）
+            // b) 再去掉括号及其内容 (Live, Remix 等)
+            string cT = Regex.Replace(sT, @"\.(mp3|flac|wav|m4a|ape|ogg)$", "", RegexOptions.IgnoreCase);
+            cT = Regex.Replace(cT, @"\s*[\(\[].*?[\)\]]\s*", "").Trim();
 
             var files = Directory.GetFiles(LyricFolder, "*.lrc", SearchOption.TopDirectoryOnly);
 
-            // 3. 搜索逻辑：优先用清洗后的标题 cT，找不到再用原标题 sT
+            // 3. 【第一阶段】绝对精准匹配（去空格化对比）
             foreach (var pattern in FileNamePatterns)
             {
                 string[] titlesToTry = { cT, sT };
                 foreach (var t in titlesToTry.Distinct())
                 {
-                    // 1. 生成预期的目标文件名
                     string targetName = pattern.Replace("{Artist}", sA).Replace("{Title}", t) + ".lrc";
-
-                    // 2. 核心修改：匹配时忽略空格和大小写
-                    // 将目标名和硬盘里的文件名都去掉空格后再对比
                     string targetNoSpace = targetName.Replace(" ", "").ToLower();
 
                     var match = files.FirstOrDefault(f => {
@@ -73,9 +72,15 @@ namespace MediaMonitor
                 }
             }
 
-            // 4. 模糊匹配逻辑
+            // 4. 【第二阶段】模糊匹配
             if (CurrentLyricPath == null)
-                CurrentLyricPath = files.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Contains(cT, StringComparison.OrdinalIgnoreCase));
+            {
+                CurrentLyricPath = files.FirstOrDefault(f => {
+                    string name = Path.GetFileNameWithoutExtension(f);
+                    return name.Contains(sA, StringComparison.OrdinalIgnoreCase) &&
+                           name.Contains(cT, StringComparison.OrdinalIgnoreCase);
+                }) ?? files.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Contains(cT, StringComparison.OrdinalIgnoreCase));
+            }
 
             if (CurrentLyricPath != null) ParseFile(CurrentLyricPath);
         }

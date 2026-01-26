@@ -93,10 +93,15 @@ namespace MediaMonitor
                 TxtArtist.Text = props.Artist;
                 TxtAlbum.Text = props.AlbumTitle; // 重新接回专辑显示
 
+                // --- 关键：切歌时强制抹除旧索引缓存 ---
+                _lastProcessedCIdx = -2;
+                _syncedSlots.Clear();
+
                 _lyric.LoadAndParse(props.Title, props.Artist);
                 TxtLrcStatus.Text = _lyric.CurrentLyricPath != null ? $"已载入: {System.IO.Path.GetFileName(_lyric.CurrentLyricPath)}" : "未找到本地歌词";
                 Invalidate();
                 SyncMetadata(props.Title, props.Artist, props.AlbumTitle);
+                UpdateStep();
             });
 
             RefreshSessions();
@@ -189,11 +194,9 @@ namespace MediaMonitor
             TimeSpan curTime = TimeSpan.FromSeconds(p.CurrentSeconds);
             int cIdx = _lyric.Lines.FindLastIndex(l => l.Time <= curTime);
 
-            if (cIdx != -1)
-            {
-                var l = _lyric.GetLine(cIdx);
-                TxtLyricDisplay.Text = l.Content + (string.IsNullOrEmpty(l.Translation) ? "" : "\n" + l.Translation);
-            }
+
+            var l = _lyric.GetLine(cIdx);
+            TxtLyricDisplay.Text = l.Content + (string.IsNullOrEmpty(l.Translation) ? "" : "\n" + l.Translation);
 
             if (!_serial.IsOpen) return;
 
