@@ -47,7 +47,6 @@ namespace MediaMonitor
 
             // 2. 增强清洗
             string cT = Regex.Replace(sT, @"\.(mp3|flac|wav|m4a|ape|ogg)$", "", RegexOptions.IgnoreCase);
-            cT = Regex.Replace(cT, @"\s*[\(\[].*?[\)\]]\s*", "").Trim();
 
             // --- 闸门 2：如果清洗完标题变空了（比如原标题就是 ".mp3"），立即止损 ---
             if (string.IsNullOrWhiteSpace(cT)) return;
@@ -77,6 +76,8 @@ namespace MediaMonitor
                     }
                 }
             }
+
+            cT = Regex.Replace(cT, @"\s*[\(\[].*?[\)\]]\s*", "").Trim();
 
             // 4. 【第二阶段】模糊匹配（增加非空检查，防止 Contains("")）
             if (CurrentLyricPath == null && !string.IsNullOrEmpty(cT))
