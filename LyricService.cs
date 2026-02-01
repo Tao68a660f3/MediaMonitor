@@ -33,32 +33,38 @@ namespace MediaMonitor
 
         public void LoadAndParse(string title, string artist)
         {
+            // 必须首先清空状态，防止没歌词时残留上一首的显示
             Lines.Clear();
             CurrentLyricPath = null;
+
+            // --- 闸门 1：拦截无效元数据 ---
+            if (string.IsNullOrWhiteSpace(title) || title.Length < 1) return;
             if (string.IsNullOrWhiteSpace(LyricFolder) || !Directory.Exists(LyricFolder)) return;
 
             // 1. 原有的非法字符过滤
             string sT = Regex.Replace(title, @"[\/?:*""<>|]", "_").Trim();
             string sA = Regex.Replace(artist ?? "", @"[\/?:*""<>|]", "_").Trim();
 
-            // 2. 增强清洗：
-            // a) 先去掉常见的音频扩展名（如 .mp3, .flac, .wav 等）
-            // b) 再去掉括号及其内容 (Live, Remix 等)
+            // 2. 增强清洗
             string cT = Regex.Replace(sT, @"\.(mp3|flac|wav|m4a|ape|ogg)$", "", RegexOptions.IgnoreCase);
             cT = Regex.Replace(cT, @"\s*[\(\[].*?[\)\]]\s*", "").Trim();
 
+            // --- 闸门 2：如果清洗完标题变空了（比如原标题就是 ".mp3"），立即止损 ---
+            if (string.IsNullOrWhiteSpace(cT)) return;
+
             var files = Directory.GetFiles(LyricFolder, "*.lrc", SearchOption.TopDirectoryOnly);
 
-            // 3. 【第一阶段】绝对精准匹配（去空格化对比）
+            // 3. 【第一阶段】绝对精准匹配
             foreach (var pattern in FileNamePatterns)
             {
                 string[] titlesToTry = { cT, sT };
-                foreach (var t in titlesToTry.Distinct())
+                foreach (var t in titlesToTry.Distinct().Where(x => !string.IsNullOrEmpty(x)))
                 {
                     string targetName = pattern.Replace("{Artist}", sA).Replace("{Title}", t) + ".lrc";
                     string targetNoSpace = targetName.Replace(" ", "").ToLower();
 
-                    var match = files.FirstOrDefault(f => {
+                    var match = files.FirstOrDefault(f =>
+                    {
                         string actualName = Path.GetFileName(f).Replace(" ", "").ToLower();
                         return actualName == targetNoSpace;
                     });
@@ -72,14 +78,20 @@ namespace MediaMonitor
                 }
             }
 
-            // 4. 【第二阶段】模糊匹配
-            if (CurrentLyricPath == null)
+            // 4. 【第二阶段】模糊匹配（增加非空检查，防止 Contains("")）
+            if (CurrentLyricPath == null && !string.IsNullOrEmpty(cT))
             {
-                CurrentLyricPath = files.FirstOrDefault(f => {
+                CurrentLyricPath = files.FirstOrDefault(f =>
+                {
                     string name = Path.GetFileNameWithoutExtension(f);
-                    return name.Contains(sA, StringComparison.OrdinalIgnoreCase) &&
-                           name.Contains(cT, StringComparison.OrdinalIgnoreCase);
-                }) ?? files.FirstOrDefault(f => Path.GetFileNameWithoutExtension(f).Contains(cT, StringComparison.OrdinalIgnoreCase));
+                    // 只有当歌手名也不为空时才做双重匹配
+                    bool artistMatch = !string.IsNullOrEmpty(sA) && name.Contains(sA, StringComparison.OrdinalIgnoreCase);
+                    return artistMatch && name.Contains(cT, StringComparison.OrdinalIgnoreCase);
+                }) ?? files.FirstOrDefault(f =>
+                {
+                    string name = Path.GetFileNameWithoutExtension(f);
+                    return name.Contains(cT, StringComparison.OrdinalIgnoreCase);
+                });
             }
 
             if (CurrentLyricPath != null) ParseFile(CurrentLyricPath);
