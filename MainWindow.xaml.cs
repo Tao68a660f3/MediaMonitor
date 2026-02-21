@@ -418,6 +418,41 @@ namespace MediaMonitor
             catch (Exception ex) { MessageBox.Show(ex.Message); }
         }
 
+        private void BtnSyncTime_Click(object sender, RoutedEventArgs e)
+        {
+            if (!_serial.IsOpen)
+            {
+                MessageBox.Show("请先连接串口！");
+                return;
+            }
+
+            // 1. 获取当前系统时间
+            DateTime now = DateTime.Now;
+
+            // 2. 计算星期：DS1302 习惯周一为 1，周日为 7
+            byte week = (byte)(now.DayOfWeek == DayOfWeek.Sunday ? 7 : (int)now.DayOfWeek);
+
+            // 3. 构造 Payload (7 字节: Y, M, D, h, m, s, w)
+            byte[] payload = new byte[] {
+                (byte)(now.Year % 100), // 年 (例如 26)
+                (byte)now.Month,        // 月
+                (byte)now.Day,          // 日
+                (byte)now.Hour,         // 时
+                (byte)now.Minute,       // 分
+                (byte)now.Second,       // 秒
+                week                    // 周
+            };
+
+            // 4. 封装并发送 (CMD 为 0x20)
+            // 注意：此处调用你 SerialService 中现有的封包方法
+            byte[] packet = _serial.BuildPacket(0x20, payload);
+
+            SendAndLog(packet);
+
+            // 在预览窗给个显眼的提示
+            LogToPreview($"[RTC] 已发送系统时间同步指令: {now:yyyy-MM-dd HH:mm:ss} (周{week})", Brushes.Cyan);
+        }
+
         private void LoadSettings()
         {
             var cfg = ConfigService.Load();

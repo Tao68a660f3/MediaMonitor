@@ -80,7 +80,7 @@
                             <CheckBox x:Name="ChkTransOccupies" Content="翻译占行" IsChecked="True"/>
                         </WrapPanel>
 
-                        <UniformGrid Columns="3" Margin="0,0,0,10">
+                        <UniformGrid Columns="4" Margin="0,0,0,10">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock Text="屏行数:" VerticalAlignment="Center"/>
                                 <TextBox x:Name="TxtScreenLines" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged" InputMethod.IsInputMethodEnabled="False" Text="3" Width="35" Margin="5,0"/>
@@ -93,9 +93,11 @@
                                 <TextBlock Text="刷新率(ms):" VerticalAlignment="Center"/>
                                 <TextBox x:Name="TxtUpdateRate" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged" InputMethod.IsInputMethodEnabled="False" Text="50" Width="40" Margin="5,0"/>
                             </StackPanel>
+                            <Button x:Name="BtnSyncTime" Content="同步时间" Click="BtnSyncTime_Click" Width="70" HorizontalAlignment="Right"/>
                         </UniformGrid>
 
                         <Button x:Name="BtnSerialConn" Content="连接串口" Height="35" Click="BtnSerialConn_Click" Background="#0078D7" Foreground="White" BorderThickness="0" FontWeight="Bold"/>
+
                     </StackPanel>
                 </Border>
             </Expander>

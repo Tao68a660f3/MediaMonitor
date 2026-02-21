@@ -1,7 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO.Ports;
-using System.Linq;
+﻿using System.IO.Ports;
 using System.Text;
 
 namespace MediaMonitor
@@ -49,6 +46,29 @@ namespace MediaMonitor
             header.AddRange(BitConverter.GetBytes(absIdx));      // Int16, 2B
             header.AddRange(BitConverter.GetBytes(startTimeMs)); // UInt32, 4B
             return header;
+        }
+
+        // 0x20: 对时包
+        public byte[] BuildTimeSync()
+        {
+            var now = DateTime.Now;
+            // 计算星期：C# DayOfWeek 是枚举（周日=0, 周一=1...），
+            // 需根据你单片机 DS1302 驱动的要求转换（通常 DS1302 周一至周日是 1-7）
+            byte week = (byte)(now.DayOfWeek == DayOfWeek.Sunday ? 7 : (int)now.DayOfWeek);
+
+            byte[] payload = new byte[] {
+                (byte)(now.Year % 100), // 年 (如 24)
+                (byte)now.Month,         // 月
+                (byte)now.Day,           // 日
+                (byte)now.Hour,          // 时
+                (byte)now.Minute,        // 分
+                (byte)now.Second,        // 秒
+                week                     // 周
+            };
+
+            // 假设你的包格式是: [Header][CMD][LEN][Payload][CheckSum]
+            // 或者是你 DecodeMeta 里那种 ptr 风格。按你之前的逻辑封装：
+            return BuildPacket(0x20, payload);
         }
 
         // 0x12: 原文包
