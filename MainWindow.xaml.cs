@@ -322,6 +322,12 @@ namespace MediaMonitor
                     tag.Text = " [逐字行] "; tag.Background = Brushes.DarkRed;
                     detail = DecodeWordByWord(data, enc);
                 }
+                else if (cmd == 0x20) // 对时指令
+                {
+                    tag.Text = " [时间同步] ";
+                    tag.Background = Brushes.Teal;
+                    detail = DecodeTimeSync(data); // 风格统一！
+                }
 
                 p.Inlines.Add(tag);
                 p.Inlines.Add(new Run(" " + detail) { Foreground = Brushes.White });
@@ -376,10 +382,38 @@ namespace MediaMonitor
             {
                 ushort off = BitConverter.ToUInt16(data, ptr);
                 byte len = data[ptr + 2];
-                sb.Append($"{enc.GetString(data, ptr + 3, len)}<{off}ms> ");
+                sb.Append($"<{off}ms>{enc.GetString(data, ptr + 3, len)}");
                 ptr += (3 + len);
             }
             return sb.ToString();
+        }
+
+        private string DecodeTimeSync(byte[] data)
+        {
+            // 协议约定：Payload 从 data[3] 开始，顺序为 Y, M, D, h, m, s, w
+            // 字节索引：Header(0), CMD(1), LEN(2), Y(3), M(4), D(5), h(6), m(7), s(8), w(9)
+            if (data.Length < 10) return "数据长度不足";
+
+            try
+            {
+                int yy = data[3];
+                int mm = data[4];
+                int dd = data[5];
+                int h = data[6];
+                int m = data[7];
+                int s = data[8];
+                int w = data[9];
+
+                string[] weeks = { "日", "一", "二", "三", "四", "五", "六", "日" };
+                // 针对 DS1302 习惯（1-7对应周一至周日），增加一层鲁棒性处理
+                string wStr = (w >= 1 && w <= 7) ? weeks[w] : w.ToString();
+
+                return $"20{yy:D2}-{mm:D2}-{dd:D2} {h:D2}:{m:D2}:{s:D2} (周{wStr})";
+            }
+            catch
+            {
+                return "解析失败";
+            }
         }
 
         private void LogToPreview(string msg, Brush color)
@@ -448,9 +482,6 @@ namespace MediaMonitor
             byte[] packet = _serial.BuildPacket(0x20, payload);
 
             SendAndLog(packet);
-
-            // 在预览窗给个显眼的提示
-            LogToPreview($"[RTC] 已发送系统时间同步指令: {now:yyyy-MM-dd HH:mm:ss} (周{week})", Brushes.Cyan);
         }
 
         private void LoadSettings()
