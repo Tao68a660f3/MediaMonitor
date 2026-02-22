@@ -42,7 +42,7 @@ namespace MediaMonitor
                 {
                     TimeSpan curTime = TimeSpan.FromSeconds(p.CurrentSeconds);
                     int cIdx = _lyric.Lines.FindLastIndex(l => l.Time <= curTime);
-                    HandleOutput(cIdx); // 立即重发当前歌词
+                    HandleOutput(cIdx, true); // 立即重发当前歌词
                 }
             };
 
@@ -208,12 +208,15 @@ namespace MediaMonitor
 
             if (cIdx != _lastProcessedCIdx)
             {
-                _lastProcessedCIdx = cIdx;
-                HandleOutput(cIdx);
+                // 如果新索引小于旧索引，说明是回跳
+                bool isJump = (cIdx < _lastProcessedCIdx) || Math.Abs(cIdx - _lastProcessedCIdx) > 1;
+
+                _lastProcessedCIdx = cIdx; // 更新旧索引
+                HandleOutput(cIdx, isJump); // 把“是否跳转”传进去
             }
         }
 
-        private void HandleOutput(int cIdx)
+        private void HandleOutput(int cIdx, bool forceRefresh)
         {
             if (!_serial.IsOpen) return;
 
@@ -266,11 +269,12 @@ namespace MediaMonitor
                 if (lyricIdx > _lyric.Lines.Count + lineLimit) break;
             }
 
-            // 差分/全量发送
-            var toNotify = (ChkIncremental.IsChecked == true)
+            // 差分列表计算
+            var toNotify = (ChkIncremental.IsChecked == true && !forceRefresh)
                            ? targetSlots.Except(_syncedSlots).ToList()
                            : targetSlots.ToList();
 
+            // 3. 原封不动的发送逻辑
             foreach (var slot in toNotify)
             {
                 if (!dataToSync.TryGetValue(slot, out var pack)) continue;
@@ -281,11 +285,12 @@ namespace MediaMonitor
                 }
                 else
                 {
-                    // RAW 模式：原文空行会发 \n，翻译空行因为上面没进列表，所以不会发
                     _serial.SendRaw(_serial.GetEncodedBytes(pack.RawText + "\n"));
                     LogToPreview($"[RAW] {pack.RawText}", Brushes.Yellow);
                 }
             }
+
+            // 4. 更新同步账本：让上位机记住现在单片机里存的是哪几行
             _syncedSlots = targetSlots;
         }
 
