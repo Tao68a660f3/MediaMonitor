@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Windows.Media.Control;
 
-namespace MediaMonitor
+namespace MediaMonitor.Services
 {
     public record MediaProgressInfo(double CurrentSeconds, double TotalSeconds, string CurrentStr, string TotalStr, string Status);
 

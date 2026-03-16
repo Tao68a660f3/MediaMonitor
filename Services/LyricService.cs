@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 
-namespace MediaMonitor
+namespace MediaMonitor.Services
 {
     public class WordInfo { public TimeSpan Time { get; set; } public string Word { get; set; } = ""; }
 

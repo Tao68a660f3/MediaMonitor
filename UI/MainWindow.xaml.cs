@@ -9,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using System.IO.Ports;
 using Windows.Media.Control;
+using MediaMonitor.Services;
 
 namespace MediaMonitor
 {

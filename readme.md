@@ -19,10 +19,10 @@
 
 * **工业级日志**：控制台式自动清理逻辑，防止长时间运行导致的内存溢出。
 
-![](/screenshots/运行截图.png)
-![](/screenshots/示意图.jpg)
-![](/screenshots/示意图2.jpg)
-![](/screenshots/示意图3.jpg)
+![](./Assets/Screenshots/运行截图.png)
+![](./Assets/Screenshots/示意图.jpg)
+![](./Assets/Screenshots/示意图2.jpg)
+![](./Assets/Screenshots/示意图3.jpg)
 
 ---
 

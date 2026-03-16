@@ -2,7 +2,7 @@
 using System.IO;
 using System.Text.Json;
 
-namespace MediaMonitor
+namespace MediaMonitor.Services
 {
     public class AppConfig
     {

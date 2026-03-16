@@ -1,7 +1,7 @@
 ﻿using System.IO.Ports;
 using System.Text;
 
-namespace MediaMonitor
+namespace MediaMonitor.Services
 {
     public enum EncodingType { UTF8, GB2312 }
 
