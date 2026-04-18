@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace MediaMonitor.Services
@@ -9,16 +10,13 @@ namespace MediaMonitor.Services
     {
         private UdpClient? _udpClient;
         private IPEndPoint? _remoteEndPoint;
-        private bool _isListening;
+        private CancellationTokenSource? _cts; // 控制异步循环退出的令牌
 
-        // 实现接口属性
         public bool IsConnected => _udpClient != null;
 
-        // 实现接口事件
         public event Action<byte[]> OnRawDataReceived = _ => { };
         public event Action<string> OnTransportError = _ => { };
 
-        // UDP 特有配置：目标 IP 和 端口
         public string RemoteIp { get; set; } = "127.0.0.1";
         public int RemotePort { get; set; } = 8080;
         public int LocalPort { get; set; } = 8081;
@@ -27,14 +25,14 @@ namespace MediaMonitor.Services
         {
             try
             {
-                Disconnect(); // 确保先清理旧连接
+                Disconnect(); // 确保先清理旧资源
 
                 _udpClient = new UdpClient(LocalPort);
                 _remoteEndPoint = new IPEndPoint(IPAddress.Parse(RemoteIp), RemotePort);
+                _cts = new CancellationTokenSource(); // 初始化新的取消令牌
 
-                _isListening = true;
-                // 开启异步监听线程
-                Task.Run(ReceiveLoop);
+                // 将令牌传递给异步接收循环
+                Task.Run(() => ReceiveLoop(_cts.Token));
             }
             catch (Exception ex)
             {
@@ -45,8 +43,14 @@ namespace MediaMonitor.Services
 
         public void Disconnect()
         {
-            _isListening = false;
+            // 1. 发送取消信号，通知 ReceiveLoop 停止
+            _cts?.Cancel();
+            _cts?.Dispose();
+            _cts = null;
+
+            // 2. 释放底层 UDP 资源
             _udpClient?.Close();
+            _udpClient?.Dispose();
             _udpClient = null;
         }
 
@@ -65,30 +69,46 @@ namespace MediaMonitor.Services
             }
         }
 
-        private async Task ReceiveLoop()
+        private async Task ReceiveLoop(CancellationToken token)
         {
-            while (_isListening && _udpClient != null)
+            // 只要令牌没被取消，就一直运行
+            while (!token.IsCancellationRequested && _udpClient != null)
             {
                 try
                 {
-                    var result = await _udpClient.ReceiveAsync();
+                    // 使用支持 CancellationToken 的 ReceiveAsync 版本
+                    // 当 Disconnect() 被调用时，这里会立即抛出 OperationCanceledException 从而退出
+                    var result = await _udpClient.ReceiveAsync(token);
+
                     if (result.Buffer.Length > 0)
                     {
-                        // 抛给 PackageHelper
                         OnRawDataReceived.Invoke(result.Buffer);
                     }
                 }
+                catch (OperationCanceledException)
+                {
+                    // 正常的退出路径，由 Disconnect 发出信号
+                    break;
+                }
                 catch (ObjectDisposedException)
                 {
-                    // 正常关闭，跳出循环
+                    // 物理连接已被销毁
                     break;
                 }
                 catch (Exception ex)
                 {
-                    if (_isListening)
+                    // 只有在非取消状态下的异常才需要上报
+                    if (!token.IsCancellationRequested)
                     {
                         OnTransportError.Invoke($"UDP 接收异常: {ex.Message}");
                     }
+
+                    // === 添加以下三行，清理连接状态 ===
+                    _udpClient?.Close();
+                    _udpClient = null;
+                    _cts?.Cancel();
+
+                    break;
                 }
             }
         }

@@ -38,66 +38,94 @@
             <Expander Header="硬件与路径设置" IsExpanded="True" Background="Transparent">
                 <Border Background="#E8E8E8" Padding="10" CornerRadius="5" Margin="0,5">
                     <StackPanel>
-                        <Grid Margin="0,0,0,5">
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <TextBlock Text="传输方式:" VerticalAlignment="Center" FontWeight="Bold" Margin="0,0,10,0"/>
+                            <RadioButton x:Name="RbSerial" Content="串口模式" IsChecked="True" GroupName="TransMode" Margin="0,0,10,0" Click="TransMode_Changed"/>
+                            <RadioButton x:Name="RbUdp" Content="UDP网络" GroupName="TransMode" Click="TransMode_Changed"/>
+                        </StackPanel>
+
+                        <Grid x:Name="GridSerialConfig" Margin="0,0,0,10" Visibility="Visible">
                             <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="2*"/>
+                                <ColumnDefinition Width="1*"/>
                             </Grid.ColumnDefinitions>
                             <StackPanel Margin="2">
-                                <TextBlock Text="串口号:" FontSize="10"/>
+                                <TextBlock Text="串口号:" FontSize="10" Foreground="Gray"/>
                                 <ComboBox x:Name="ComboPorts"/>
                             </StackPanel>
                             <StackPanel Grid.Column="1" Margin="2">
-                                <TextBlock Text="波特率:" FontSize="10"/>
-                                <ComboBox x:Name="ComboBaud">
-                                    <ComboBoxItem Content="9600"/>
+                                <TextBlock Text="波特率:" FontSize="10" Foreground="Gray"/>
+                                <ComboBox x:Name="ComboBaud" IsEditable="True">
                                     <ComboBoxItem Content="115200" IsSelected="True"/>
+                                    <ComboBoxItem Content="9600"/>
                                     <ComboBoxItem Content="921600"/>
-                                </ComboBox>
-                            </StackPanel>
-                            <StackPanel Grid.Column="2" Margin="2">
-                                <TextBlock Text="编码:" FontSize="10"/>
-                                <ComboBox x:Name="ComboEncoding">
-                                    <ComboBoxItem Content="UTF-8"/>
-                                    <ComboBoxItem Content="GB2312"/>
                                 </ComboBox>
                             </StackPanel>
                         </Grid>
 
-                        <TextBlock Text="歌词搜索目录:" FontSize="10" Margin="0,5,0,0"/>
-                        <DockPanel Margin="0,2,0,5">
-                            <Button x:Name="BtnBrowse" Content="浏览" Click="BtnBrowse_Click" Width="50" DockPanel.Dock="Right"/>
-                            <TextBox x:Name="TxtLrcPath" Text="C:\Lyrics" VerticalContentAlignment="Center"/>
+                        <Grid x:Name="GridUdpConfig" Margin="0,0,0,10" Visibility="Collapsed">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*"/>
+                                <ColumnDefinition Width="1*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Margin="2">
+                                <TextBlock Text="远程 IP 地址:" FontSize="10" Foreground="Gray"/>
+                                <TextBox x:Name="TxtRemoteIp" Text="192.168.1.100" VerticalContentAlignment="Center" Height="22"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Margin="2">
+                                <TextBlock Text="远程端口:" FontSize="10" Foreground="Gray"/>
+                                <TextBox x:Name="TxtRemotePort" Text="8080" VerticalContentAlignment="Center" Height="22"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <DockPanel Margin="2,0,2,10">
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="数据编码:" FontSize="10" Foreground="Gray" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                <ComboBox x:Name="ComboEncoding" Width="100" VerticalContentAlignment="Center">
+                                    <ComboBoxItem Content="UTF-8" IsSelected="True"/>
+                                    <ComboBoxItem Content="GB2312"/>
+                                </ComboBox>
+                            </StackPanel>
+
+                            <Button x:Name="BtnSyncTime" Content="同步系统时间 (0x20)" Click="BtnSyncTime_Click" 
+                                HorizontalAlignment="Right" Width="130" Height="24"
+                                Background="#555555" Foreground="White" BorderThickness="0" Cursor="Hand">
+                                <Button.Resources>
+                                    <Style TargetType="Border">
+                                        <Setter Property="CornerRadius" Value="3"/>
+                                    </Style>
+                                </Button.Resources>
+                            </Button>
                         </DockPanel>
 
-                        <!--<TextBlock Text="匹配模式 (用分号隔开):" FontSize="10"/>
-                        <TextBox x:Name="TxtPatterns" Text="{}{Artist} - {Title};{Title}"/>-->
 
                         <WrapPanel Margin="0,8">
                             <CheckBox x:Name="ChkAdvancedMode" Content="高级协议(0xAA)" IsChecked="True" Margin="0,0,10,0"/>
-                            <CheckBox x:Name="ChkIncremental" Content="增量发送" IsChecked="True" Margin="0,0,10,0"/>
+                            <CheckBox x:Name="ChkIncremental" Content="增量差分" IsChecked="True" Margin="0,0,10,0"/>
                             <CheckBox x:Name="ChkTransOccupies" Content="翻译占行" IsChecked="True"/>
+                            
                         </WrapPanel>
 
-                        <UniformGrid Columns="4" Margin="0,0,0,10">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="屏行数:" VerticalAlignment="Center"/>
-                                <TextBox x:Name="TxtScreenLines" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged" InputMethod.IsInputMethodEnabled="False" Text="3" Width="35" Margin="5,0"/>
+                        <UniformGrid Columns="2" Margin="0,0,0,10">
+                            <StackPanel Orientation="Horizontal" Margin="0,2">
+                                <TextBlock Text="显示行数:" VerticalAlignment="Center" Width="65"/>
+                                <TextBox x:Name="TxtLineLimit" Text="2" Width="40" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged"/>
                             </StackPanel>
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="偏移:" VerticalAlignment="Center"/>
-                                <TextBox x:Name="TxtOffset" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged" InputMethod.IsInputMethodEnabled="False" Text="1" Width="35" Margin="5,0"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,2">
+                                <TextBlock Text="歌词偏移:" VerticalAlignment="Center" Width="65"/>
+                                <TextBox x:Name="TxtOffset" Text="0" Width="40" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged"/>
                             </StackPanel>
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="刷新率(ms):" VerticalAlignment="Center"/>
-                                <TextBox x:Name="TxtUpdateRate" PreviewTextInput="OnlyNumber_PreviewTextInput" TextChanged="NumberTextBox_TextChanged" InputMethod.IsInputMethodEnabled="False" Text="50" Width="40" Margin="5,0"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,2">
+                                <TextBlock Text="逻辑帧(ms):" VerticalAlignment="Center" Width="65"/>
+                                <TextBox x:Name="TxtUpdateRate" Text="50" Width="40" PreviewTextInput="OnlyNumber_PreviewTextInput"/>
                             </StackPanel>
-                            <Button x:Name="BtnSyncTime" Content="同步时间" Click="BtnSyncTime_Click" Width="70" HorizontalAlignment="Right"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,2">
+                                <TextBlock Text="同步包间隔:" VerticalAlignment="Center" Width="65"/>
+                                <TextBox x:Name="TxtSyncInterval" Text="500" Width="40" PreviewTextInput="OnlyNumber_PreviewTextInput"/>
+                            </StackPanel>
                         </UniformGrid>
 
-                        <Button x:Name="BtnSerialConn" Content="连接串口" Height="35" Click="BtnSerialConn_Click" Background="#0078D7" Foreground="White" BorderThickness="0" FontWeight="Bold"/>
-
+                        <Button x:Name="BtnConnect" Content="开启传输服务" Height="35" Background="#0078D7" Foreground="White" BorderThickness="0" FontWeight="Bold"/>
                     </StackPanel>
                 </Border>
             </Expander>

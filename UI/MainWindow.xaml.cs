@@ -1,545 +1,125 @@
-﻿using System;
+﻿using MediaMonitor.Services;
+using System;
 using System.Collections.Generic;
+using System.IO.Ports;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
-using System.IO.Ports;
 using Windows.Media.Control;
-using MediaMonitor.Services;
 
 namespace MediaMonitor
 {
     public partial class MainWindow : Window
     {
-        private readonly SmtcService _smtc = new SmtcService();
-        private readonly LyricService _lyric = new LyricService();
-        private readonly SerialService _serial = new SerialService();
-        private DispatcherTimer _uiTimer;
-        private string[] _lastPorts = Array.Empty<string>();
-
-        // 逻辑同步池：存储已经同步过的逻辑槽位 ID
-        private HashSet<string> _syncedSlots = new HashSet<string>();
-        private int _lastProcessedCIdx = -2;
-        private int _syncTick = 0;
+        private bool _isInternalChange = false; // 防止初始化时触发 TextChanged 导致循环调用
 
         public MainWindow()
         {
             InitializeComponent();
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance); // 注册 GB2312 支持
 
-            _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
-            _uiTimer.Tick += (s, e) => UpdateStep();
+            // 初始化 UI 状态
+            LoadSettingsToUI();
 
-            // 核心：创建一个通用的刷新动作
-            Action refreshAction = () =>
-            {
-                Invalidate();
-                var p = _smtc.GetCurrentProgress();
-                if (p != null)
-                {
-                    TimeSpan curTime = TimeSpan.FromSeconds(p.CurrentSeconds);
-                    int cIdx = _lyric.Lines.FindLastIndex(l => l.Time <= curTime);
-                    HandleOutput(cIdx, true); // 立即重发当前歌词
-                }
-            };
-
-            // 绑定 UI 交互事件，触发同步池重置
-            ChkAdvancedMode.Click += (s, e) => Invalidate();
-            ChkIncremental.Click += (s, e) => Invalidate();
-            ChkTransOccupies.Click += (s, e) => Invalidate();
-
-            // 绑定编码切换事件
-            ComboEncoding.SelectionChanged += (s, e) =>
-            {
-                if (_serial != null)
-                {
-                    _serial.SelectedEncoding = ComboEncoding.SelectedIndex == 1 ? EncodingType.GB2312 : EncodingType.UTF8;
-                    refreshAction();
-                }
-            };
-            // 动态监听刷新率变化（失去焦点时生效）
-            TxtUpdateRate.LostFocus += (s, e) =>
-            {
-                if (int.TryParse(TxtUpdateRate.Text, out int ur))
-                {
-                    if (ur < 10) ur = 10; // 安全下限
-                    if (ur > 5000) ur = 5000; // 安全上限
-                    _uiTimer.Interval = TimeSpan.FromMilliseconds(ur);
-                    TxtUpdateRate.Text = ur.ToString();
-                }
-            };
-
-            InitApp();
-            LoadSettings();
+            // 挂载后台服务委托
+            AttachBackend();
         }
 
-        private void Invalidate() { _syncedSlots.Clear(); _lastProcessedCIdx = -2; }
-
-        private async void InitApp()
+        // 仅数字输入限制
+        private void OnlyNumber_PreviewTextInput(object sender, TextCompositionEventArgs e)
         {
-            await _smtc.InitializeAsync();
-            _smtc.SessionsListChanged += () => Dispatcher.Invoke(() => RefreshSessions());
-
-            // 播放状态改变监听
-            _smtc.PlaybackChanged += (status) => Dispatcher.Invoke(() => SyncPlaybackState(status));
-
-            // 媒体内容改变监听
-            _smtc.OnMediaUpdated += (props) => Dispatcher.Invoke(() =>
-            {
-                TxtTitle.Text = props.Title;
-                TxtArtist.Text = props.Artist;
-                TxtAlbum.Text = props.AlbumTitle; // 重新接回专辑显示
-
-                // --- 关键：切歌时强制抹除旧索引缓存 ---
-                _lastProcessedCIdx = -2;
-                _syncedSlots.Clear();
-
-                _lyric.LoadAndParse(props.Title, props.Artist);
-                TxtLrcStatus.Text = _lyric.CurrentLyricPath != null ? $"已载入: {System.IO.Path.GetFileName(_lyric.CurrentLyricPath)}" : "未找到本地歌词";
-                Invalidate();
-                SyncMetadata(props.Title, props.Artist, props.AlbumTitle);
-                UpdateStep();
-            });
-
-            RefreshSessions();
-            _uiTimer.Start();
+            e.Handled = new Regex("[^0-9]+").IsMatch(e.Text);
         }
 
-        // 1. 拦截键盘输入（包括空格）
-        private void OnlyNumber_PreviewTextInput(object sender, System.Windows.Input.TextCompositionEventArgs e)
+        private void TransMode_Changed(object sender, RoutedEventArgs e)
         {
-            e.Handled = !System.Text.RegularExpressions.Regex.IsMatch(e.Text, @"^[0-9]+$");
+            // 保护逻辑：防止在 UI 初始化完成前被触发
+            if (GridSerialConfig == null || GridUdpConfig == null)
+                return;
+
+            bool isSerial = RbSerial.IsChecked ?? true;
+
+            // 切换容器可见性
+            GridSerialConfig.Visibility = isSerial ? Visibility.Visible : Visibility.Collapsed;
+            GridUdpConfig.Visibility = isSerial ? Visibility.Collapsed : Visibility.Visible;
+
+            // 如果已经初始化，自动保存一次模式选择
+            if (!_isInternalChange)
+                ApplyAndSaveConfig();
         }
 
-        // 2. 拦截非法字符粘贴和中文 IME 确认后的输入
-        private void NumberTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        // 从后台配置对象加载到 UI
+        private void LoadSettingsToUI()
         {
-            if (sender is TextBox textBox)
-            {
-                string rawText = textBox.Text;
-                // 过滤掉所有非数字字符
-                string cleanText = System.Text.RegularExpressions.Regex.Replace(rawText, @"[^0-9]", "");
+            _isInternalChange = true;
+            var cfg = App.ConfigSvc.Current;
 
-                if (rawText != cleanText)
-                {
-                    int selectionStart = textBox.SelectionStart; // 记录光标位置
-                    textBox.Text = cleanText;
-                    // 恢复光标位置，防止打字时跳格
-                    textBox.SelectionStart = Math.Max(0, selectionStart - (rawText.Length - cleanText.Length));
-                }
+            // 1. 传输模式
+            RbSerial.IsChecked = cfg.TransportMode == TransportType.Serial;
+            RbUdp.IsChecked = cfg.TransportMode == TransportType.UDP;
+            TransMode_Changed(null, null); // 触发一次显隐切换
 
-                // 如果是偏移量或行数改变，触发同步池重置
-                if (textBox.Name == "TxtOffset" || textBox.Name == "TxtScreenLines")
-                {
-                    Invalidate(); // 调用已有的重置逻辑
-                }
-            }
+            // 2. 串口/UDP 专属项
+            ComboPorts.Text = cfg.SerialPortName;
+            TxtPortOrBaud.Text = (cfg.TransportMode == TransportType.Serial)
+                ? cfg.BaudRate.ToString()
+                : cfg.RemotePort.ToString();
+            TxtRemoteIp.Text = cfg.RemoteIp;
+
+            // 3. 协议开关
+            ChkAdvancedMode.IsChecked = cfg.IsAdvancedMode;
+            ChkIncremental.IsChecked = cfg.IsIncremental;
+            ChkTransOccupies.IsChecked = cfg.TransOccupies;
+
+            // 4. 运行参数
+            TxtLineLimit.Text = cfg.LineLimit.ToString();
+            TxtOffset.Text = cfg.Offset.ToString();
+            TxtSyncInterval.Text = cfg.SyncIntervalMs.ToString();
+            TxtLrcPath.Text = cfg.LyricFolder;
+
+            _isInternalChange = false;
         }
 
-        private void SyncMetadata(string title, string artist, string album)
+        // 从 UI 提取并保存到后台
+        private void ApplyAndSaveConfig()
         {
-            if (!_serial.IsOpen) return;
-            if (ChkAdvancedMode.IsChecked == true)
+            if (_isInternalChange)
+                return;
+
+            var cfg = App.ConfigSvc.Current;
+
+            // 读取传输模式
+            cfg.TransportMode = RbSerial.IsChecked == true ? TransportType.Serial : TransportType.UDP;
+
+            if (cfg.TransportMode == TransportType.Serial)
             {
-                SendAndLog(_serial.BuildMetadata(title, artist, album));
+                cfg.SerialPortName = ComboPorts.Text;
+                cfg.BaudRate = int.TryParse(TxtPortOrBaud.Text, out int br) ? br : 115200;
             }
             else
             {
-                // 纯文本退化：发送带有前缀的媒体信息
-                string raw = $">> {title} / {artist} / {album}\n";
-                _serial.SendRaw(_serial.GetEncodedBytes(raw));
-                LogToPreview("[RAW META] " + raw, Brushes.Yellow);
-            }
-        }
-
-        private void SyncPlaybackState(GlobalSystemMediaTransportControlsSessionPlaybackStatus status)
-        {
-            if (!_serial.IsOpen || ChkAdvancedMode.IsChecked == false) return;
-            var p = _smtc.GetCurrentProgress();
-            if (p != null)
-            {
-                bool isPlaying = (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
-                _serial.SendRaw(_serial.BuildSync(isPlaying, (uint)(p.CurrentSeconds * 1000), (uint)(p.TotalSeconds * 1000)));
-            }
-        }
-
-        private void ComboSessions_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (ComboSessions.SelectedItem is GlobalSystemMediaTransportControlsSession session)
-            {
-                _smtc.SelectSession(session);
-                Invalidate(); // 切换会话时，清空同步池重新发送新歌信息
-            }
-        }
-
-        private void TxtOffset_TextChanged(object sender, TextChangedEventArgs e)
-        {
-            // 当偏移量改变时，清空同步池，强制重新计算显示内容
-            Invalidate();
-        }
-
-        private void UpdateStep()
-        {
-            CheckPorts();
-            var p = _smtc.GetCurrentProgress();
-            if (p == null) { ResetUI(); return; }
-
-            PbProgress.Maximum = p.TotalSeconds;
-            PbProgress.Value = p.CurrentSeconds;
-            TxtTime.Text = $"{p.CurrentStr} / {p.TotalStr}";
-
-            TimeSpan curTime = TimeSpan.FromSeconds(p.CurrentSeconds);
-            int cIdx = _lyric.Lines.FindLastIndex(l => l.Time <= curTime);
-
-
-            var l = _lyric.GetLine(cIdx);
-            TxtLyricDisplay.Text = l.Content + (string.IsNullOrEmpty(l.Translation) ? "" : "\n" + l.Translation);
-
-            if (!_serial.IsOpen) return;
-
-            // 定期进度同步 (0x11)
-            if (ChkAdvancedMode.IsChecked == true && ++_syncTick % 10 == 0)
-            {
-                _serial.SendRaw(_serial.BuildSync(p.Status == "Playing", (uint)(curTime.TotalMilliseconds), (uint)(p.TotalSeconds * 1000)));
+                cfg.RemoteIp = TxtRemoteIp.Text;
+                cfg.RemotePort = int.TryParse(TxtPortOrBaud.Text, out int rp) ? rp : 8080;
             }
 
-            if (cIdx != _lastProcessedCIdx)
-            {
-                // 如果新索引小于旧索引，说明是回跳
-                bool isJump = (cIdx < _lastProcessedCIdx) || Math.Abs(cIdx - _lastProcessedCIdx) > 1;
+            // 读取其他参数
+            cfg.IsAdvancedMode = ChkAdvancedMode.IsChecked ?? true;
+            cfg.IsIncremental = ChkIncremental.IsChecked ?? true;
+            cfg.TransOccupies = ChkTransOccupies.IsChecked ?? true;
+            cfg.LineLimit = int.TryParse(TxtLineLimit.Text, out int ll) ? ll : 2;
+            cfg.Offset = int.TryParse(TxtOffset.Text, out int os) ? os : 0;
+            cfg.SyncIntervalMs = int.TryParse(TxtSyncInterval.Text, out int si) ? si : 500;
+            cfg.LyricFolder = TxtLrcPath.Text;
 
-                _lastProcessedCIdx = cIdx; // 更新旧索引
-                HandleOutput(cIdx, isJump); // 把“是否跳转”传进去
-            }
-        }
-
-        private void HandleOutput(int cIdx, bool forceRefresh)
-        {
-            if (!_serial.IsOpen) return;
-
-            int lineLimit = int.TryParse(TxtScreenLines.Text, out int sl) ? sl : 3;
-            int offset = int.TryParse(TxtOffset.Text, out int os) ? os : 0;
-            bool isAdvanced = ChkAdvancedMode.IsChecked == true;
-            bool transOccupies = ChkTransOccupies.IsChecked == true;
-
-            var targetSlots = new HashSet<string>();
-            var dataToSync = new Dictionary<string, (byte[] AdvData, string RawText)>();
-
-            int currentPhysicalRow = 0;
-            int lyricIdx = cIdx - offset;
-
-            while (currentPhysicalRow < lineLimit)
-            {
-                var line = _lyric.GetLine(lyricIdx);
-
-                // 1. 原文槽位 (强制占用 1 行)
-                string mKey = $"{lyricIdx}_0x12";
-                targetSlots.Add(mKey);
-                string mText = line.Content ?? "";
-                dataToSync[mKey] = (isAdvanced ? (line.Words.Count > 0
-                    ? _serial.BuildWordByWord((short)lyricIdx, line.Time, line.Words)
-                    : _serial.BuildLyricLine((short)lyricIdx, line.Time, mText)) : null, mText);
-
-                currentPhysicalRow++; // 原文占掉一行
-
-                // --- 关键修正点 ---
-                // 2. 翻译槽位：只有当屏幕还有空余行，或者翻译不额外占行时，才允许发送
-                string tText = line.Translation ?? "";
-                if (!string.IsNullOrEmpty(tText))
-                {
-                    // 如果【翻译占行】，则必须要求当前屏幕还没被占满 (currentPhysicalRow < lineLimit)
-                    // 如果【翻译不占行】，则无论屏幕满没满都发（因为单片机可以同屏显示）
-                    if (!transOccupies || currentPhysicalRow < lineLimit)
-                    {
-                        string tKey = $"{lyricIdx}_0x13";
-                        targetSlots.Add(tKey);
-                        dataToSync[tKey] = (isAdvanced ? _serial.BuildTranslationLine((short)lyricIdx, line.Time, tText) : null, tText);
-
-                        if (transOccupies)
-                        {
-                            currentPhysicalRow++; // 翻译占掉下一行
-                        }
-                    }
-                }
-
-                lyricIdx++;
-                if (lyricIdx > _lyric.Lines.Count + lineLimit) break;
-            }
-
-            // 差分列表计算
-            var toNotify = (ChkIncremental.IsChecked == true && !forceRefresh)
-                           ? targetSlots.Except(_syncedSlots).ToList()
-                           : targetSlots.ToList();
-
-            // 3. 原封不动的发送逻辑
-            foreach (var slot in toNotify)
-            {
-                if (!dataToSync.TryGetValue(slot, out var pack)) continue;
-
-                if (isAdvanced)
-                {
-                    if (pack.AdvData != null) SendAndLog(pack.AdvData);
-                }
-                else
-                {
-                    _serial.SendRaw(_serial.GetEncodedBytes(pack.RawText + "\n"));
-                    LogToPreview($"[RAW] {pack.RawText}", Brushes.Yellow);
-                }
-            }
-
-            // 4. 更新同步账本：让上位机记住现在单片机里存的是哪几行
-            _syncedSlots = targetSlots;
-        }
-
-        private void SendAndLog(byte[] data)
-        {
-            if (data == null || data.Length < 2) return;
-            _serial.SendRaw(data);
-            if (data[1] == 0x11) return; // 忽略同步包日志
-
-            Dispatcher.Invoke(() =>
-            {
-                Encoding enc = _serial.CurrentEncoding;
-                var p = new Paragraph { Margin = new Thickness(0, 0, 0, 8) };
-                string hex = BitConverter.ToString(data).Replace("-", " ");
-                p.Inlines.Add(new Run($"{hex}\n") { Foreground = Brushes.DimGray, FontSize = 10 });
-
-                byte cmd = data[1];
-                Run tag = new Run { Foreground = Brushes.White };
-                string detail = "";
-
-                if (cmd == 0x10)
-                {
-                    tag.Text = " [元数据] "; tag.Background = Brushes.DarkBlue;
-                    detail = DecodeMeta(data, enc);
-                }
-                else if (cmd == 0x12 || cmd == 0x13)
-                {
-                    tag.Text = cmd == 0x12 ? " [主体行] " : " [翻译行] ";
-                    tag.Background = cmd == 0x12 ? Brushes.DarkGreen : Brushes.DarkSlateBlue;
-                    detail = DecodeStandard(data, enc);
-                }
-                else if (cmd == 0x14)
-                {
-                    tag.Text = " [逐字行] "; tag.Background = Brushes.DarkRed;
-                    detail = DecodeWordByWord(data, enc);
-                }
-                else if (cmd == 0x20) // 对时指令
-                {
-                    tag.Text = " [时间同步] ";
-                    tag.Background = Brushes.Teal;
-                    detail = DecodeTimeSync(data); // 风格统一！
-                }
-
-                p.Inlines.Add(tag);
-                p.Inlines.Add(new Run(" " + detail) { Foreground = Brushes.White });
-                AppendLog(p);
-            });
-        }
-
-        private void AppendLog(Block block)
-        {
-            // 自动清理：超过 100 行（Block）就清空，像控制台一样
-            if (HexPreview.Document.Blocks.Count > 100)
-            {
-                HexPreview.Document.Blocks.Clear();
-                // 可选：清空后留一个提示，知道它刚被重置过
-                HexPreview.Document.Blocks.Add(new Paragraph(new Run("--- 缓冲区已自动清空 ---") { Foreground = Brushes.Gray }));
-            }
-
-            HexPreview.Document.Blocks.Add(block);
-            HexPreview.ScrollToEnd();
-        }
-
-        private string DecodeMeta(byte[] data, Encoding enc)
-        {
-            try
-            {
-                int ptr = 3; List<string> res = new List<string>();
-                for (int i = 0; i < 3; i++)
-                {
-                    int len = data[ptr]; res.Add(enc.GetString(data, ptr + 1, len));
-                    ptr += (1 + len);
-                }
-                return string.Join(" | ", res);
-            }
-            catch { return "解析失败"; }
-        }
-
-        private string DecodeStandard(byte[] data, Encoding enc)
-        {
-            short idx = BitConverter.ToInt16(data, 3);
-            uint time = BitConverter.ToUInt32(data, 5);
-            string txt = enc.GetString(data, 9, data.Length - 10);
-            return $"({idx:D3}) [{time}ms] {txt}";
-        }
-
-        private string DecodeWordByWord(byte[] data, Encoding enc)
-        {
-            short idx = BitConverter.ToInt16(data, 3);
-            uint time = BitConverter.ToUInt32(data, 5);
-            StringBuilder sb = new StringBuilder($"({idx:D3}) [{time}ms] ");
-            int ptr = 10;
-            for (int i = 0; i < data[9]; i++)
-            {
-                ushort off = BitConverter.ToUInt16(data, ptr);
-                byte len = data[ptr + 2];
-                sb.Append($"<{off}ms>{enc.GetString(data, ptr + 3, len)}");
-                ptr += (3 + len);
-            }
-            return sb.ToString();
-        }
-
-        private string DecodeTimeSync(byte[] data)
-        {
-            // 协议约定：Payload 从 data[3] 开始，顺序为 Y, M, D, h, m, s, w
-            // 字节索引：Header(0), CMD(1), LEN(2), Y(3), M(4), D(5), h(6), m(7), s(8), w(9)
-            if (data.Length < 10) return "数据长度不足";
-
-            try
-            {
-                int yy = data[3];
-                int mm = data[4];
-                int dd = data[5];
-                int h = data[6];
-                int m = data[7];
-                int s = data[8];
-                int w = data[9];
-
-                string[] weeks = { "日", "一", "二", "三", "四", "五", "六", "日" };
-                // 针对 DS1302 习惯（1-7对应周一至周日），增加一层鲁棒性处理
-                string wStr = (w >= 1 && w <= 7) ? weeks[w] : w.ToString();
-
-                return $"20{yy:D2}-{mm:D2}-{dd:D2} {h:D2}:{m:D2}:{s:D2} (周{wStr})";
-            }
-            catch
-            {
-                return "解析失败";
-            }
-        }
-
-        private void LogToPreview(string msg, Brush color)
-        {
-            Dispatcher.Invoke(() =>
-            {
-                AppendLog(new Paragraph(new Run(msg) { Foreground = color }));
-            });
-        }
-
-        private void CheckPorts()
-        {
-            var p = _serial.GetPortNames();
-            if (!p.SequenceEqual(_lastPorts))
-            {
-                _lastPorts = p; string old = ComboPorts.Text;
-                ComboPorts.ItemsSource = p; if (p.Contains(old)) ComboPorts.Text = old;
-            }
-        }
-
-        private void ResetUI()
-        {
-            if (TxtTitle.Text == "无媒体") return;
-            TxtTitle.Text = "无媒体"; TxtArtist.Text = "等待播放..."; TxtAlbum.Text = ""; TxtLyricDisplay.Text = "";
-        }
-
-        private void RefreshSessions() => ComboSessions.ItemsSource = _smtc.GetSessions();
-
-        private void BtnSerialConn_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                if (!_serial.IsOpen) { _serial.Connect(ComboPorts.Text, 115200); BtnSerialConn.Content = "断开"; }
-                else { _serial.Disconnect(); BtnSerialConn.Content = "连接"; }
-            }
-            catch (Exception ex) { MessageBox.Show(ex.Message); }
-        }
-
-        private void BtnSyncTime_Click(object sender, RoutedEventArgs e)
-        {
-            if (!_serial.IsOpen)
-            {
-                MessageBox.Show("请先连接串口！");
-                return;
-            }
-
-            // 1. 获取当前系统时间
-            DateTime now = DateTime.Now;
-
-            // 2. 计算星期：DS1302 习惯周一为 1，周日为 7
-            byte week = (byte)(now.DayOfWeek == DayOfWeek.Sunday ? 7 : (int)now.DayOfWeek);
-
-            // 3. 构造 Payload (7 字节: Y, M, D, h, m, s, w)
-            byte[] payload = new byte[] {
-                (byte)(now.Year % 100), // 年 (例如 26)
-                (byte)now.Month,        // 月
-                (byte)now.Day,          // 日
-                (byte)now.Hour,         // 时
-                (byte)now.Minute,       // 分
-                (byte)now.Second,       // 秒
-                week                    // 周
-            };
-
-            // 4. 封装并发送 (CMD 为 0x20)
-            // 注意：此处调用你 SerialService 中现有的封包方法
-            byte[] packet = _serial.BuildPacket(0x20, payload);
-
-            SendAndLog(packet);
-        }
-
-        private void LoadSettings()
-        {
-            var cfg = ConfigService.Load();
-            ComboPorts.ItemsSource = _serial.GetPortNames();
-            ComboPorts.Text = cfg.PortName;
-            ComboEncoding.SelectedIndex = cfg.EncodingIndex;
-            TxtLrcPath.Text = cfg.LyricPath;
-            //TxtPatterns.Text = cfg.Patterns;
-            TxtScreenLines.Text = cfg.ScreenLines.ToString();
-            TxtOffset.Text = cfg.Offset.ToString();
-            ChkAdvancedMode.IsChecked = cfg.AdvancedMode;
-            ChkIncremental.IsChecked = cfg.Incremental;
-            ChkTransOccupies.IsChecked = cfg.TransOccupies;
-            // 加载刷新率并实时应用到定时器
-            int rate = cfg.UpdateRate > 0 ? cfg.UpdateRate : 50;
-            TxtUpdateRate.Text = rate.ToString();
-            if (_uiTimer != null)
-            {
-                _uiTimer.Interval = TimeSpan.FromMilliseconds(rate);
-            }
-            _lyric.LyricFolder = cfg.LyricPath;
-        }
-
-        private void SaveAppSettings()
-        {
-            ConfigService.Save(new AppConfig
-            {
-                PortName = ComboPorts.Text,
-                EncodingIndex = ComboEncoding.SelectedIndex,
-                LyricPath = TxtLrcPath.Text,
-                //Patterns = TxtPatterns.Text,
-                ScreenLines = int.TryParse(TxtScreenLines.Text, out int sl) ? sl : 3,
-                Offset = int.TryParse(TxtOffset.Text, out int os) ? os : 1,
-                UpdateRate = int.TryParse(TxtUpdateRate.Text, out int ur) ? ur : 50, // 保存刷新率
-                AdvancedMode = ChkAdvancedMode.IsChecked ?? true,
-                Incremental = ChkIncremental.IsChecked ?? true,
-                TransOccupies = ChkTransOccupies.IsChecked ?? true
-            });
-        }
-
-        private void BtnBrowse_Click(object sender, RoutedEventArgs e)
-        {
-            var d = new Microsoft.Win32.OpenFileDialog { CheckFileExists = false, FileName = "选择目录" };
-            if (d.ShowDialog() == true) TxtLrcPath.Text = System.IO.Path.GetDirectoryName(d.FileName);
-        }
-
-        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
-        {
-            SaveAppSettings();
-            base.OnClosing(e);
+            // 持久化并通知后台大脑
+            App.ConfigSvc.Save();
+            App.Master.UpdateConfig(cfg);
         }
     }
 }
