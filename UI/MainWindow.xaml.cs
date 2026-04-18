@@ -1,125 +1,219 @@
-﻿using MediaMonitor.Services;
-using System;
-using System.Collections.Generic;
-using System.IO.Ports;
-using System.Linq;
-using System.Text;
-using System.Text.RegularExpressions;
+﻿using System;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
 using System.Windows.Threading;
-using Windows.Media.Control;
+using MediaMonitor.Services;
+using MediaMonitor.Core;
 
 namespace MediaMonitor
 {
     public partial class MainWindow : Window
     {
-        private bool _isInternalChange = false; // 防止初始化时触发 TextChanged 导致循环调用
+        private DispatcherTimer _uiTimer;
+        private bool _isInternalChange = false;
+        private bool _isRealExit = false;
 
         public MainWindow()
         {
             InitializeComponent();
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance); // 注册 GB2312 支持
 
-            // 初始化 UI 状态
-            LoadSettingsToUI();
+            // 1. 初始化 UI 定时器，用于刷新界面显示
+            _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            _uiTimer.Tick += UIUpdate_Tick;
+            _uiTimer.Start();
 
-            // 挂载后台服务委托
-            AttachBackend();
+            // 2. 加载当前配置到控件
+            LoadConfigToUI();
+
+            if (App.Smtc != null)
+            {
+                App.Smtc.SessionsListChanged += RefreshSessionList;
+                RefreshSessionList(); // 立即加载一次
+            }
+            RefreshSerialPorts();
         }
 
-        // 仅数字输入限制
-        private void OnlyNumber_PreviewTextInput(object sender, TextCompositionEventArgs e)
+        private void RefreshSerialPorts()
         {
-            e.Handled = new Regex("[^0-9]+").IsMatch(e.Text);
+            try
+            {
+                var ports = System.IO.Ports.SerialPort.GetPortNames();
+                ComboPorts.ItemsSource = ports;
+                if (ports.Length > 0)
+                {
+                    // 尝试选中配置文件中保存的串口号
+                    var savedPort = App.ConfigSvc?.Current?.SerialPortName;
+                    if (!string.IsNullOrEmpty(savedPort) && ports.Contains(savedPort))
+                        ComboPorts.SelectedItem = savedPort;
+                    else
+                        ComboPorts.SelectedIndex = 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"获取串口列表失败: {ex.Message}");
+            }
         }
 
-        private void TransMode_Changed(object sender, RoutedEventArgs e)
+        private void RefreshSessionList()
         {
-            // 保护逻辑：防止在 UI 初始化完成前被触发
-            if (GridSerialConfig == null || GridUdpConfig == null)
+            if (App.Smtc == null)
                 return;
-
-            bool isSerial = RbSerial.IsChecked ?? true;
-
-            // 切换容器可见性
-            GridSerialConfig.Visibility = isSerial ? Visibility.Visible : Visibility.Collapsed;
-            GridUdpConfig.Visibility = isSerial ? Visibility.Collapsed : Visibility.Visible;
-
-            // 如果已经初始化，自动保存一次模式选择
-            if (!_isInternalChange)
-                ApplyAndSaveConfig();
+            var sessions = App.Smtc.GetSessions();
+            ComboSessions.ItemsSource = sessions;
+            if (sessions.Count > 0 && ComboSessions.SelectedIndex == -1)
+                ComboSessions.SelectedIndex = 0;
         }
 
-        // 从后台配置对象加载到 UI
-        private void LoadSettingsToUI()
+        private void LoadConfigToUI()
         {
             _isInternalChange = true;
             var cfg = App.ConfigSvc.Current;
 
-            // 1. 传输模式
+            // 传输层配置
             RbSerial.IsChecked = cfg.TransportMode == TransportType.Serial;
             RbUdp.IsChecked = cfg.TransportMode == TransportType.UDP;
-            TransMode_Changed(null, null); // 触发一次显隐切换
-
-            // 2. 串口/UDP 专属项
-            ComboPorts.Text = cfg.SerialPortName;
-            TxtPortOrBaud.Text = (cfg.TransportMode == TransportType.Serial)
-                ? cfg.BaudRate.ToString()
-                : cfg.RemotePort.ToString();
             TxtRemoteIp.Text = cfg.RemoteIp;
+            TxtRemotePort.Text = cfg.RemotePort.ToString();
 
-            // 3. 协议开关
+            // 串口逻辑
+            ComboBaud.Text = cfg.BaudRate.ToString();
+
+            // 协议与路径
+            TxtLrcPath.Text = cfg.LyricFolder;
             ChkAdvancedMode.IsChecked = cfg.IsAdvancedMode;
             ChkIncremental.IsChecked = cfg.IsIncremental;
-            ChkTransOccupies.IsChecked = cfg.TransOccupies;
 
-            // 4. 运行参数
+            // 参数列表
             TxtLineLimit.Text = cfg.LineLimit.ToString();
             TxtOffset.Text = cfg.Offset.ToString();
+            TxtUpdateRate.Text = cfg.UpdateIntervalMs.ToString();
             TxtSyncInterval.Text = cfg.SyncIntervalMs.ToString();
-            TxtLrcPath.Text = cfg.LyricFolder;
 
             _isInternalChange = false;
+            TransMode_Changed(null, null); // 触发一次显隐逻辑
         }
 
-        // 从 UI 提取并保存到后台
-        private void ApplyAndSaveConfig()
+        private void UIUpdate_Tick(object sender, EventArgs e)
         {
-            if (_isInternalChange)
+            if (App.Smtc == null || App.Lyrics == null)
                 return;
 
-            var cfg = App.ConfigSvc.Current;
+            // 更新播放信息
+            TxtTitle.Text = App.Smtc.CurrentTitle ?? "未在播放";
+            TxtArtist.Text = App.Smtc.CurrentArtist ?? "未知艺术家";
 
-            // 读取传输模式
-            cfg.TransportMode = RbSerial.IsChecked == true ? TransportType.Serial : TransportType.UDP;
-
-            if (cfg.TransportMode == TransportType.Serial)
+            // 更新进度条
+            var prog = App.Smtc.GetCurrentProgress();
+            if (prog != null)
             {
-                cfg.SerialPortName = ComboPorts.Text;
-                cfg.BaudRate = int.TryParse(TxtPortOrBaud.Text, out int br) ? br : 115200;
-            }
-            else
-            {
-                cfg.RemoteIp = TxtRemoteIp.Text;
-                cfg.RemotePort = int.TryParse(TxtPortOrBaud.Text, out int rp) ? rp : 8080;
+                PbProgress.Maximum = prog.TotalSeconds;
+                PbProgress.Value = prog.CurrentSeconds;
+                TxtTime.Text = $"{TimeSpan.FromSeconds(prog.CurrentSeconds):mm\\:ss} / {TimeSpan.FromSeconds(prog.TotalSeconds):mm\\:ss}";
             }
 
-            // 读取其他参数
-            cfg.IsAdvancedMode = ChkAdvancedMode.IsChecked ?? true;
-            cfg.IsIncremental = ChkIncremental.IsChecked ?? true;
-            cfg.TransOccupies = ChkTransOccupies.IsChecked ?? true;
-            cfg.LineLimit = int.TryParse(TxtLineLimit.Text, out int ll) ? ll : 2;
-            cfg.Offset = int.TryParse(TxtOffset.Text, out int os) ? os : 0;
-            cfg.SyncIntervalMs = int.TryParse(TxtSyncInterval.Text, out int si) ? si : 500;
-            cfg.LyricFolder = TxtLrcPath.Text;
-
-            // 持久化并通知后台大脑
-            App.ConfigSvc.Save();
-            App.Master.UpdateConfig(cfg);
+            // 更新歌词状态
+            int lrcCount = App.Lyrics.Lines?.Count ?? 0;
+            TxtLrcStatus.Text = lrcCount > 0 ? $"已加载 {lrcCount} 行" : "未找到歌词";
         }
+
+        private void TransMode_Changed(object sender, RoutedEventArgs e)
+        {
+            if (GridSerialConfig == null || GridUdpConfig == null)
+                return;
+
+            bool isSerial = RbSerial.IsChecked ?? true;
+            GridSerialConfig.Visibility = isSerial ? Visibility.Visible : Visibility.Collapsed;
+            GridUdpConfig.Visibility = isSerial ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        private void BtnConnect_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var cfg = App.ConfigSvc.Current;
+                cfg.TransportMode = RbSerial.IsChecked == true ? TransportType.Serial : TransportType.UDP;
+                cfg.RemoteIp = TxtRemoteIp.Text;
+                if (int.TryParse(TxtRemotePort.Text, out int port))
+                    cfg.RemotePort = port;
+                if (int.TryParse(TxtLineLimit.Text, out int lines))
+                    cfg.LineLimit = lines;
+                if (int.TryParse(TxtOffset.Text, out int offset))
+                    cfg.Offset = offset;
+                if (int.TryParse(TxtUpdateRate.Text, out int updateMs))
+                    cfg.UpdateIntervalMs = updateMs;
+                if (int.TryParse(TxtSyncInterval.Text, out int syncMs))
+                    cfg.SyncIntervalMs = syncMs;
+                cfg.LyricFolder = TxtLrcPath.Text;
+                cfg.IsAdvancedMode = ChkAdvancedMode.IsChecked ?? true;
+                cfg.IsIncremental = ChkIncremental.IsChecked ?? true;
+                cfg.TransOccupies = ChkTransOccupies.IsChecked ?? true;
+                // 编码
+                cfg.EncodingName = (ComboEncoding.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "utf-8";
+                // 串口参数
+                cfg.SerialPortName = ComboPorts.SelectedItem?.ToString() ?? "COM3";
+                if (int.TryParse(ComboBaud.Text, out int baud))
+                    cfg.BaudRate = baud;
+
+                // 创建传输层
+                IMediaTransport transport;
+                if (cfg.TransportMode == TransportType.Serial)
+                {
+                    var serial = new SerialService();
+                    serial.Connect(cfg.SerialPortName, cfg.BaudRate);
+                    transport = serial;
+                }
+                else
+                {
+                    var udp = new UdpService { RemoteIp = cfg.RemoteIp, RemotePort = cfg.RemotePort, LocalPort = cfg.LocalPort };
+                    udp.Connect();
+                    transport = udp;
+                }
+
+                App.Master?.UpdateTransport(transport);
+                App.Master?.ReconnectTransport();
+
+                App.ConfigSvc.Save();
+
+                BtnConnect.Content = "传输服务运行中";
+                BtnConnect.IsEnabled = false;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"启动失败: {ex.Message}");
+            }
+        }
+
+        // 1. 处理媒体源切换
+        private void ComboSessions_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (App.Smtc == null)
+                return;
+
+            // 从 ComboBox 中获取选中的会话并交给 SmtcService
+            var session = ComboSessions.SelectedItem as Windows.Media.Control.GlobalSystemMediaTransportControlsSession;
+            App.Smtc.SelectSession(session);
+        }
+
+        // 2. 处理文本框内容改变（XAML 中引用的通用事件）
+        private void NumberTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            // 如果你现在不需要在输入时实时保存，可以先留空
+            // 这样红线会立即消失
+        }
+
+        // 简单的数字输入限制
+        private void OnlyNumber_PreviewTextInput(object sender, System.Windows.Input.TextCompositionEventArgs e)
+        {
+            e.Handled = !char.IsDigit(e.Text, 0) && e.Text != "-";
+        }
+
+        private void BtnBrowse_Click(object sender, RoutedEventArgs e)
+        { /* 这里可以后续加 FolderBrowserDialog */
+        }
+        private void BtnSyncTime_Click(object sender, RoutedEventArgs e)
+        {
+            App.Master?.SendTimeSync();
+        } //
     }
 }

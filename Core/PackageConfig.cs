@@ -64,6 +64,9 @@ namespace MediaMonitor.Core
         /// </summary>
         public int SyncIntervalMs { get; set; } = 500;
 
+        // 补上缺失的逻辑帧属性
+        public int UpdateIntervalMs { get; set; } = 50;
+
         // 深拷贝方法，确保 UI 修改配置时不影响后台正在运行的实例
         public PackageConfig Clone() => (PackageConfig)this.MemberwiseClone();
     }

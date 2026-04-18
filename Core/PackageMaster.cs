@@ -13,7 +13,7 @@ namespace MediaMonitor.Core
     {
         private readonly object _syncLock = new object(); // 定义同步锁
 
-        private readonly IMediaTransport _transport;
+        private IMediaTransport _transport;
         private readonly LyricService _lyricService;
         private readonly SmtcService _smtc;
 
@@ -254,6 +254,33 @@ namespace MediaMonitor.Core
                 _transport.Send(b);
                 OnProtocolLog?.Invoke(b, Config.Encoding);
             }
+        }
+
+        // 在 PackageMaster 类中添加以下方法
+
+        public void UpdateTransport(IMediaTransport newTransport)
+        {
+            lock (_syncLock)
+            {
+                _transport?.Disconnect();
+                // 这里可以直接赋值，因为我们要切换底层协议
+                // 注意：如果你需要更严谨，可以重新绑定事件
+                _transport = newTransport;
+            }
+        }
+
+        public void ReconnectTransport()
+        {
+            _transport?.Connect();
+        }
+
+        public void SendTimeSync()
+        {
+            if (!Config.IsAdvancedMode)
+                return;
+            var p = PackageBuilder.BuildTimeSync();
+            _transport.Send(p);
+            OnProtocolLog?.Invoke(p, Config.Encoding);
         }
     }
 }

@@ -98,7 +98,14 @@
                             </Button>
                         </DockPanel>
 
-
+                        <StackPanel Margin="2,5,2,10">
+                            <TextBlock Text="歌词搜索目录:" FontSize="10" Foreground="Gray"/>
+                            <DockPanel>
+                                <Button x:Name="BtnBrowse" Content="浏览..." DockPanel.Dock="Right" Width="60" Margin="5,0,0,0" Click="BtnBrowse_Click"/>
+                                <TextBox x:Name="TxtLrcPath" Text="C:\Lyrics" VerticalContentAlignment="Center" Height="22"/>
+                            </DockPanel>
+                        </StackPanel>
+                        
                         <WrapPanel Margin="0,8">
                             <CheckBox x:Name="ChkAdvancedMode" Content="高级协议(0xAA)" IsChecked="True" Margin="0,0,10,0"/>
                             <CheckBox x:Name="ChkIncremental" Content="增量差分" IsChecked="True" Margin="0,0,10,0"/>
@@ -125,7 +132,7 @@
                             </StackPanel>
                         </UniformGrid>
 
-                        <Button x:Name="BtnConnect" Content="开启传输服务" Height="35" Background="#0078D7" Foreground="White" BorderThickness="0" FontWeight="Bold"/>
+                        <Button x:Name="BtnConnect" Content="开启传输服务" Click="BtnConnect_Click" Height="35" Background="#0078D7" Foreground="White" BorderThickness="0" FontWeight="Bold"/>
                     </StackPanel>
                 </Border>
             </Expander>
