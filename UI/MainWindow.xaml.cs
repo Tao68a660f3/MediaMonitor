@@ -4,6 +4,7 @@ using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 
 namespace MediaMonitor
@@ -55,6 +56,14 @@ namespace MediaMonitor
                         // TxtStatus.Text = $"连接异常中断: {msg}";
                     }
                 });
+            };
+
+            // 初始化 LogService 并绑定 UI 上的 RichTextBox (假设叫 LogBox)
+            App.LogSvc = new LogService(this.HexPreview);
+
+            // 顺便把串口/UDP 的报错也接过来
+            App.TransportMgr.OnTransportError += (msg) => {
+                App.LogSvc.LogInfo($"[传输异常] {msg}", Brushes.OrangeRed);
             };
 
             // 4. 执行初始化“点火”：根据配置决定是串口还是 UDP

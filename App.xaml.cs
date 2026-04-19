@@ -28,6 +28,10 @@ namespace MediaMonitor
         {
             get; private set;
         }
+        public static LogService? LogSvc
+        {
+            get; set;
+        }
 
         protected override async void OnStartup(StartupEventArgs e)
         {

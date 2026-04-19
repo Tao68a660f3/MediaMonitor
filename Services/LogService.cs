@@ -67,6 +67,22 @@ namespace MediaMonitor.Services
                     detail = DecodeTimeSync(data);
                 }
 
+                if (string.IsNullOrEmpty(detail))
+                {
+                    // 如果上面所有的 if (cmd == 0xXX) 都没有匹配成功
+                    try
+                    {
+                        // 直接尝试将整个包按当前编码转为字符串
+                        detail = enc.GetString(data);
+                        tag.Text = " [纯文本] ";
+                        tag.Background = Brushes.Gray;
+                    }
+                    catch
+                    {
+                        detail = "[非法编码数据]";
+                    }
+                }
+
                 p.Inlines.Add(tag);
                 p.Inlines.Add(new Run(" " + detail) { Foreground = Brushes.White });
                 AppendBlock(p);

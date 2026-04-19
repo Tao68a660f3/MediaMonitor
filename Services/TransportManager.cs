@@ -38,6 +38,9 @@ namespace MediaMonitor.Services
             if (_activeTransport != null && _activeTransport.IsConnected)
             {
                 _activeTransport.Send(data);
+
+                var currentEnc = App.ConfigSvc.Current.Encoding;
+                App.LogSvc?.LogProtocol(data, currentEnc);
             }
         }
 
