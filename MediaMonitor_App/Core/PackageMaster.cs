@@ -136,18 +136,31 @@ namespace MediaMonitor.Core
 
         private void HandleOutput(int cIdx, bool forceRefresh)
         {
+            // 基础校验
+            if (!_transport.IsConnected)
+                return;
+
             var targetSlots = new HashSet<string>();
             var dataToSync = new Dictionary<string, (byte[]? AdvData, string RawText)>();
 
             int currentPhysicalRow = 0;
             int lyricIdx = cIdx - Config.Offset;
 
-            // 构建当前视野内的所有槽位 (Slot)
+            // --- 核心循环修复 ---
             while (currentPhysicalRow < Config.LineLimit)
             {
+                // 歌词库边界保护
+                if (lyricIdx < 0)
+                {
+                    lyricIdx++;
+                    continue;
+                }
+                if (lyricIdx >= _lyricService.Lines.Count)
+                    break;
+
                 var line = _lyricService.GetLine(lyricIdx);
 
-                // 区分 0x12(逐行) 和 0x14(逐字)
+                // 1. 处理原文槽位 (强制占用 1 个物理行)
                 string cmdType = (line.Words.Count > 0) ? "0x14" : "0x12";
                 string mKey = $"{lyricIdx}_{cmdType}";
                 targetSlots.Add(mKey);
@@ -157,36 +170,46 @@ namespace MediaMonitor.Core
                     ? PackageBuilder.BuildWordByWord((short)lyricIdx, line.Time, line.Words)
                     : PackageBuilder.BuildLyricLine((short)lyricIdx, line.Time, mText)) : null, mText);
 
-                currentPhysicalRow++;
+                currentPhysicalRow++; // 原文占掉一行
 
-                // 翻译槽位 (0x13)
+                // 2. 处理翻译槽位
                 string tText = line.Translation ?? "";
                 if (!string.IsNullOrEmpty(tText))
                 {
+                    // 只有当【不占行】或者【占行且当前物理行未满】时，才处理翻译
                     if (!Config.TransOccupies || currentPhysicalRow < Config.LineLimit)
                     {
                         string tKey = $"{lyricIdx}_0x13";
                         targetSlots.Add(tKey);
-                        dataToSync[tKey] = (Config.IsAdvancedMode ? PackageBuilder.BuildTranslationLine((short)lyricIdx, line.Time, tText) : null, tText);
+                        dataToSync[tKey] = (Config.IsAdvancedMode
+                            ? PackageBuilder.BuildTranslationLine((short)lyricIdx, line.Time, tText)
+                            : null, tText);
+
                         if (Config.TransOccupies)
-                            currentPhysicalRow++;
+                        {
+                            currentPhysicalRow++; // 翻译占掉下一行
+                        }
                     }
                 }
 
                 lyricIdx++;
+
+                // 兜底安全跳出，防止在极端配置下死循环
                 if (lyricIdx > _lyricService.Lines.Count + Config.LineLimit)
                     break;
             }
 
-            // 核心差分判定：如果是增量模式且非跳转，则剔除已发送槽位
+            // --- 差分判定逻辑 ---
             List<string> toNotify;
             lock (_syncLock)
             {
+                // 如果是增量模式且非强制刷新，则只发送账本中不存在的新槽位
                 toNotify = (Config.IsIncremental && !forceRefresh)
-                           ? targetSlots.Except(_syncedSlots).ToList()
-                           : targetSlots.ToList();
+                            ? targetSlots.Except(_syncedSlots).ToList()
+                            : targetSlots.ToList();
             }
 
+            // --- 执行发送 ---
             foreach (var slot in toNotify)
             {
                 if (!dataToSync.TryGetValue(slot, out var pack))
@@ -201,15 +224,16 @@ namespace MediaMonitor.Core
                 }
                 else
                 {
-                    // 文本模式退化逻辑 (带换行符)
+                    // 文本模式退化逻辑
                     byte[] raw = Config.Encoding.GetBytes(pack.RawText + "\n");
                     _transport.Send(raw);
                 }
             }
 
-            // 更新账本并清理视野外槽位
+            // --- 更新账本 ---
             lock (_syncLock)
             {
+                // 这一步至关重要：同步后，上位机账本必须与当前屏幕视野（targetSlots）完全一致
                 _syncedSlots = targetSlots;
             }
         }
@@ -229,11 +253,13 @@ namespace MediaMonitor.Core
                     if (_wallIntervalSamples.Count > 10)
                         _wallIntervalSamples.RemoveAt(0);
                 }
-                // Seek 判定：超过 2 秒偏差则清空账本重刷
-                else if (Math.Abs(deltaMedia) > 2.0 || deltaMedia < 0)
-                {
-                    Invalidate();
-                }
+
+                // 账本自己会决定重发，不需要这个
+                //// Seek 判定：超过 2 秒偏差则清空账本重刷
+                //else if (Math.Abs(deltaMedia) > 2.0 || deltaMedia < 0)
+                //{
+                //    Invalidate();
+                //}
             }
             _lastSmtcMediaSec = info.CurrentSeconds;
             _lastSmtcWallSec = nowWall;
