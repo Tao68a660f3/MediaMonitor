@@ -1,10 +1,11 @@
-﻿using System;
+﻿using MediaMonitor.Services;
+using MediaMonitor.Tools;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using MediaMonitor.Services;
-using MediaMonitor.Tools;
+using System.Windows.Shapes;
 using Windows.Media.Control;
 
 namespace MediaMonitor.Core
@@ -12,6 +13,8 @@ namespace MediaMonitor.Core
     public class PackageMaster
     {
         private readonly object _syncLock = new object(); // 定义同步锁
+
+        public event Action<int, LyricLine>? LyricChanged;
 
         private IMediaTransport _transport;
         private readonly LyricService _lyricService;
@@ -80,14 +83,11 @@ namespace MediaMonitor.Core
         {
             while (!token.IsCancellationRequested)
             {
-                if (_transport.IsConnected)
+                try
                 {
-                    try
-                    {
-                        ProcessTick();
-                    }
-                    catch { }
+                    ProcessTick();
                 }
+                catch { }
                 await Task.Delay(50, token); // 50ms 逻辑帧周期
             }
         }
@@ -102,6 +102,11 @@ namespace MediaMonitor.Core
 
             double cur = prog.CurrentSeconds;
             int cIdx = _lyricService.Lines.FindLastIndex(l => l.Time <= TimeSpan.FromSeconds(cur));
+
+            LyricChanged?.Invoke(cIdx, _lyricService.GetLine(cIdx));
+
+            if (!_transport.IsConnected)
+                return;
 
             // 1. 同步包发送 (不涉及竞争变量，不需要锁)
             int syncThreshold = Math.Max(1, Config.SyncIntervalMs / 50);

@@ -70,7 +70,7 @@ namespace MediaMonitor
                 // 异步启动 SMTC 服务
                 await Smtc.InitializeAsync();
 
-                // 开启逻辑循环（心跳检测开始，但因为是 DummyTransport，所以不会真发数据）
+                // 开启逻辑循环
                 Master.Start();
 
                 // 最后打开主界面

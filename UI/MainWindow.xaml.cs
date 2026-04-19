@@ -34,6 +34,12 @@ namespace MediaMonitor
                 RefreshSessionList();
             }
 
+            // 订阅歌词变化信号
+            if (App.Master != null)
+            {
+                App.Master.LyricChanged += OnMasterLyricChanged;
+            }
+
             // 4. 执行初始化“点火”：根据配置决定是串口还是 UDP
             bool isSerialMode = RbSerial.IsChecked ?? true;
             SwitchTransportMode(isSerialMode);
@@ -218,6 +224,39 @@ namespace MediaMonitor
             int lrcCount = App.Lyrics.Lines?.Count ?? 0;
             string lrcPath = App.Lyrics.CurrentLyricPath ?? "";
             TxtLrcStatus.Text = lrcCount > 0 ? $"已加载 {lrcPath}, {lrcCount} 行" : "未找到歌词";
+        }
+
+        // MainWindow.xaml.cs 内部
+
+        private void OnMasterLyricChanged(int index, LyricLine line)
+        {
+            // 因为 PackageMaster 通常在后台线程，更新 UI 必须回到主线程
+            Dispatcher.Invoke(() =>
+            {
+                if (line == null || line.IsEmpty)
+                {
+                    TxtLyricDisplay.Text = "--- 暂无歌词 ---";
+                    return;
+                }
+
+                // 1. 获取当前配置（用于判断是否显示翻译）
+                var cfg = App.ConfigSvc?.Current;
+                bool canShowTranslation = cfg != null && cfg.TransOccupies && !string.IsNullOrEmpty(line.Translation);
+
+                // 2. 拼接显示文本
+                // 逻辑：原文 + (如果有翻译且开启了占行则换行加翻译)
+                string displayContent = line.Content;
+                if (canShowTranslation)
+                {
+                    displayContent += "\n" + line.Translation;
+                }
+
+                // 3. 刷到界面预览框
+                TxtLyricDisplay.Text = displayContent;
+
+                // 4. (可选) 如果你想在 UI 上标记当前是第几行，可以顺便用 index 坐点什么
+                // Debug.WriteLine($"Current Line Index: {index}");
+            });
         }
 
         private void BtnConnect_Click(object sender, RoutedEventArgs e)
