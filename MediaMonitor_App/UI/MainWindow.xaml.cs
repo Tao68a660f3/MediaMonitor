@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using MediaMonitor.Tray;
 
 namespace MediaMonitor
 {
@@ -13,11 +14,31 @@ namespace MediaMonitor
     {
         private DispatcherTimer _uiTimer;
         private bool _isInternalChange = false;
+
+        private TrayManager _tray;
         private bool _isRealExit = false;
 
         public MainWindow()
         {
             InitializeComponent();
+
+            // 1. 初始化托盘
+            _tray = new TrayManager();
+
+            // 传入两个动作（Action）：一个是双击显示的逻辑，一个是彻底退出的逻辑
+            _tray.Init(
+                onShow: () =>
+                {
+                    this.Show();
+                    this.WindowState = WindowState.Normal;
+                    this.Activate();
+                },
+                onExit: () =>
+                {
+                    _isRealExit = true;
+                    System.Windows.Application.Current.Shutdown();
+                }
+            );
 
             // 1. 初始化 UI 定时器（保持不变，用于刷新进度条等）
             _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
@@ -69,6 +90,26 @@ namespace MediaMonitor
             // 4. 执行初始化“点火”：根据配置决定是串口还是 UDP
             bool isSerialMode = RbSerial.IsChecked ?? true;
             SwitchTransportMode(isSerialMode);
+        }
+
+        // 2. 拦截关闭按钮：让它“隐藏”而不是“毁灭”
+        protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+        {
+            if (!_isRealExit)
+            {
+                // 如果不是点击了托盘里的“退出”，就取消关闭，改为隐藏
+                e.Cancel = true;
+                this.Hide();
+
+                // 可选：如果你的 TrayManager 里写了弹出气泡的方法，可以在这里调用
+                // _tray.ShowBalloon("MediaMonitor", "程序已在后台运行");
+            }
+            else
+            {
+                // 只有彻底退出时才释放资源
+                _tray.Dispose();
+            }
+            base.OnClosing(e);
         }
 
         private void TransMode_Changed(object sender, RoutedEventArgs e)
