@@ -1,6 +1,8 @@
 ﻿using System;
 using System.IO.Ports;
 using System.Collections.Generic;
+using System.Linq;
+using System.Windows.Threading; // 需要引用 WindowsBase
 
 namespace MediaMonitor.Services
 {
@@ -8,20 +10,40 @@ namespace MediaMonitor.Services
     {
         private readonly SerialPort _port = new SerialPort();
 
-        // 映射接口属性
+        // --- 新增：用于自动轮询的定时器 ---
+        private readonly DispatcherTimer _scanTimer = new DispatcherTimer();
+        private string[] _lastPorts = Array.Empty<string>();
+
         public bool IsConnected => _port.IsOpen;
 
-        // 接口定义的事件，在构造函数中初始化防止 null 引用
         public event Action<byte[]> OnRawDataReceived = _ => { };
-
-        // 新增：通知外部链路已断开（如拔线）
         public event Action<string>? OnTransportError;
+
+        // --- 新增：当串口列表发生变化时触发的事件 ---
+        public event Action<string[]>? OnPortListChanged;
 
         public SerialService()
         {
             _port.DataReceived += SerialPort_DataReceived;
-            // 监控硬件层面的错误（如帧溢出、奇偶校验错）
             _port.ErrorReceived += SerialPort_ErrorReceived;
+
+            // --- 初始化定时器（每 2 秒扫描一次） ---
+            _scanTimer.Interval = TimeSpan.FromSeconds(2);
+            _scanTimer.Tick += (s, e) => ScanPorts();
+            _scanTimer.Start();
+        }
+
+        // --- 核心逻辑：扫描串口列表 ---
+        private void ScanPorts()
+        {
+            var currentPorts = SerialPort.GetPortNames();
+
+            // 只有当列表真的变了（比如拔了或插了），才通知界面
+            if (!currentPorts.SequenceEqual(_lastPorts))
+            {
+                _lastPorts = currentPorts;
+                OnPortListChanged?.Invoke(currentPorts); // 发射信号
+            }
         }
 
         public void Connect(string portName, int baudRate)
@@ -49,23 +71,21 @@ namespace MediaMonitor.Services
                 if (_port.IsOpen)
                     _port.Close();
             }
-            catch { /* 强制关闭时忽略错误 */ }
+            catch { }
         }
 
         public void Send(byte[] data)
         {
             if (!_port.IsOpen)
                 return;
-
             try
             {
                 _port.Write(data, 0, data.Length);
             }
             catch (Exception ex)
             {
-                // 如果发送时物理断开，会抛出 IOException
-                OnTransportError?.Invoke($"发送数据失败: {ex.Message}");
-                Disconnect(); // 既然发不动了，主动切断连接状态
+                OnTransportError?.Invoke($"发送错误: {ex.Message}");
+                Disconnect();
             }
         }
 
@@ -74,24 +94,18 @@ namespace MediaMonitor.Services
             try
             {
                 int bytesToRead = _port.BytesToRead;
-                if (bytesToRead > 0)
-                {
-                    byte[] buffer = new byte[bytesToRead];
-                    _port.Read(buffer, 0, bytesToRead);
-                    OnRawDataReceived.Invoke(buffer);
-                }
+                if (bytesToRead <= 0)
+                    return;
+                byte[] buffer = new byte[bytesToRead];
+                _port.Read(buffer, 0, bytesToRead);
+                OnRawDataReceived.Invoke(buffer);
             }
-            catch (Exception ex)
-            {
-                OnTransportError?.Invoke($"读取数据错误: {ex.Message}");
-            }
+            catch (Exception ex) { OnTransportError?.Invoke($"读取错误: {ex.Message}"); }
         }
 
         private void SerialPort_ErrorReceived(object sender, SerialErrorReceivedEventArgs e)
         {
-            OnTransportError?.Invoke($"串口硬件故障: {e.EventType}");
+            OnTransportError?.Invoke($"硬件故障: {e.EventType}");
         }
-
-        public string[] GetPortNames() => SerialPort.GetPortNames();
     }
 }
