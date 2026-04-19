@@ -125,7 +125,8 @@ namespace MediaMonitor.Core
             {
                 if (cIdx != _lastProcessedCIdx)
                 {
-                    bool isJump = (cIdx < _lastProcessedCIdx) || Math.Abs(cIdx - _lastProcessedCIdx) > 1;
+                    //bool isJump = (cIdx < _lastProcessedCIdx) || Math.Abs(cIdx - _lastProcessedCIdx) > 1;
+                    bool isJump = cIdx < _lastProcessedCIdx;  // 只有向前跳转需要强制重发，判断为 isJump
                     _lastProcessedCIdx = cIdx;
 
                     // 将关键的发送逻辑移出锁区，或者在里面只做判定
