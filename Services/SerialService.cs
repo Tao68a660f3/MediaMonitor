@@ -72,7 +72,15 @@ namespace MediaMonitor.Services
             }
         }
 
-        void IMediaTransport.Connect() => Connect(_port.PortName, _port.BaudRate);
+        // 显式接口实现修改
+        void IMediaTransport.Connect()
+        {
+            // 从全局配置中心直接拉取最新参数
+            var cfg = App.ConfigSvc.Current;
+
+            // 调用你带参数的那个 Connect 方法
+            Connect(cfg.SerialPortName, cfg.BaudRate);
+        }
 
         public void Disconnect()
         {

@@ -12,7 +12,9 @@ namespace MediaMonitor.Services
         private IPEndPoint? _remoteEndPoint;
         private CancellationTokenSource? _cts; // 控制异步循环退出的令牌
 
-        public bool IsConnected => _udpClient != null;
+        private bool _isConnected;
+        // 修改接口属性实现，由我们手动控制
+        public bool IsConnected => _isConnected;
 
         public event Action<byte[]> OnRawDataReceived = _ => { };
         public event Action<string> OnTransportError = _ => { };
@@ -25,32 +27,30 @@ namespace MediaMonitor.Services
         {
             try
             {
-                Disconnect(); // 确保先清理旧资源
+                Disconnect();
+                // 获取 UI 最新的配置
+                var cfg = App.ConfigSvc.Current;
 
-                _udpClient = new UdpClient(LocalPort);
-                _remoteEndPoint = new IPEndPoint(IPAddress.Parse(RemoteIp), RemotePort);
-                _cts = new CancellationTokenSource(); // 初始化新的取消令牌
+                _udpClient = new UdpClient(0); // 随机本地端口避免冲突
+                _remoteEndPoint = new IPEndPoint(IPAddress.Parse(cfg.RemoteIp), cfg.RemotePort);
 
-                // 将令牌传递给异步接收循环
+                _isConnected = true; // 只有执行到这里才算真正成功
+
+                _cts = new CancellationTokenSource();
                 Task.Run(() => ReceiveLoop(_cts.Token));
             }
             catch (Exception ex)
             {
-                OnTransportError.Invoke($"UDP 初始化失败: {ex.Message}");
-                Disconnect();
+                _isConnected = false;
+                OnTransportError?.Invoke($"UDP连接失败: {ex.Message}");
             }
         }
 
         public void Disconnect()
         {
-            // 1. 发送取消信号，通知 ReceiveLoop 停止
+            _isConnected = false; // 先切断状态
             _cts?.Cancel();
-            _cts?.Dispose();
-            _cts = null;
-
-            // 2. 释放底层 UDP 资源
             _udpClient?.Close();
-            _udpClient?.Dispose();
             _udpClient = null;
         }
 

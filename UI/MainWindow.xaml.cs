@@ -40,6 +40,23 @@ namespace MediaMonitor
                 App.Master.LyricChanged += OnMasterLyricChanged;
             }
 
+            // 在 MainWindow 构造函数或初始化位置
+            App.TransportMgr.OnTransportError += (msg) =>
+            {
+                // 必须回到 UI 线程执行
+                Dispatcher.Invoke(() =>
+                {
+                    // 1. 如果当前是连接状态，但底层报错导致断开了，就刷新按钮
+                    if (!App.TransportMgr.IsConnected)
+                    {
+                        UpdateConnectButtonState(false);
+
+                        // 2. 可以在状态栏提示一下，而不是弹窗（弹窗太吵了）
+                        // TxtStatus.Text = $"连接异常中断: {msg}";
+                    }
+                });
+            };
+
             // 4. 执行初始化“点火”：根据配置决定是串口还是 UDP
             bool isSerialMode = RbSerial.IsChecked ?? true;
             SwitchTransportMode(isSerialMode);
@@ -261,7 +278,45 @@ namespace MediaMonitor
 
         private void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
-            
+            // 1. 如果已经连接，就断开
+            if (App.TransportMgr.IsConnected)
+            {
+                App.TransportMgr.Disconnect();
+                UpdateConnectButtonState(false);
+                return;
+            }
+
+            // 2. 连接前的最后同步（确保波特率、IP 等最新参数已写入配置对象）
+            SyncAndSaveConfig();
+
+            // 3. 这里的神秘之处在于：App.TransportMgr 内部的 _activeTransport 
+            // 已经在你切换 RadioButton 时被 SetTransport 换成了正确的实例（Serial 或 UDP）
+            // 所以我们只需要大喊一声：连接！
+            App.TransportMgr.Connect();
+
+            // 4. 检查是否点火成功
+            if (App.TransportMgr.IsConnected)
+            {
+                UpdateConnectButtonState(true);
+            }
+            else
+            {
+                // 如果 Connect 内部报错了（比如端口占用了），Mgr 会触发 OnTransportError 事件
+                // 这里可以给个简单提示
+                MessageBox.Show("连接请求已发出，但引擎未能就绪。请检查硬件状态或 Log。");
+            }
+        }
+
+        // 辅助方法：美化 UI 状态
+        private void UpdateConnectButtonState(bool isConnected)
+        {
+            BtnConnect.Content = isConnected ? "断开连接" : "开始连接";
+            // 连接后禁用模式切换，防止运行中修改导致崩溃
+            RbSerial.IsEnabled = !isConnected;
+            RbUdp.IsEnabled = !isConnected;
+            ComboBaud.IsEnabled = !isConnected;
+            // 改变按钮颜色（可选）
+            // BtnConnect.Background = isConnected ? Brushes.Tomato : Brushes.LightGreen;
         }
 
         // 1. 处理媒体源切换
@@ -290,7 +345,6 @@ namespace MediaMonitor
                 SyncAndSaveConfig();
             }
         }
-
 
         // 1. 纯数字输入限制 (防止输入字母)
         private void OnlyNumber_PreviewTextInput(object sender, System.Windows.Input.TextCompositionEventArgs e)
