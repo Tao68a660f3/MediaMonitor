@@ -31,6 +31,8 @@ namespace MediaMonitor
 
         protected override async void OnStartup(StartupEventArgs e)
         {
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
             base.OnStartup(e);
 
             // --- 1. 你的异常捕获“保险丝” ---

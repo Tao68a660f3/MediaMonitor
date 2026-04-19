@@ -41,17 +41,18 @@ namespace MediaMonitor
 
         private void TransMode_Changed(object sender, RoutedEventArgs e)
         {
-            if (GridSerialConfig == null || GridUdpConfig == null)
+            if (!this.IsLoaded || _isInternalChange)
                 return;
 
             bool isSerial = RbSerial.IsChecked ?? true;
             GridSerialConfig.Visibility = isSerial ? Visibility.Visible : Visibility.Collapsed;
             GridUdpConfig.Visibility = isSerial ? Visibility.Collapsed : Visibility.Visible;
 
-            // 只有当窗口加载完成后（防止初始化干扰），才在切换时重新挂载引擎
+            // 【新增】只有当界面已经加载完成，且不是 LoadConfig 触发时才执行逻辑切换
             if (this.IsLoaded && !_isInternalChange)
             {
                 SwitchTransportMode(isSerial);
+                SyncAndSaveConfig(); // 立即保存模式选择
             }
         }
 
@@ -125,40 +126,73 @@ namespace MediaMonitor
 
         private void LoadConfigToUI()
         {
+            // 开启静默模式，防止赋值过程触发 TextChanged/Checked 事件导致重复保存
             _isInternalChange = true;
-            var cfg = App.ConfigSvc.Current;
 
-            // --- 1. 传输层与 IP ---
-            RbSerial.IsChecked = cfg.TransportMode == TransportType.Serial;
-            RbUdp.IsChecked = cfg.TransportMode == TransportType.UDP;
-            TxtRemoteIp.Text = cfg.RemoteIp;
-            TxtRemotePort.Text = cfg.RemotePort.ToString();
+            try
+            {
+                if (App.ConfigSvc == null)
+                    return;
+                var cfg = App.ConfigSvc.Current;
 
-            // --- 2. 串口与编码 (使用更稳妥的赋值方式) ---
-            // 匹配波特率
-            ComboBaud.Text = cfg.BaudRate.ToString();
-            // 匹配编码 (假设你的 ComboBox 内容是 UTF-8, GB2312)
-            ComboEncoding.Text = cfg.EncodingName.ToUpper();
+                // --- 1. 传输层与 IP ---
+                RbSerial.IsChecked = cfg.TransportMode == TransportType.Serial;
+                RbUdp.IsChecked = cfg.TransportMode == TransportType.UDP;
+                TxtRemoteIp.Text = cfg.RemoteIp;
+                TxtRemotePort.Text = cfg.RemotePort.ToString();
 
-            // --- 3. 协议与路径 ---
-            TxtLrcPath.Text = cfg.LyricFolder;
-            ChkAdvancedMode.IsChecked = cfg.IsAdvancedMode;
-            ChkIncremental.IsChecked = cfg.IsIncremental;
-            ChkTransOccupies.IsChecked = cfg.TransOccupies; // 补上这个
+                // --- 2. 串口与编码 (使用更稳妥的匹配方式) ---
+                // 匹配波特率：直接设置 Text，WPF 会自动匹配对应的 ComboBoxItem
+                ComboBaud.Text = cfg.BaudRate.ToString();
 
-            // --- 4. 参数列表 ---
-            TxtLineLimit.Text = cfg.LineLimit.ToString();
-            TxtOffset.Text = cfg.Offset.ToString();
-            TxtUpdateRate.Text = cfg.UpdateIntervalMs.ToString();
-            TxtSyncInterval.Text = cfg.SyncIntervalMs.ToString();
+                // 匹配编码：遍历下拉项进行不区分大小写的匹配，确保 UI 选中状态正确
+                string savedEnc = cfg.EncodingName.ToLower();
+                foreach (ComboBoxItem item in ComboEncoding.Items)
+                {
+                    if (item.Content.ToString().ToLower() == savedEnc)
+                    {
+                        ComboEncoding.SelectedItem = item;
+                        break;
+                    }
+                }
 
-            _isInternalChange = false;
+                // --- 3. 协议与路径 ---
+                TxtLrcPath.Text = cfg.LyricFolder;
+                ChkAdvancedMode.IsChecked = cfg.IsAdvancedMode;
+                ChkIncremental.IsChecked = cfg.IsIncremental;
+                ChkTransOccupies.IsChecked = cfg.TransOccupies;
 
-            // --- 5. 核心点火动作 ---
-            // 显隐逻辑
-            TransMode_Changed(null, null);
-            // 【重要】根据配置模式，立即让 App.TransportMgr 加载对应的驱动（Serial 或 UDP）
-            SwitchTransportMode(cfg.TransportMode == TransportType.Serial);
+                // --- 4. 参数列表 ---
+                TxtLineLimit.Text = cfg.LineLimit.ToString();
+                TxtOffset.Text = cfg.Offset.ToString();
+                TxtUpdateRate.Text = cfg.UpdateIntervalMs.ToString();
+                TxtSyncInterval.Text = cfg.SyncIntervalMs.ToString();
+
+                // --- 5. 核心状态同步 (解决 UDP 模式重新打开时的显示问题) ---
+                // 显式强制刷新 Grid 的可见性，而不完全依赖自动触发的事件
+                bool isSerial = cfg.TransportMode == TransportType.Serial;
+                if (GridSerialConfig != null && GridUdpConfig != null)
+                {
+                    GridSerialConfig.Visibility = isSerial ? Visibility.Visible : Visibility.Collapsed;
+                    GridUdpConfig.Visibility = isSerial ? Visibility.Collapsed : Visibility.Visible;
+                }
+
+                // --- 6. 业务点火 ---
+                // 立即根据配置模式加载对应的传输驱动（Serial 或 UDP）
+                SwitchTransportMode(isSerial);
+
+                // 通知大脑（Master）使用当前加载的这一套配置
+                App.Master?.UpdateConfig(cfg);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"加载配置到UI失败: {ex.Message}");
+            }
+            finally
+            {
+                // 无论是否报错，最后必须关闭静默模式，否则后续手动操作无效
+                _isInternalChange = false;
+            }
         }
 
         private void UIUpdate_Tick(object sender, EventArgs e)
@@ -300,11 +334,16 @@ namespace MediaMonitor
             SyncAndSaveConfig();
         }
 
+        private void ComboConfig_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            SyncAndSaveConfig();
+        }
+
         // --- 4. 核心同步与分发站 (只负责搬运数据) ---
         private void SyncAndSaveConfig()
         {
-            // 1. 安全检查：防止初始化时触发或配置服务未准备好
-            if (_isInternalChange || App.ConfigSvc == null)
+            // 安全围栏：如果关键 UI 还没加载完，直接退出，不要报错
+            if (!this.IsLoaded || _isInternalChange)
                 return;
 
             var cfg = App.ConfigSvc.Current;
