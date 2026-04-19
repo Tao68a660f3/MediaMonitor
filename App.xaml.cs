@@ -54,7 +54,6 @@ namespace MediaMonitor
                 Lyrics = new LyricService
                 {
                     LyricFolder = cfg.LyricFolder,
-                    //FileNamePatterns = new[] { "{Artist} - {Title}", "{Title} - {Artist}", "{Title}" }
                 };
 
                 // 初始化 SMTC 监听

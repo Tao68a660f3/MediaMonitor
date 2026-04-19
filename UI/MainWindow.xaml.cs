@@ -57,12 +57,20 @@ namespace MediaMonitor
 
         private void RefreshSessionList()
         {
+            // 1. 获取数据可以在后台做，这没问题
             if (App.Smtc == null)
                 return;
+
             var sessions = App.Smtc.GetSessions();
-            ComboSessions.ItemsSource = sessions;
-            if (sessions.Count > 0 && ComboSessions.SelectedIndex == -1)
-                ComboSessions.SelectedIndex = 0;
+
+            // 2. 修改 UI 必须“翻墙”回到主线程
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                ComboSessions.ItemsSource = sessions;
+
+                if (sessions.Count > 0 && ComboSessions.SelectedIndex == -1)
+                    ComboSessions.SelectedIndex = 0;
+            });
         }
 
         private void LoadConfigToUI()
@@ -102,6 +110,7 @@ namespace MediaMonitor
             // 更新播放信息
             TxtTitle.Text = App.Smtc.CurrentTitle ?? "未在播放";
             TxtArtist.Text = App.Smtc.CurrentArtist ?? "未知艺术家";
+            TxtAlbum.Text = App.Smtc.CurrentAlbum ?? "未知album";
 
             // 更新进度条
             var prog = App.Smtc.GetCurrentProgress();

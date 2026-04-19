@@ -89,7 +89,8 @@ namespace MediaMonitor.Services
                 LineLimit = 2,
                 Offset = 0,
                 SyncIntervalMs = 500,
-                LyricFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyMusic), "Lyrics")
+                //LyricFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyMusic), "Lyrics")
+                LyricFolder = "M:\\Lyrics_Foobar2000"
             };
         }
     }

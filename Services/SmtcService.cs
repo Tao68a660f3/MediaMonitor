@@ -11,6 +11,7 @@ namespace MediaMonitor.Services
     {
         public string? CurrentTitle { get; private set; }
         public string? CurrentArtist { get; private set; }
+        public string? CurrentAlbum { get; private set; }
 
         private GlobalSystemMediaTransportControlsSessionManager? _manager;
         private GlobalSystemMediaTransportControlsSession? _currentSession;
@@ -97,6 +98,7 @@ namespace MediaMonitor.Services
                 {
                     CurrentTitle = props.Title; // 赋值
                     CurrentArtist = props.Artist; // 赋值
+                    CurrentAlbum = props.AlbumTitle;
                     OnMediaUpdated?.Invoke(props);
                 }
             }
