@@ -1,9 +1,10 @@
-﻿using System;
+﻿using MediaMonitor.Core;
+using MediaMonitor.Services;
+using System;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Threading;
-using MediaMonitor.Services;
-using MediaMonitor.Core;
 
 namespace MediaMonitor
 {
@@ -127,28 +128,37 @@ namespace MediaMonitor
             _isInternalChange = true;
             var cfg = App.ConfigSvc.Current;
 
-            // 传输层配置
+            // --- 1. 传输层与 IP ---
             RbSerial.IsChecked = cfg.TransportMode == TransportType.Serial;
             RbUdp.IsChecked = cfg.TransportMode == TransportType.UDP;
             TxtRemoteIp.Text = cfg.RemoteIp;
             TxtRemotePort.Text = cfg.RemotePort.ToString();
 
-            // 串口逻辑
+            // --- 2. 串口与编码 (使用更稳妥的赋值方式) ---
+            // 匹配波特率
             ComboBaud.Text = cfg.BaudRate.ToString();
+            // 匹配编码 (假设你的 ComboBox 内容是 UTF-8, GB2312)
+            ComboEncoding.Text = cfg.EncodingName.ToUpper();
 
-            // 协议与路径
+            // --- 3. 协议与路径 ---
             TxtLrcPath.Text = cfg.LyricFolder;
             ChkAdvancedMode.IsChecked = cfg.IsAdvancedMode;
             ChkIncremental.IsChecked = cfg.IsIncremental;
+            ChkTransOccupies.IsChecked = cfg.TransOccupies; // 补上这个
 
-            // 参数列表
+            // --- 4. 参数列表 ---
             TxtLineLimit.Text = cfg.LineLimit.ToString();
             TxtOffset.Text = cfg.Offset.ToString();
             TxtUpdateRate.Text = cfg.UpdateIntervalMs.ToString();
             TxtSyncInterval.Text = cfg.SyncIntervalMs.ToString();
 
             _isInternalChange = false;
-            TransMode_Changed(null, null); // 触发一次显隐逻辑
+
+            // --- 5. 核心点火动作 ---
+            // 显隐逻辑
+            TransMode_Changed(null, null);
+            // 【重要】根据配置模式，立即让 App.TransportMgr 加载对应的驱动（Serial 或 UDP）
+            SwitchTransportMode(cfg.TransportMode == TransportType.Serial);
         }
 
         private void UIUpdate_Tick(object sender, EventArgs e)
@@ -175,16 +185,6 @@ namespace MediaMonitor
             TxtLrcStatus.Text = lrcCount > 0 ? $"已加载 {lrcCount} 行" : "未找到歌词";
         }
 
-        //private void TransMode_Changed(object sender, RoutedEventArgs e)
-        //{
-        //    if (GridSerialConfig == null || GridUdpConfig == null)
-        //        return;
-
-        //    bool isSerial = RbSerial.IsChecked ?? true;
-        //    GridSerialConfig.Visibility = isSerial ? Visibility.Visible : Visibility.Collapsed;
-        //    GridUdpConfig.Visibility = isSerial ? Visibility.Collapsed : Visibility.Visible;
-        //}
-
         private void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
             
@@ -200,23 +200,161 @@ namespace MediaMonitor
             var session = ComboSessions.SelectedItem as Windows.Media.Control.GlobalSystemMediaTransportControlsSession;
             App.Smtc.SelectSession(session);
         }
-
-        // 2. 处理文本框内容改变（XAML 中引用的通用事件）
-        private void NumberTextBox_TextChanged(object sender, TextChangedEventArgs e)
+        
+        private void BtnBrowse_Click(object sender, RoutedEventArgs e)
         {
-            // 如果你现在不需要在输入时实时保存，可以先留空
-            // 这样红线会立即消失
+            var dialog = new Microsoft.Win32.OpenFolderDialog
+            {
+                Title = "选择歌词搜索目录",
+                InitialDirectory = TxtLrcPath.Text
+            };
+
+            if (dialog.ShowDialog() == true)
+            {
+                TxtLrcPath.Text = dialog.FolderName;
+                // 自动触发实时生效逻辑
+                SyncAndSaveConfig();
+            }
         }
 
-        // 简单的数字输入限制
+
+        // 1. 纯数字输入限制 (防止输入字母)
         private void OnlyNumber_PreviewTextInput(object sender, System.Windows.Input.TextCompositionEventArgs e)
         {
-            e.Handled = !char.IsDigit(e.Text, 0) && e.Text != "-";
+            // 允许数字，如果是偏移量则允许负号
+            var textBox = sender as TextBox;
+            bool isOffset = textBox?.Name == "TxtOffset";
+            if (isOffset && e.Text == "-" && !textBox.Text.Contains("-"))
+            {
+                e.Handled = false;
+                return;
+            }
+            e.Handled = !char.IsDigit(e.Text, 0);
+        }
+        // 2. 粘贴拦截 (防止用户通过右键粘贴非数字内容)
+        private void NumberTextBox_Pasting(object sender, DataObjectPastingEventArgs e)
+        {
+            if (e.DataObject.GetDataPresent(typeof(String)))
+            {
+                String text = (String)e.DataObject.GetData(typeof(String));
+                if (!System.Text.RegularExpressions.Regex.IsMatch(text, "^-?\\d+$"))
+                    e.CancelCommand();
+            }
+            else
+                e.CancelCommand();
         }
 
-        private void BtnBrowse_Click(object sender, RoutedEventArgs e)
-        { /* 这里可以后续加 FolderBrowserDialog */
+        // --- 2. 统一的安检站 (负责把 UI 上的非法值拉回合法线) ---
+        private void NumberTextBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            var tb = sender as TextBox;
+            if (tb == null || App.ConfigSvc == null)
+                return;
+
+            if (int.TryParse(tb.Text, out int val))
+            {
+                switch (tb.Name)
+                {
+                    case "TxtLineLimit":
+                        tb.Text = Math.Clamp(val, 1, 10).ToString();
+                        break;
+                    case "TxtOffset":
+                        tb.Text = Math.Clamp(val, -10000, 10000).ToString();
+                        break;
+                    case "TxtUpdateRate":
+                        tb.Text = Math.Clamp(val, 20, 1000).ToString();
+                        break;
+                    case "TxtSyncInterval":
+                        tb.Text = Math.Clamp(val, 100, 5000).ToString();
+                        break;
+                    case "TxtRemotePort":
+                        tb.Text = Math.Clamp(val, 1, 65535).ToString();
+                        break;
+                }
+            }
+            else
+            {
+                // 输入彻底乱套时（比如空值），直接从配置加载回正确的值
+                LoadConfigToUI();
+            }
+
+            // 格式化好文本后，统一由这里触发保存和分发
+            SyncAndSaveConfig();
         }
+
+        // --- 3. 唯一的 IP 校验 (因为它不是纯数字，逻辑独立) ---
+        private void TxtRemoteIp_LostFocus(object sender, RoutedEventArgs e)
+        {
+            if (System.Net.IPAddress.TryParse(TxtRemoteIp.Text.Trim(), out var address))
+                TxtRemoteIp.Text = address.ToString();
+            else
+                TxtRemoteIp.Text = "127.0.0.1";
+
+            SyncAndSaveConfig();
+        }
+
+        // MainWindow.xaml.cs 补全
+        private void CheckBox_Click(object sender, RoutedEventArgs e)
+        {
+            // CheckBox 勾选状态改变时，直接同步配置
+            SyncAndSaveConfig();
+        }
+
+        // --- 4. 核心同步与分发站 (只负责搬运数据) ---
+        private void SyncAndSaveConfig()
+        {
+            // 1. 安全检查：防止初始化时触发或配置服务未准备好
+            if (_isInternalChange || App.ConfigSvc == null)
+                return;
+
+            var cfg = App.ConfigSvc.Current;
+
+            // --- A. 传输模式与物理配置 ---
+            cfg.TransportMode = RbSerial.IsChecked == true ? TransportType.Serial : TransportType.UDP;
+
+            // 串口名：直接取选中项的字符串
+            if (ComboPorts.SelectedItem != null)
+                cfg.SerialPortName = ComboPorts.SelectedItem.ToString();
+
+            // 波特率：ComboBoxItem 需要转换
+            if (ComboBaud.SelectedItem is ComboBoxItem baudItem)
+                cfg.BaudRate = int.Parse(baudItem.Content.ToString());
+
+            // UDP 配置
+            cfg.RemoteIp = TxtRemoteIp.Text;
+            if (int.TryParse(TxtRemotePort.Text, out int port))
+                cfg.RemotePort = port;
+
+            // 编码：同步 EncodingName 即可自动触发内部 Encoding 转换
+            if (ComboEncoding.SelectedItem is ComboBoxItem encItem)
+                cfg.EncodingName = encItem.Content.ToString().ToLower();
+
+            // --- B. 协议与路径 ---
+            cfg.LyricFolder = TxtLrcPath.Text;
+            cfg.IsAdvancedMode = ChkAdvancedMode.IsChecked ?? true;
+            cfg.IsIncremental = ChkIncremental.IsChecked ?? true;
+            cfg.TransOccupies = ChkTransOccupies.IsChecked ?? true;
+
+            // --- C. 数值参数 ---
+            if (int.TryParse(TxtLineLimit.Text, out int ll))
+                cfg.LineLimit = ll;
+            if (int.TryParse(TxtOffset.Text, out int off))
+                cfg.Offset = off;
+            if (int.TryParse(TxtUpdateRate.Text, out int ur))
+                cfg.UpdateIntervalMs = ur;
+            if (int.TryParse(TxtSyncInterval.Text, out int si))
+                cfg.SyncIntervalMs = si;
+
+            // --- D. 持久化与分发 ---
+            App.ConfigSvc.Save(); //
+
+            if (App.Lyrics != null)
+                App.Lyrics.LyricFolder = cfg.LyricFolder;
+
+            if (App.Master != null)
+                App.Master.UpdateConfig(cfg); // 触发业务层热更新
+        }
+
         private void BtnSyncTime_Click(object sender, RoutedEventArgs e)
         {
             App.Master?.SendTimeSync();
