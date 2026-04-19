@@ -17,42 +17,60 @@ namespace MediaMonitor
         {
             InitializeComponent();
 
-            // 1. 初始化 UI 定时器，用于刷新界面显示
+            // 1. 初始化 UI 定时器（保持不变，用于刷新进度条等）
             _uiTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
             _uiTimer.Tick += UIUpdate_Tick;
             _uiTimer.Start();
 
-            // 2. 加载当前配置到控件
+            // 2. 加载当前配置
             LoadConfigToUI();
 
+            // 3. 对接 SMTC 逻辑
             if (App.Smtc != null)
             {
+                // 记得我们刚才给 RefreshSessionList 加了 Dispatcher.Invoke 吗？
                 App.Smtc.SessionsListChanged += RefreshSessionList;
-                RefreshSessionList(); // 立即加载一次
+                RefreshSessionList();
             }
-            RefreshSerialPorts();
+
+            // 4. 对接串口服务自动扫描
+            if (App.SerialService != null)
+            {
+                // 订阅服务里的“扫描完成”事件
+                App.SerialService.OnPortListChanged += RefreshSerialPorts;
+
+                // 立即同步一下当前已有的串口列表
+                RefreshSerialPorts(App.SerialService.GetPortNames());
+            }
         }
 
-        private void RefreshSerialPorts()
+        private void RefreshSerialPorts(string[] ports)
         {
-            try
+            // 因为这个方法会被后台事件调用，必须确保在 UI 线程执行
+            Dispatcher.Invoke(() =>
             {
-                var ports = System.IO.Ports.SerialPort.GetPortNames();
-                ComboPorts.ItemsSource = ports;
-                if (ports.Length > 0)
+                try
                 {
-                    // 尝试选中配置文件中保存的串口号
-                    var savedPort = App.ConfigSvc?.Current?.SerialPortName;
-                    if (!string.IsNullOrEmpty(savedPort) && ports.Contains(savedPort))
-                        ComboPorts.SelectedItem = savedPort;
-                    else
-                        ComboPorts.SelectedIndex = 0;
+                    ComboPorts.ItemsSource = ports;
+                    if (ports.Length > 0)
+                    {
+                        // 只有在没选中的时候才尝试自动选择
+                        if (ComboPorts.SelectedIndex == -1)
+                        {
+                            var savedPort = App.ConfigSvc?.Current?.SerialPortName;
+                            if (!string.IsNullOrEmpty(savedPort) && ports.Contains(savedPort))
+                                ComboPorts.SelectedItem = savedPort;
+                            else
+                                ComboPorts.SelectedIndex = 0;
+                        }
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"获取串口列表失败: {ex.Message}");
-            }
+                catch (Exception ex)
+                {
+                    // 在大项目里，建议用状态栏显示错误，而不是弹窗打断用户
+                    //StatusTextBlock.Text = $"更新串口列表失败: {ex.Message}";
+                }
+            });
         }
 
         private void RefreshSessionList()
