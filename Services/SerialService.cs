@@ -11,7 +11,7 @@ namespace MediaMonitor.Services
         private readonly SerialPort _port = new SerialPort();
 
         // --- 新增：用于自动轮询的定时器 ---
-        private readonly DispatcherTimer _scanTimer = new DispatcherTimer();
+        private readonly System.Timers.Timer _scanTimer = new System.Timers.Timer(2000); // 2000ms 周期
         private string[] _lastPorts = Array.Empty<string>();
 
         public bool IsConnected => _port.IsOpen;
@@ -27,23 +27,26 @@ namespace MediaMonitor.Services
             _port.DataReceived += SerialPort_DataReceived;
             _port.ErrorReceived += SerialPort_ErrorReceived;
 
-            // --- 初始化定时器（每 2 秒扫描一次） ---
-            _scanTimer.Interval = TimeSpan.FromSeconds(2);
-            _scanTimer.Tick += (s, e) => ScanPorts();
-            _scanTimer.Start();
+            // --- 配置后台计时器 ---
+            _scanTimer.Elapsed += (s, e) => ScanPorts(); // 触发时执行扫描
+            _scanTimer.AutoReset = true; // 自动重置，循环执行
+            _scanTimer.Enabled = true;   // 启动
         }
 
         // --- 核心逻辑：扫描串口列表 ---
         private void ScanPorts()
         {
-            var currentPorts = SerialPort.GetPortNames();
-
-            // 只有当列表真的变了（比如拔了或插了），才通知界面
-            if (!currentPorts.SequenceEqual(_lastPorts))
+            try
             {
-                _lastPorts = currentPorts;
-                OnPortListChanged?.Invoke(currentPorts); // 发射信号
+                var currentPorts = SerialPort.GetPortNames();
+                if (!currentPorts.SequenceEqual(_lastPorts))
+                {
+                    _lastPorts = currentPorts;
+                    // 重点：这里的 Invoke 是在【后台线程】发射的
+                    OnPortListChanged?.Invoke(currentPorts);
+                }
             }
+            catch { /* 扫描硬件偶尔异常时保持静默 */ }
         }
 
         public void Connect(string portName, int baudRate)
