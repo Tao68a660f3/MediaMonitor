@@ -33,7 +33,6 @@ namespace MediaMonitor.Core
         private readonly List<double> _wallIntervalSamples = new List<double>();
 
         public PackageConfig Config { get; private set; } = new PackageConfig();
-        public Action<byte[], System.Text.Encoding>? OnProtocolLog;
         private CancellationTokenSource? _loopCts;
 
         public PackageMaster(IMediaTransport transport, LyricService lyricService, SmtcService smtc)
@@ -198,7 +197,6 @@ namespace MediaMonitor.Core
                     if (pack.AdvData != null)
                     {
                         _transport.Send(pack.AdvData);
-                        OnProtocolLog?.Invoke(pack.AdvData, Config.Encoding);
                     }
                 }
                 else
@@ -206,7 +204,6 @@ namespace MediaMonitor.Core
                     // 文本模式退化逻辑 (带换行符)
                     byte[] raw = Config.Encoding.GetBytes(pack.RawText + "\n");
                     _transport.Send(raw);
-                    OnProtocolLog?.Invoke(raw, Config.Encoding);
                 }
             }
 
@@ -250,14 +247,12 @@ namespace MediaMonitor.Core
             {
                 byte[] p = PackageBuilder.BuildMetadata(title, artist, album);
                 _transport.Send(p);
-                OnProtocolLog?.Invoke(p, Config.Encoding);
             }
             else
             {
                 string raw = $">> {title} / {artist} / {album}\n";
                 byte[] b = Config.Encoding.GetBytes(raw);
                 _transport.Send(b);
-                OnProtocolLog?.Invoke(b, Config.Encoding);
             }
         }
 
@@ -285,7 +280,6 @@ namespace MediaMonitor.Core
                 return;
             var p = PackageBuilder.BuildTimeSync();
             _transport.Send(p);
-            OnProtocolLog?.Invoke(p, Config.Encoding);
         }
     }
 }
