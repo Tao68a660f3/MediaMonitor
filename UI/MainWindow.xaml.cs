@@ -216,7 +216,8 @@ namespace MediaMonitor
 
             // 更新歌词状态
             int lrcCount = App.Lyrics.Lines?.Count ?? 0;
-            TxtLrcStatus.Text = lrcCount > 0 ? $"已加载 {lrcCount} 行" : "未找到歌词";
+            string lrcPath = App.Lyrics.CurrentLyricPath ?? "";
+            TxtLrcStatus.Text = lrcCount > 0 ? $"已加载 {lrcPath}, {lrcCount} 行" : "未找到歌词";
         }
 
         private void BtnConnect_Click(object sender, RoutedEventArgs e)
