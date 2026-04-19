@@ -1,12 +1,13 @@
 ﻿using MediaMonitor.Core;
 using MediaMonitor.Services;
+using MediaMonitor.Tools;
+using MediaMonitor.Tray;
 using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
-using MediaMonitor.Tray;
 
 namespace MediaMonitor
 {
@@ -83,7 +84,8 @@ namespace MediaMonitor
             App.LogSvc = new LogService(this.HexPreview);
 
             // 顺便把串口/UDP 的报错也接过来
-            App.TransportMgr.OnTransportError += (msg) => {
+            App.TransportMgr.OnTransportError += (msg) =>
+            {
                 App.LogSvc.LogInfo($"[传输异常] {msg}", Brushes.OrangeRed);
             };
 
@@ -379,7 +381,7 @@ namespace MediaMonitor
             var session = ComboSessions.SelectedItem as Windows.Media.Control.GlobalSystemMediaTransportControlsSession;
             App.Smtc.SelectSession(session);
         }
-        
+
         private void BtnBrowse_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new Microsoft.Win32.OpenFolderDialog
@@ -510,7 +512,11 @@ namespace MediaMonitor
 
             // 编码：同步 EncodingName 即可自动触发内部 Encoding 转换
             if (ComboEncoding.SelectedItem is ComboBoxItem encItem)
+            {
                 cfg.EncodingName = encItem.Content.ToString().ToLower();
+                PackageBuilder.UpdateEncoding(cfg.Encoding);
+            }
+
 
             // --- B. 协议与路径 ---
             cfg.LyricFolder = TxtLrcPath.Text;

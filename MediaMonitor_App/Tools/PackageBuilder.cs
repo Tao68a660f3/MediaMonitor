@@ -16,12 +16,18 @@ namespace MediaMonitor.Tools
         // 协议包头定义
         private const byte PC_TO_MCU = 0xAA;
 
-        public static EncodingType SelectedEncoding { get; set; } = EncodingType.UTF8;
+        private static Encoding _activeEncoding = Encoding.UTF8;
 
-        private static Encoding CurrentEncoding =>
-            SelectedEncoding == EncodingType.GB2312 ? Encoding.GetEncoding("GB2312") : Encoding.UTF8;
+        // 修改方法：直接接受 System.Text.Encoding 类型
+        public static void UpdateEncoding(Encoding encoding)
+        {
+            // 注册 CodePages 以支持 GB2312
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+            _activeEncoding = encoding ?? Encoding.UTF8;
+        }
 
-        public static byte[] GetEncodedBytes(string text) => CurrentEncoding.GetBytes(text);
+        // 更新此方法以使用最新的实例
+        public static byte[] GetEncodedBytes(string text) => _activeEncoding.GetBytes(text);
 
         // 通用打包逻辑
         // 修改点：固定传入 0xAA 作为 Header
