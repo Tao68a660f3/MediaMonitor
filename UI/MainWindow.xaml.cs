@@ -33,14 +33,45 @@ namespace MediaMonitor
                 RefreshSessionList();
             }
 
-            // 4. 对接串口服务自动扫描
-            if (App.SerialService != null)
-            {
-                // 订阅服务里的“扫描完成”事件
-                App.SerialService.OnPortListChanged += RefreshSerialPorts;
+            // 4. 执行初始化“点火”：根据配置决定是串口还是 UDP
+            bool isSerialMode = RbSerial.IsChecked ?? true;
+            SwitchTransportMode(isSerialMode);
+        }
 
-                // 立即同步一下当前已有的串口列表
-                RefreshSerialPorts(App.SerialService.GetPortNames());
+        private void TransMode_Changed(object sender, RoutedEventArgs e)
+        {
+            if (GridSerialConfig == null || GridUdpConfig == null)
+                return;
+
+            bool isSerial = RbSerial.IsChecked ?? true;
+            GridSerialConfig.Visibility = isSerial ? Visibility.Visible : Visibility.Collapsed;
+            GridUdpConfig.Visibility = isSerial ? Visibility.Collapsed : Visibility.Visible;
+
+            // 只有当窗口加载完成后（防止初始化干扰），才在切换时重新挂载引擎
+            if (this.IsLoaded && !_isInternalChange)
+            {
+                SwitchTransportMode(isSerial);
+            }
+        }
+
+        private void SwitchTransportMode(bool isSerial)
+        {
+            if (isSerial)
+            {
+                var serial = new SerialService();
+
+                // 绑定事件时，直接指向你的 RefreshSerialPorts 方法
+                serial.OnPortListChanged += RefreshSerialPorts;
+
+                // 装载进管家
+                App.TransportMgr.SetTransport(serial);
+
+                // 初始化刷新：既然刚才在 Service 里加了 GetPortNames，这里就能用了
+                RefreshSerialPorts(serial.GetPortNames());
+            }
+            else
+            {
+                App.TransportMgr.SetTransport(new UdpService());
             }
         }
 
@@ -144,71 +175,19 @@ namespace MediaMonitor
             TxtLrcStatus.Text = lrcCount > 0 ? $"已加载 {lrcCount} 行" : "未找到歌词";
         }
 
-        private void TransMode_Changed(object sender, RoutedEventArgs e)
-        {
-            if (GridSerialConfig == null || GridUdpConfig == null)
-                return;
+        //private void TransMode_Changed(object sender, RoutedEventArgs e)
+        //{
+        //    if (GridSerialConfig == null || GridUdpConfig == null)
+        //        return;
 
-            bool isSerial = RbSerial.IsChecked ?? true;
-            GridSerialConfig.Visibility = isSerial ? Visibility.Visible : Visibility.Collapsed;
-            GridUdpConfig.Visibility = isSerial ? Visibility.Collapsed : Visibility.Visible;
-        }
+        //    bool isSerial = RbSerial.IsChecked ?? true;
+        //    GridSerialConfig.Visibility = isSerial ? Visibility.Visible : Visibility.Collapsed;
+        //    GridUdpConfig.Visibility = isSerial ? Visibility.Collapsed : Visibility.Visible;
+        //}
 
         private void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
-            try
-            {
-                var cfg = App.ConfigSvc.Current;
-                cfg.TransportMode = RbSerial.IsChecked == true ? TransportType.Serial : TransportType.UDP;
-                cfg.RemoteIp = TxtRemoteIp.Text;
-                if (int.TryParse(TxtRemotePort.Text, out int port))
-                    cfg.RemotePort = port;
-                if (int.TryParse(TxtLineLimit.Text, out int lines))
-                    cfg.LineLimit = lines;
-                if (int.TryParse(TxtOffset.Text, out int offset))
-                    cfg.Offset = offset;
-                if (int.TryParse(TxtUpdateRate.Text, out int updateMs))
-                    cfg.UpdateIntervalMs = updateMs;
-                if (int.TryParse(TxtSyncInterval.Text, out int syncMs))
-                    cfg.SyncIntervalMs = syncMs;
-                cfg.LyricFolder = TxtLrcPath.Text;
-                cfg.IsAdvancedMode = ChkAdvancedMode.IsChecked ?? true;
-                cfg.IsIncremental = ChkIncremental.IsChecked ?? true;
-                cfg.TransOccupies = ChkTransOccupies.IsChecked ?? true;
-                // 编码
-                cfg.EncodingName = (ComboEncoding.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "utf-8";
-                // 串口参数
-                cfg.SerialPortName = ComboPorts.SelectedItem?.ToString() ?? "COM3";
-                if (int.TryParse(ComboBaud.Text, out int baud))
-                    cfg.BaudRate = baud;
-
-                // 创建传输层
-                IMediaTransport transport;
-                if (cfg.TransportMode == TransportType.Serial)
-                {
-                    var serial = new SerialService();
-                    serial.Connect(cfg.SerialPortName, cfg.BaudRate);
-                    transport = serial;
-                }
-                else
-                {
-                    var udp = new UdpService { RemoteIp = cfg.RemoteIp, RemotePort = cfg.RemotePort, LocalPort = cfg.LocalPort };
-                    udp.Connect();
-                    transport = udp;
-                }
-
-                App.Master?.UpdateTransport(transport);
-                App.Master?.ReconnectTransport();
-
-                App.ConfigSvc.Save();
-
-                BtnConnect.Content = "传输服务运行中";
-                BtnConnect.IsEnabled = false;
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"启动失败: {ex.Message}");
-            }
+            
         }
 
         // 1. 处理媒体源切换

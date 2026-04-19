@@ -49,6 +49,13 @@ namespace MediaMonitor.Services
             catch { /* 扫描硬件偶尔异常时保持静默 */ }
         }
 
+        // 在 SerialService.cs 中添加
+        public string[] GetPortNames()
+        {
+            // 直接调用系统底层获取当前所有串口名
+            return System.IO.Ports.SerialPort.GetPortNames();
+        }
+
         public void Connect(string portName, int baudRate)
         {
             try

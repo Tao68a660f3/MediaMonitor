@@ -10,6 +10,8 @@ namespace MediaMonitor
     public partial class App : Application
     {
         // 全局单例零件，方便在 MainWindow 中随时调用
+        public static TransportManager TransportMgr { get; private set; } = new TransportManager();
+
         public static PackageMaster? Master
         {
             get; private set;
