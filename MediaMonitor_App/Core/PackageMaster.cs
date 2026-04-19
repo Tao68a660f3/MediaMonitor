@@ -150,15 +150,6 @@ namespace MediaMonitor.Core
             // --- 核心循环修复 ---
             while (currentPhysicalRow < Config.LineLimit)
             {
-                // 歌词库边界保护
-                if (lyricIdx < 0)
-                {
-                    lyricIdx++;
-                    continue;
-                }
-                if (lyricIdx >= _lyricService.Lines.Count)
-                    break;
-
                 var line = _lyricService.GetLine(lyricIdx);
 
                 // 1. 处理原文槽位 (强制占用 1 个物理行)
@@ -166,10 +157,37 @@ namespace MediaMonitor.Core
                 string mKey = $"{lyricIdx}_{cmdType}";
                 targetSlots.Add(mKey);
 
-                string mText = line.Content ?? "";
-                dataToSync[mKey] = (Config.IsAdvancedMode ? (line.Words.Count > 0
-                    ? PackageBuilder.BuildWordByWord((short)lyricIdx, line.Time, line.Words)
-                    : PackageBuilder.BuildLyricLine((short)lyricIdx, line.Time, mText)) : null, mText);
+                //================
+
+                // 1. 先准备好基础数据，确保内容永远不是 null
+                string mText = line?.Content ?? "";
+                byte[]? advPackage = null;
+
+                // 2. 根据模式和内容深度，确定“高级包”到底发什么
+                if (Config.IsAdvancedMode)
+                {
+                    if (line?.Words?.Count > 0)
+                    {
+                        // 逐字模式包
+                        advPackage = PackageBuilder.BuildWordByWord((short)lyricIdx, line.Time, line.Words);
+                    }
+                    else
+                    {
+                        // 普通行模式包（即使 mText 是空串，这里也会生成带 ID 的清屏包）
+                        advPackage = PackageBuilder.BuildLyricLine((short)lyricIdx, line.Time, mText);
+                    }
+                }
+                else
+                {
+                    // 文本模式（Raw模式）：不需要二进制包，所以显式设为 null
+                    // 注意：这里的 null 是安全的，因为发送逻辑会通过后面的 mText 处理
+                    advPackage = null;
+                }
+
+                // 3. 最后统一塞进字典，账本（Key）和内容（RawText）一个都不能少
+                dataToSync[mKey] = (advPackage, mText);
+
+                //================
 
                 currentPhysicalRow++; // 原文占掉一行
 
@@ -226,7 +244,7 @@ namespace MediaMonitor.Core
                 else
                 {
                     // 文本模式退化逻辑
-                    byte[] raw = Config.Encoding.GetBytes(pack.RawText + "\n");
+                    byte[] raw = Config.Encoding.GetBytes(pack.RawText + " \n");
                     _transport.Send(raw);
                 }
             }
