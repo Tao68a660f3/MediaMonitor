@@ -64,7 +64,11 @@ namespace MediaMonitor.Services
                     _port.Close();
                 _port.PortName = portName;
                 _port.BaudRate = baudRate;
+                _port.DtrEnable = true;
+                _port.RtsEnable = true;
+                _port.ReceivedBytesThreshold = 1;
                 _port.Open();
+                _port.DiscardInBuffer();
             }
             catch (Exception ex)
             {
@@ -116,7 +120,8 @@ namespace MediaMonitor.Services
                     return;
                 byte[] buffer = new byte[bytesToRead];
                 _port.Read(buffer, 0, bytesToRead);
-                OnRawDataReceived.Invoke(buffer);
+                Console.WriteLine($"[Serial Receive]: {BitConverter.ToString(buffer)}");
+                OnRawDataReceived?.Invoke(buffer);
             }
             catch (Exception ex) { OnTransportError?.Invoke($"读取错误: {ex.Message}"); }
         }
