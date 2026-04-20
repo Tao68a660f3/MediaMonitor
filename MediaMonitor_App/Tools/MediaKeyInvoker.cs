@@ -7,27 +7,13 @@ namespace MediaMonitor.Tools
 {
     public class MediaKeyInvoker
     {
-        // --- Win32 API 定义保持不变 ---
-        [StructLayout(LayoutKind.Sequential)]
-        public struct KEYBDINPUT
-        {
-            public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo;
-        }
+        // 使用最经典的 keybd_event，避开结构体对齐的 87 错误
+        [DllImport("user32.dll")]
+        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
-        [StructLayout(LayoutKind.Sequential)]
-        public struct INPUT
-        {
-            public uint type; public KEYBDINPUT ki;
-        }
-
-        private const int INPUT_KEYBOARD = 1;
         private const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
         private const uint KEYEVENTF_KEYUP = 0x0002;
 
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-        // --- 单例定义 ---
         private static readonly Lazy<MediaKeyInvoker> _instance = new Lazy<MediaKeyInvoker>(() => new MediaKeyInvoker());
         public static MediaKeyInvoker Instance => _instance.Value;
 
@@ -39,21 +25,16 @@ namespace MediaMonitor.Tools
         {
         }
 
-        /// <summary>
-        /// 生产者：将指令放入队列并触发处理
-        /// </summary>
         public void EnqueueCommand(byte cmd)
         {
             _cmdQueue.Enqueue(cmd);
-            System.Media.SystemSounds.Beep.Play(); // 响铃证明方法被调用了
-
-            // 触发处理逻辑
+            // 响铃证明逻辑触发了
+            System.Media.SystemSounds.Beep.Play();
             _ = ProcessQueueAsync();
         }
 
         private async Task ProcessQueueAsync()
         {
-            // 确保只有一个处理流程在运行
             lock (_lock)
             {
                 if (_isProcessing)
@@ -65,18 +46,15 @@ namespace MediaMonitor.Tools
             {
                 while (_cmdQueue.TryDequeue(out byte cmd))
                 {
-                    // 给系统极短的缓冲，避免 com0com 内核锁死
-                    await Task.Delay(10);
+                    // 针对 com0com 的内核特性，保留一个小延迟
+                    await Task.Delay(20);
 
-                    ushort vk = GetVk(cmd);
+                    byte vk = GetVk(cmd);
                     if (vk != 0)
                     {
-                        // 强制切换到 UI 线程执行 SendInput，提高成功率
-                        await System.Windows.Application.Current.Dispatcher.InvokeAsync(() =>
-                        {
-                            SendKey(vk);
-                            System.Diagnostics.Debug.WriteLine($"[Invoker] 执行指令: {cmd:X2}");
-                        });
+                        // 直接执行，不经过 Dispatcher 减少链路干扰
+                        ExecuteKey(vk);
+                        System.Diagnostics.Debug.WriteLine($"[Invoker] 已触发按键: {vk:X2}");
                     }
                 }
             }
@@ -89,7 +67,7 @@ namespace MediaMonitor.Tools
             }
         }
 
-        private ushort GetVk(byte cmd)
+        private byte GetVk(byte cmd)
         {
             return cmd switch
             {
@@ -103,18 +81,11 @@ namespace MediaMonitor.Tools
             };
         }
 
-        private void SendKey(ushort vk)
+        private void ExecuteKey(byte vk)
         {
-            INPUT[] inputs = new INPUT[2];
-            inputs[0].type = INPUT_KEYBOARD;
-            inputs[0].ki.wVk = vk;
-            inputs[0].ki.dwFlags = KEYEVENTF_EXTENDEDKEY;
-
-            inputs[1].type = INPUT_KEYBOARD;
-            inputs[1].ki.wVk = vk;
-            inputs[1].ki.dwFlags = KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP;
-
-            SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT)));
+            // 模拟按下和抬起
+            keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY, UIntPtr.Zero);
+            keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, UIntPtr.Zero);
         }
     }
 }
