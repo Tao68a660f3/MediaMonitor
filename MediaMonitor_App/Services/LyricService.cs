@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -33,6 +34,7 @@ namespace MediaMonitor.Services
 
         public void LoadAndParse(string title, string artist)
         {
+            Debug.WriteLine($"尝试载入歌词{title}-{artist}");
             // 必须首先清空状态，防止没歌词时残留上一首的显示
             Lines.Clear();
             CurrentLyricPath = null;

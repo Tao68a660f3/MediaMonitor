@@ -9,6 +9,10 @@ namespace MediaMonitor.Services
 
     public class SmtcService
     {
+        public string? CurrentTitle { get; private set; }
+        public string? CurrentArtist { get; private set; }
+        public string? CurrentAlbum { get; private set; }
+
         private GlobalSystemMediaTransportControlsSessionManager? _manager;
         private GlobalSystemMediaTransportControlsSession? _currentSession;
         private GlobalSystemMediaTransportControlsSessionTimelineProperties? _lastTimeline;
@@ -92,6 +96,9 @@ namespace MediaMonitor.Services
                 var props = await sender.TryGetMediaPropertiesAsync();
                 if (props != null && sender == _currentSession)
                 {
+                    CurrentTitle = props.Title; // 赋值
+                    CurrentArtist = props.Artist; // 赋值
+                    CurrentAlbum = props.AlbumTitle;
                     OnMediaUpdated?.Invoke(props);
                 }
             }
