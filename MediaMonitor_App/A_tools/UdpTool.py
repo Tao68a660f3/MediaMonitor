@@ -89,9 +89,14 @@ def listen_udp():
             data, addr = listen_sock.recvfrom(2048)
             
             # 自动发现发送目标（从收到的第一个包获取）
-            if send_addr is None:
-                send_addr = (addr[0], addr[1])
+            # 自动发现/更新发送目标（每次收到包都更新）
+            old_addr = send_addr
+            send_addr = (addr[0], addr[1])
+
+            if old_addr is None:
                 print(f"\n[自动发现] 检测到C#服务端: {send_addr[0]}:{send_addr[1]}")
+            elif old_addr != send_addr:
+                print(f"\n[自动发现] C#服务端地址已更新: {old_addr[0]}:{old_addr[1]} -> {send_addr[0]}:{send_addr[1]}")
                 print(f"后续指令将发送到此地址")
                 show_config()
                 print()

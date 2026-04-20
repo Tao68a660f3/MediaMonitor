@@ -30,9 +30,9 @@ namespace MediaMonitor.Tools
         public void EnqueueCommand(byte cmd)
         {
             _cmdQueue.Enqueue(cmd);
-            // 响铃证明逻辑触发了
-            System.Media.SystemSounds.Beep.Play();
-            _ = ProcessQueueAsync();
+            //响铃证明逻辑触发了
+            //System.Media.SystemSounds.Beep.Play();
+           _ = ProcessQueueAsync();
         }
 
         private async Task ProcessQueueAsync()
