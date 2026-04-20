@@ -64,9 +64,11 @@ namespace MediaMonitor.Services
                     _port.Close();
                 _port.PortName = portName;
                 _port.BaudRate = baudRate;
-                _port.DtrEnable = true;
-                _port.RtsEnable = true;
+                _port.DtrEnable = false;
+                _port.RtsEnable = false;
                 _port.ReceivedBytesThreshold = 1;
+                _port.ReadTimeout = 500;
+                _port.WriteTimeout = 500;
                 _port.Open();
                 _port.DiscardInBuffer();
             }
@@ -115,15 +117,24 @@ namespace MediaMonitor.Services
         {
             try
             {
-                int bytesToRead = _port.BytesToRead;
-                if (bytesToRead <= 0)
+                // 1. 既然弹窗能出，说明事件没问题，我们直接读
+                int len = _port.BytesToRead;
+                if (len <= 0)
                     return;
-                byte[] buffer = new byte[bytesToRead];
-                _port.Read(buffer, 0, bytesToRead);
-                Console.WriteLine($"[Serial Receive]: {BitConverter.ToString(buffer)}");
+
+                byte[] buffer = new byte[len];
+                _port.Read(buffer, 0, len);
+
+                // 2. 这里的调试改用 Debug，在 VS 的“输出”窗口看
+                System.Diagnostics.Debug.WriteLine($"[Serial] 收到字节: {BitConverter.ToString(buffer)}");
+
+                // 3. 核心：必须确保触发了事件，且 BackControlService 已经订阅
                 OnRawDataReceived?.Invoke(buffer);
             }
-            catch (Exception ex) { OnTransportError?.Invoke($"读取错误: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"串口读取异常: {ex.Message}");
+            }
         }
 
         private void SerialPort_ErrorReceived(object sender, SerialErrorReceivedEventArgs e)

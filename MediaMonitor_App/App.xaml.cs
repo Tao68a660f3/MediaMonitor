@@ -71,12 +71,12 @@ namespace MediaMonitor
                 // 初始化 SMTC 监听
                 Smtc = new SmtcService();
 
+                // 传入 TransportMgr，让 Service 自动订阅 OnRawDataReceived 事件
+                BackControl = new BackControlService(TransportMgr);
+
                 // 初始化大脑 (Master)，默认传入一个空的传输层
                 // 等你在 MainWindow 点“开启服务”时，我们再通过 Master.UpdateTransport 换成真正的串口或 UDP
                 Master = new PackageMaster(TransportMgr, Lyrics, Smtc);
-
-                // 传入 TransportMgr，让 Service 自动订阅 OnRawDataReceived 事件
-                BackControl = new BackControlService(TransportMgr);
 
                 // 异步启动 SMTC 服务
                 await Smtc.InitializeAsync();
