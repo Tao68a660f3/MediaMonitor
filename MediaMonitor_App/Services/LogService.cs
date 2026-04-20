@@ -24,6 +24,9 @@ namespace MediaMonitor.Services
         /// </summary>
         public void LogProtocol(byte[] data, Encoding enc)
         {
+            // 即使 App.Master 或 Config 为空，也会安全返回 false，不会炸掉
+            bool AdvMode = App.Master?.Config?.IsAdvancedMode ?? false;
+
             if (data == null || data.Length < 2)
                 return;
             if (data[1] == 0x11)
@@ -41,35 +44,52 @@ namespace MediaMonitor.Services
                 Run tag = new Run { Foreground = Brushes.White };
                 string detail = "";
 
-                // 2. 分色解析逻辑 (原样搬迁)
-                if (cmd == 0x10)
+                if (AdvMode)
                 {
-                    tag.Text = " [元数据] ";
-                    tag.Background = Brushes.DarkBlue;
-                    detail = DecodeMeta(data, enc);
-                }
-                else if (cmd == 0x12 || cmd == 0x13)
-                {
-                    tag.Text = cmd == 0x12 ? " [普通行] " : " [翻译行] ";
-                    tag.Background = cmd == 0x12 ? Brushes.DarkGreen : Brushes.DarkSlateBlue;
-                    detail = DecodeStandard(data, enc);
-                }
-                else if (cmd == 0x14)
-                {
-                    tag.Text = " [逐字行] ";
-                    tag.Background = Brushes.DarkRed;
-                    detail = DecodeWordByWord(data, enc);
-                }
-                else if (cmd == 0x20)
-                {
-                    tag.Text = " [时间同步] ";
-                    tag.Background = Brushes.Teal;
-                    detail = DecodeTimeSync(data);
-                }
+                    // 2. 分色解析逻辑 (原样搬迁)
+                    if (cmd == 0x10)
+                    {
+                        tag.Text = " [元数据] ";
+                        tag.Background = Brushes.DarkBlue;
+                        detail = DecodeMeta(data, enc);
+                    }
+                    else if (cmd == 0x12 || cmd == 0x13)
+                    {
+                        tag.Text = cmd == 0x12 ? " [普通行] " : " [翻译行] ";
+                        tag.Background = cmd == 0x12 ? Brushes.DarkGreen : Brushes.DarkSlateBlue;
+                        detail = DecodeStandard(data, enc);
+                    }
+                    else if (cmd == 0x14)
+                    {
+                        tag.Text = " [逐字行] ";
+                        tag.Background = Brushes.DarkRed;
+                        detail = DecodeWordByWord(data, enc);
+                    }
+                    else if (cmd == 0x20)
+                    {
+                        tag.Text = " [时间同步] ";
+                        tag.Background = Brushes.Teal;
+                        detail = DecodeTimeSync(data);
+                    }
 
-                if (string.IsNullOrEmpty(detail))
+                    if (string.IsNullOrEmpty(detail))
+                    {
+                        // 如果上面所有的 if (cmd == 0xXX) 都没有匹配成功
+                        try
+                        {
+                            // 直接尝试将整个包按当前编码转为字符串
+                            detail = "[非协议编码数据]";
+                            tag.Text = " [?] ";
+                            tag.Background = Brushes.Gray;
+                        }
+                        catch
+                        {
+                            detail = "[非法编码数据]";
+                        }
+                    }
+                }
+                else
                 {
-                    // 如果上面所有的 if (cmd == 0xXX) 都没有匹配成功
                     try
                     {
                         // 直接尝试将整个包按当前编码转为字符串
@@ -82,6 +102,7 @@ namespace MediaMonitor.Services
                         detail = "[非法编码数据]";
                     }
                 }
+
 
                 p.Inlines.Add(tag);
                 p.Inlines.Add(new Run(" " + detail) { Foreground = Brushes.White });
