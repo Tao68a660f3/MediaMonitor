@@ -72,7 +72,7 @@ namespace MediaMonitor.Tools
                 if (_cmdQueue.TryDequeue(out byte cmd))
                 {
                     // 关键：物理延迟，确保串口 I/O 状态已释放
-                    await Task.Delay(1000, token);
+                    await Task.Delay(30, token);
 
                     ushort vk = 0;
                     switch (cmd)
