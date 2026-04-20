@@ -7,6 +7,8 @@ namespace MediaMonitor.Tools
 {
     public class MediaKeyInvoker
     {
+        // 千万不要使用 com0com 串口。
+
         // 使用最经典的 keybd_event，避开结构体对齐的 87 错误
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
