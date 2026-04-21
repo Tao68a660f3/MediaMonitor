@@ -3,6 +3,7 @@ using MediaMonitor.Services;
 using MediaMonitor.Tools;
 using MediaMonitor.Tray;
 using System;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -436,7 +437,7 @@ namespace MediaMonitor
                 switch (tb.Name)
                 {
                     case "TxtLineLimit":
-                        tb.Text = Math.Clamp(val, 1, 10).ToString();
+                        tb.Text = Math.Clamp(val, 1, 20).ToString();
                         break;
                     case "TxtOffset":
                         tb.Text = Math.Clamp(val, -10000, 10000).ToString();
@@ -445,7 +446,7 @@ namespace MediaMonitor
                         tb.Text = Math.Clamp(val, 20, 1000).ToString();
                         break;
                     case "TxtSyncInterval":
-                        tb.Text = Math.Clamp(val, 100, 5000).ToString();
+                        tb.Text = Math.Clamp(val, 100, 30000).ToString();
                         break;
                     case "TxtRemotePort":
                         tb.Text = Math.Clamp(val, 1, 65535).ToString();
@@ -483,6 +484,21 @@ namespace MediaMonitor
         private void ComboConfig_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             SyncAndSaveConfig();
+        }
+
+        private void Global_TextBox_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Enter && e.OriginalSource is TextBox tb)
+            {
+                // 关键点：不管你的 LostFocus 挂载的是哪个函数
+                // 只要手动触发 LostFocus 事件，WPF 就会去跑你在 XAML 里写的那个方法
+                tb.RaiseEvent(new RoutedEventArgs(UIElement.LostFocusEvent));
+
+                // 既然数据已经读走了，顺便把键盘焦点撤了，让 UI 看起来更自然
+                Keyboard.ClearFocus();
+
+                e.Handled = true;
+            }
         }
 
         // --- 4. 核心同步与分发站 (只负责搬运数据) ---

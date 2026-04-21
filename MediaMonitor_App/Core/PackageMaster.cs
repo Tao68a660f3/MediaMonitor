@@ -53,6 +53,13 @@ namespace MediaMonitor.Core
             _smtc.PlaybackChanged += status =>
             {
                 _isPlaying = (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
+
+                // 立即获取当前进度并同步给硬件
+                var prog = _smtc.GetCurrentProgress();
+                if (prog != null)
+                {
+                    SendSyncPacket(prog.CurrentSeconds);
+                }
             };
         }
 
@@ -111,12 +118,7 @@ namespace MediaMonitor.Core
             int syncThreshold = Math.Max(1, Config.SyncIntervalMs / 50);
             if (++_syncTickCounter >= syncThreshold)
             {
-                if (Config.IsAdvancedMode)
-                {
-                    var p = PackageBuilder.BuildSync(_isPlaying, (uint)(cur * 1000), (uint)(_totalSeconds * 1000));
-                    _transport.Send(p);
-                }
-                _syncTickCounter = 0;
+                SendSyncPacket(cur);
             }
 
             // 2. 歌词行变动处理
@@ -284,6 +286,19 @@ namespace MediaMonitor.Core
             _lastSmtcWallSec = nowWall;
             _totalSeconds = info.TotalSeconds;
             _isPlaying = (info.Status == "Playing");
+        }
+
+        private void SendSyncPacket(double currentSeconds)
+        {
+            if (!_transport.IsConnected || !Config.IsAdvancedMode)
+                return;
+
+            // 构造并发送同步包
+            var p = PackageBuilder.BuildSync(_isPlaying, (uint)(currentSeconds * 1000), (uint)(_totalSeconds * 1000));
+            _transport.Send(p);
+
+            // 发送后重置计数器，避免 Tick 线程紧接着又发一次
+            _syncTickCounter = 0;
         }
 
         public void SendMetadata(string title, string artist, string album)
