@@ -123,17 +123,22 @@ namespace MediaMonitor.Core
 
             // 2. 歌词行变动处理
             // 注意：_lastProcessedCIdx 也是竞争资源，读取和修改它时需要轻量锁
+            bool shouldOutput = false;
+            bool isJump = false;
             lock (_syncLock)
             {
                 if (cIdx != _lastProcessedCIdx)
                 {
-                    //bool isJump = (cIdx < _lastProcessedCIdx) || Math.Abs(cIdx - _lastProcessedCIdx) > 1;
-                    bool isJump = cIdx < _lastProcessedCIdx;  // 只有向前跳转需要强制重发，判断为 isJump
+                    shouldOutput = true;
+                    isJump = cIdx < _lastProcessedCIdx;
                     _lastProcessedCIdx = cIdx;
-
-                    // 将关键的发送逻辑移出锁区，或者在里面只做判定
-                    HandleOutput(cIdx, isJump);
                 }
+            }
+
+            // 关键：在锁外面执行耗时的发送逻辑
+            if (shouldOutput)
+            {
+                HandleOutput(cIdx, isJump);
             }
         }
 
