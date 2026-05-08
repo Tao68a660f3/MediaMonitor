@@ -94,7 +94,7 @@ namespace MediaMonitor.Core
                     ProcessTick();
                 }
                 catch { }
-                await Task.Delay(50, token); // 50ms 逻辑帧周期
+                await Task.Delay(10, token); // 10ms 逻辑帧周期
             }
         }
 
