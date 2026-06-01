@@ -32,6 +32,9 @@ namespace MediaMonitor.Core
         private bool _isPlaying = false;
         private readonly List<double> _wallIntervalSamples = new List<double>();
 
+        // --- 逻辑帧间隔(ms) ---
+        private const int _frameInterval = 10;
+
         public PackageConfig Config { get; private set; } = new PackageConfig();
         private CancellationTokenSource? _loopCts;
 
@@ -94,7 +97,7 @@ namespace MediaMonitor.Core
                     ProcessTick();
                 }
                 catch { }
-                await Task.Delay(10, token); // 10ms 逻辑帧周期
+                await Task.Delay(_frameInterval, token); // 10ms 逻辑帧周期
             }
         }
 
@@ -115,7 +118,7 @@ namespace MediaMonitor.Core
                 return;
 
             // 1. 同步包发送 (不涉及竞争变量，不需要锁)
-            int syncThreshold = Math.Max(1, Config.SyncIntervalMs / 50);
+            int syncThreshold = Math.Max(1, Config.SyncIntervalMs / _frameInterval); // 刷新间隔10ms
             if (++_syncTickCounter >= syncThreshold)
             {
                 SendSyncPacket(cur);
