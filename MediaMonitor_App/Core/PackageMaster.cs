@@ -254,7 +254,7 @@ namespace MediaMonitor.Core
                 else
                 {
                     // 文本模式退化逻辑
-                    byte[] raw = Config.Encoding.GetBytes(pack.RawText + " \n");
+                    byte[] raw = Config.Encoding.GetBytes(pack.RawText + "\n");
                     _transport.Send(raw);
                 }
             }

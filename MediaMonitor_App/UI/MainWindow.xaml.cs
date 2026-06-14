@@ -4,6 +4,7 @@ using MediaMonitor.Tools;
 using MediaMonitor.Tray;
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -294,6 +295,13 @@ namespace MediaMonitor
             int lrcCount = App.Lyrics.Lines?.Count ?? 0;
             string lrcPath = App.Lyrics.CurrentLyricPath ?? "";
             TxtLrcStatus.Text = lrcCount > 0 ? $"已加载 {lrcPath}, {lrcCount} 行" : "未找到歌词";
+
+            // 同步托盘提示：歌曲信息 + 主程序标题（含版本号）
+            string song = App.Smtc.CurrentTitle ?? "未在播放";
+            string artist = App.Smtc.CurrentArtist ?? "";
+            string songInfo = string.IsNullOrEmpty(artist) ? song : $"{song} - {artist}";
+            string trayTip = $"{songInfo} | {this.Title}";
+            _tray.UpdateTooltip(trayTip);
         }
 
         // MainWindow.xaml.cs 内部
@@ -305,7 +313,7 @@ namespace MediaMonitor
             {
                 if (line == null || line.IsEmpty)
                 {
-                    TxtLyricDisplay.Text = "--- 暂无歌词 ---";
+                    TxtLyricDisplay.Text = "  ";
                     return;
                 }
 
@@ -385,10 +393,15 @@ namespace MediaMonitor
 
         private void BtnBrowse_Click(object sender, RoutedEventArgs e)
         {
+            // 如果保存的路径不存在，回退到桌面，避免 OpenFolderDialog 弹报错
+            string initDir = TxtLrcPath.Text;
+            if (!Directory.Exists(initDir))
+                initDir = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+
             var dialog = new Microsoft.Win32.OpenFolderDialog
             {
                 Title = "选择歌词搜索目录",
-                InitialDirectory = TxtLrcPath.Text
+                InitialDirectory = initDir
             };
 
             if (dialog.ShowDialog() == true)
@@ -396,6 +409,13 @@ namespace MediaMonitor
                 TxtLrcPath.Text = dialog.FolderName;
                 // 自动触发实时生效逻辑
                 SyncAndSaveConfig();
+
+                // 切换目录后立即用当前歌曲信息重新载入歌词
+                if (App.Lyrics != null && App.Smtc != null)
+                {
+                    App.Lyrics.LoadAndParse(App.Smtc.CurrentTitle, App.Smtc.CurrentArtist);
+                    App.Master?.Invalidate(); // 强制刷新账本，重新输出当前行
+                }
             }
         }
 

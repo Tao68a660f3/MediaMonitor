@@ -144,9 +144,22 @@ namespace MediaMonitor.Services
                             if (TimeSpan.TryParse("00:" + w.Groups["t"].Value, out TimeSpan wt))
                                 newLine.Words.Add(new WordInfo { Time = wt, Word = w.Groups["w"].Value });
                         }
-                        newLine.Content = string.Join("", newLine.Words.Select(x => x.Word));
+                        newLine.Content = string.Join("", newLine.Words.Select(x => x.Word)).Trim();
                     }
-                    else { newLine.Content = contentBody; }
+                    else
+                    {
+                        // 检测 " / " 分隔符（空格-斜杠-空格），区分原文和翻译
+                        int splitIdx = contentBody.IndexOf(" / ", StringComparison.Ordinal);
+                        if (splitIdx > 0)
+                        {
+                            newLine.Content = contentBody.Substring(0, splitIdx).Trim();
+                            newLine.Translation = contentBody.Substring(splitIdx + 3).Trim();
+                        }
+                        else
+                        {
+                            newLine.Content = contentBody.Trim();
+                        }
+                    }
 
                     Lines.Add(newLine);
                 }

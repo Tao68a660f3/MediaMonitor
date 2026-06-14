@@ -30,6 +30,18 @@ namespace MediaMonitor.Tray
             _icon.ContextMenuStrip = menu;
         }
 
+        /// <summary>
+        /// 更新托盘图标的提示文字（显示在鼠标悬停时）
+        /// </summary>
+        public void UpdateTooltip(string text)
+        {
+            if (_icon != null)
+            {
+                // NotifyIcon.Text 最大 127 个字符，超出会截断
+                _icon.Text = text.Length > 127 ? text[..127] : text;
+            }
+        }
+
         public void Dispose()
         {
             if (_icon != null)
