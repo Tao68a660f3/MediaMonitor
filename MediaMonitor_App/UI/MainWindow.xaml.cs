@@ -272,6 +272,14 @@ namespace MediaMonitor
             }
         }
 
+        string FormatTime(TimeSpan ts)
+        {
+            if (ts.TotalHours >= 1)
+                return ts.ToString(@"hh\:mm\:ss");
+            else
+                return ts.ToString(@"mm\:ss");
+        }
+
         private void UIUpdate_Tick(object sender, EventArgs e)
         {
             if (App.Smtc == null || App.Lyrics == null)
@@ -286,9 +294,10 @@ namespace MediaMonitor
             var prog = App.Smtc.GetCurrentProgress();
             if (prog != null)
             {
-                PbProgress.Maximum = prog.TotalSeconds;
-                PbProgress.Value = prog.CurrentSeconds;
-                TxtTime.Text = $"{TimeSpan.FromSeconds(prog.CurrentSeconds):mm\\:ss} / {TimeSpan.FromSeconds(prog.TotalSeconds):mm\\:ss}";
+                PbProgress.Maximum = prog.Duration.TotalSeconds;
+                PbProgress.Value = prog.Position.TotalSeconds;
+                //TxtTime.Text = $"{prog.Position:mm\\:ss} / {prog.Duration:mm\\:ss}";
+                TxtTime.Text = $"{FormatTime(prog.Position)} / {FormatTime(prog.Duration)}";
             }
 
             // 更新歌词状态

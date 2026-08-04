@@ -61,7 +61,7 @@ namespace MediaMonitor.Core
                 var prog = _smtc.GetCurrentProgress();
                 if (prog != null)
                 {
-                    SendSyncPacket(prog.CurrentSeconds);
+                    SendSyncPacket(prog.Position.TotalSeconds);
                 }
             };
         }
@@ -109,8 +109,8 @@ namespace MediaMonitor.Core
 
             UpdateStatistics(prog);
 
-            double cur = prog.CurrentSeconds;
-            int cIdx = _lyricService.Lines.FindLastIndex(l => l.Time <= TimeSpan.FromSeconds(cur));
+            double cur = prog.Position.TotalSeconds;
+            int cIdx = _lyricService.Lines.FindLastIndex(l => l.Time <= prog.Position);
 
             LyricChanged?.Invoke(cIdx, _lyricService.GetLine(cIdx));
 
@@ -270,10 +270,10 @@ namespace MediaMonitor.Core
         private void UpdateStatistics(MediaProgressInfo info)
         {
             double nowWall = DateTimeOffset.Now.ToUnixTimeMilliseconds() / 1000.0;
-            if (info.Status == "Playing" && _lastSmtcWallSec > 0)
+            if (info.Status == PlaybackState.Playing && _lastSmtcWallSec > 0)
             {
                 double deltaWall = nowWall - _lastSmtcWallSec;
-                double deltaMedia = info.CurrentSeconds - _lastSmtcMediaSec;
+                double deltaMedia = info.Position.TotalSeconds - _lastSmtcMediaSec;
 
                 // 采样节奏：过滤暂停与 Seek
                 if (Math.Abs(deltaMedia - deltaWall) < 0.2)
@@ -290,10 +290,10 @@ namespace MediaMonitor.Core
                 //    Invalidate();
                 //}
             }
-            _lastSmtcMediaSec = info.CurrentSeconds;
+            _lastSmtcMediaSec = info.Position.TotalSeconds;
             _lastSmtcWallSec = nowWall;
-            _totalSeconds = info.TotalSeconds;
-            _isPlaying = (info.Status == "Playing");
+            _totalSeconds = info.Duration.TotalSeconds;
+            _isPlaying = (info.Status == PlaybackState.Playing);
         }
 
         private void SendSyncPacket(double currentSeconds)

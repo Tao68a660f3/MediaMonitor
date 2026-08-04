@@ -5,7 +5,20 @@ using Windows.Media.Control;
 
 namespace MediaMonitor.Services
 {
-    public record MediaProgressInfo(double CurrentSeconds, double TotalSeconds, string CurrentStr, string TotalStr, string Status);
+    /// <summary>
+    /// 播放状态（与系统 SMTC 状态对应的强类型枚举）
+    /// </summary>
+    public enum PlaybackState
+    {
+        Closed,
+        Opened,
+        Changing,
+        Stopped,
+        Playing,
+        Paused
+    }
+
+    public record MediaProgressInfo(TimeSpan Position, TimeSpan Duration, PlaybackState Status);
 
     public class SmtcService
     {
@@ -109,6 +122,30 @@ namespace MediaMonitor.Services
             }
         }
 
+        /// <summary>
+        /// 将系统 SMTC 播放状态映射为强类型枚举
+        /// </summary>
+        private static PlaybackState MapPlaybackStatus(GlobalSystemMediaTransportControlsSessionPlaybackStatus status)
+        {
+            switch (status)
+            {
+                case GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed:
+                    return PlaybackState.Closed;
+                case GlobalSystemMediaTransportControlsSessionPlaybackStatus.Opened:
+                    return PlaybackState.Opened;
+                case GlobalSystemMediaTransportControlsSessionPlaybackStatus.Changing:
+                    return PlaybackState.Changing;
+                case GlobalSystemMediaTransportControlsSessionPlaybackStatus.Stopped:
+                    return PlaybackState.Stopped;
+                case GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing:
+                    return PlaybackState.Playing;
+                case GlobalSystemMediaTransportControlsSessionPlaybackStatus.Paused:
+                    return PlaybackState.Paused;
+                default:
+                    return PlaybackState.Closed;
+            }
+        }
+
         public MediaProgressInfo? GetCurrentProgress()
         {
             if (_currentSession == null) return null;
@@ -138,11 +175,9 @@ namespace MediaMonitor.Services
                 if (pos < TimeSpan.Zero) pos = TimeSpan.Zero;
 
                 return new MediaProgressInfo(
-                    pos.TotalSeconds,
-                    timeline.EndTime.TotalSeconds,
-                    pos.ToString(@"mm\:ss"),
-                    timeline.EndTime.ToString(@"mm\:ss"),
-                    status.ToString()
+                    pos,
+                    timeline.EndTime,
+                    MapPlaybackStatus(status)
                 );
             }
             catch { return null; }
