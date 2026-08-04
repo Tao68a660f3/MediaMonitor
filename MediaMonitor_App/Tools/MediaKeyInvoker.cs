@@ -2,13 +2,17 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using MediaMonitor.Services;
 
 namespace MediaMonitor.Tools
 {
     public class MediaKeyInvoker
     {
-        // 千万不要使用 com0com 串口。
+        // 建议不要使用 SuperCom 串口调试软件来调试本程序。
 
+        // ========== Deprecated 备用路径：keybd_event 键盘注入 ==========
+        // 该路径依赖前台窗口焦点与权限（UIPI），在管理员窗口/全屏应用下可能失效。
+        // 现仅用于 SMTC 没有现成 API 的指令：Mute(0xA4)、快进(0xA5)、快退(0xA6)。
         // 使用最经典的 keybd_event，避开结构体对齐的 87 错误
         [DllImport("user32.dll")]
         private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
@@ -32,7 +36,7 @@ namespace MediaMonitor.Tools
             _cmdQueue.Enqueue(cmd);
             //响铃证明逻辑触发了
             //System.Media.SystemSounds.Beep.Play();
-           _ = ProcessQueueAsync();
+            _ = ProcessQueueAsync();
         }
 
         private async Task ProcessQueueAsync()
@@ -48,15 +52,35 @@ namespace MediaMonitor.Tools
             {
                 while (_cmdQueue.TryDequeue(out byte cmd))
                 {
-                    // 针对 com0com 的内核特性，保留一个小延迟
+                    // 针对串口调试软件可能干扰时序的特性，保留一个小延迟
                     await Task.Delay(20);
 
-                    byte vk = GetVk(cmd);
-                    if (vk != 0)
+                    switch (cmd)
                     {
-                        // 直接执行，不经过 Dispatcher 减少链路干扰
-                        ExecuteKey(vk);
-                        System.Diagnostics.Debug.WriteLine($"[Invoker] 已触发按键: {vk:X2}");
+                        // ===== 主用路径：SMTC 直控（不依赖前台窗口/权限，最可靠） =====
+                        case 0xA1:
+                            _ = App.Smtc?.NextAsync();
+                            System.Diagnostics.Debug.WriteLine("[Invoker] 已触发 SMTC 下一曲");
+                            break;
+                        case 0xA2:
+                            _ = App.Smtc?.PrevAsync();
+                            System.Diagnostics.Debug.WriteLine("[Invoker] 已触发 SMTC 上一曲");
+                            break;
+                        case 0xA3:
+                            _ = App.Smtc?.PlayPauseAsync();
+                            System.Diagnostics.Debug.WriteLine("[Invoker] 已触发 SMTC 播放/暂停");
+                            break;
+
+                        // ===== 备用路径：keybd_event 键盘注入（SMTC 无现成 API 的指令） =====
+                        default:
+                            byte vk = GetVk(cmd);
+                            if (vk != 0)
+                            {
+                                // 直接执行，不经过 Dispatcher 减少链路干扰
+                                ExecuteKey(vk);
+                                System.Diagnostics.Debug.WriteLine($"[Invoker] 已触发按键: {vk:X2}");
+                            }
+                            break;
                     }
                 }
             }

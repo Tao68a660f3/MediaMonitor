@@ -77,6 +77,38 @@ namespace MediaMonitor.Services
             }
         }
 
+        // ========== SMTC 直控方法（MediaKeyInvoker 主用路径，不依赖前台窗口/权限） ==========
+
+        /// <summary>
+        /// 播放/暂停：直接调用系统 SMTC 会话，绕过 keybd_event 注入的环境限制
+        /// </summary>
+        public async Task PlayPauseAsync()
+        {
+            if (_currentSession == null) return;
+            try { await _currentSession.TryTogglePlayPauseAsync(); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"SMTC 播放/暂停失败: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// 下一曲：直接调用系统 SMTC 会话
+        /// </summary>
+        public async Task NextAsync()
+        {
+            if (_currentSession == null) return;
+            try { await _currentSession.TrySkipNextAsync(); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"SMTC 下一曲失败: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// 上一曲：直接调用系统 SMTC 会话
+        /// </summary>
+        public async Task PrevAsync()
+        {
+            if (_currentSession == null) return;
+            try { await _currentSession.TrySkipPreviousAsync(); }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"SMTC 上一曲失败: {ex.Message}"); }
+        }
+
         private void Session_TimelinePropertiesChanged(GlobalSystemMediaTransportControlsSession sender, TimelinePropertiesChangedEventArgs args)
         {
             try
