@@ -32,6 +32,29 @@ namespace MediaMonitor.Services
             return Lines[index];
         }
 
+        /// <summary>
+        /// 计算某行歌词的结束时间（供 0x15 增强原文行使用）：
+        /// 中间行 = 下一行的开始时间；
+        /// 末行优先使用播放总时长（运行时才有），若总时长不合理
+        /// （小于等于行开始时间、或与行开始时间差距过小），则退回“开始时间+5秒”兜底。
+        /// </summary>
+        public TimeSpan GetEndTime(int index, TimeSpan totalDuration)
+        {
+            if (index < 0 || index >= Lines.Count)
+                return TimeSpan.Zero;
+
+            // 中间行：下一行的开始时间即本行结束时间
+            if (index < Lines.Count - 1)
+                return Lines[index + 1].Time;
+
+            // 末行：优先使用播放总时长
+            var start = Lines[index].Time;
+            if (totalDuration > start && (totalDuration - start).TotalSeconds > 1)
+                return totalDuration;
+
+            return start + TimeSpan.FromSeconds(5);
+        }
+
         public void LoadAndParse(string title, string artist)
         {
             Debug.WriteLine($"尝试载入歌词{title}-{artist}");

@@ -135,20 +135,24 @@ def send_custom_packet(cmd_hex, payload_hex=[]):
         print("未发现C#服务端，请确保C#程序已启动并向本机发送数据")
         return False
     
-    # 1. 构建基础包头 (0xAB 为回控标识)
+    # 1. 构建基础包头 (0xAB 为回控标识) + 2字节长度 (LenH LenL)
     header = 0xAB
     cmd = cmd_hex
-    length = len(payload_hex)
-    
-    # 2. 计算校验和 (异或逻辑)
+    payload = list(payload_hex)
+    length = len(payload)
+
+    # 2. 组织帧体（不含校验位）：0xAB + Cmd + LenH + LenL + Payload
+    body = [header, cmd, (length >> 8) & 0xFF, length & 0xFF] + payload
+
+    # 3. 计算校验和：全帧异或（Head ^ Cmd ^ LenH ^ LenL ^ Payload 所有字节）
     check_sum = 0
-    for b in payload_hex:
+    for b in body:
         check_sum ^= b
-        
-    # 3. 组合完整数据包
-    packet = bytearray([header, cmd, length] + payload_hex + [check_sum])
+
+    # 4. 组合完整数据包
+    packet = bytearray(body + [check_sum])
     
-    # 4. UDP 发送
+    # 5. UDP 发送
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.sendto(packet, send_addr)

@@ -163,7 +163,8 @@ namespace MediaMonitor.Core
                 var line = _lyricService.GetLine(lyricIdx);
 
                 // 1. 处理原文槽位 (强制占用 1 个物理行)
-                string cmdType = (line.Words.Count > 0) ? "0x14" : "0x12";
+                // 普通行已升级为 0x15 增强原文行（带结束时间），账本键同步更新
+                string cmdType = (line.Words.Count > 0) ? "0x14" : "0x15";
                 string mKey = $"{lyricIdx}_{cmdType}";
                 targetSlots.Add(mKey);
 
@@ -183,8 +184,10 @@ namespace MediaMonitor.Core
                     }
                     else
                     {
-                        // 普通行模式包（即使 mText 是空串，这里也会生成带 ID 的清屏包）
-                        advPackage = PackageBuilder.BuildLyricLine((short)lyricIdx, line.Time, mText);
+                        // 普通行模式包：0x15 增强原文行（带结束时间）
+                        // _totalSeconds 来自 SmtcService.GetCurrentProgress().Duration（当前曲目总时长）
+                        var endTime = _lyricService.GetEndTime(lyricIdx, TimeSpan.FromSeconds(_totalSeconds));
+                        advPackage = PackageBuilder.BuildEnhancedLyricLine((short)lyricIdx, line.Time, endTime, mText);
                     }
                 }
                 else

@@ -30,15 +30,21 @@ namespace MediaMonitor.Tools
         public static byte[] GetEncodedBytes(string text) => _activeEncoding.GetBytes(text);
 
         // 通用打包逻辑
-        // 修改点：固定传入 0xAA 作为 Header
-        // 基础打包逻辑：AA [Cmd] [Len] [Payload] [Check]
+        // 基础打包逻辑：AA [Cmd] [LenH] [LenL] [Payload] [Check]
         public static byte[] BuildPacket(byte cmd, byte[] payload)
         {
-            List<byte> frame = new List<byte> { PC_TO_MCU, cmd, (byte)payload.Length };
+            int len = payload.Length;
+            List<byte> frame = new List<byte>
+            {
+                PC_TO_MCU, cmd,
+                (byte)((len >> 8) & 0xFF), // LenH
+                (byte)(len & 0xFF)         // LenL
+            };
             frame.AddRange(payload);
+            // 全帧异或校验：Head ^ Cmd ^ LenH ^ LenL ^ Payload 所有字节
             byte check = 0;
-            foreach (var b in payload)
-                check ^= b; // 异或校验
+            foreach (var b in frame)
+                check ^= b;
             frame.Add(check);
             return frame.ToArray();
         }
@@ -89,12 +95,21 @@ namespace MediaMonitor.Tools
             return BuildPacket(0x11, p.ToArray());
         }
 
-        // 0x12: 原文包
+        // 0x12: 原文包（保留兼容，当前代码路径默认不启用）
         public static byte[] BuildLyricLine(short absIdx, TimeSpan startTime, string content)
         {
             var p = BuildHeader(absIdx, (uint)startTime.TotalMilliseconds);
             p.AddRange(GetEncodedBytes(content));
             return BuildPacket(0x12, p.ToArray());
+        }
+
+        // 0x15: 增强原文包（在 0x12 基础上增加结束时间）
+        public static byte[] BuildEnhancedLyricLine(short absIdx, TimeSpan startTime, TimeSpan endTime, string content)
+        {
+            var p = BuildHeader(absIdx, (uint)startTime.TotalMilliseconds);
+            p.AddRange(BitConverter.GetBytes((uint)endTime.TotalMilliseconds)); // 结束时间 (4B)
+            p.AddRange(GetEncodedBytes(content));
+            return BuildPacket(0x15, p.ToArray());
         }
 
         // 0x13: 翻译包

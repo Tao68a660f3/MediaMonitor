@@ -22,20 +22,24 @@ CMD_MAPPING = [
 
 def send_custom_packet(cmd_hex, payload_hex=[]):
     """发送UDP控制包"""
-    # 1. 构建基础包头 (0xAB 为回控标识)
+    # 1. 构建基础包头 (0xAB 为回控标识) + 2字节长度 (LenH LenL)
     header = 0xAB
     cmd = cmd_hex
-    length = len(payload_hex)
-    
-    # 2. 计算校验和 (异或逻辑)
+    payload = list(payload_hex)
+    length = len(payload)
+
+    # 2. 组织帧体（不含校验位）：0xAB + Cmd + LenH + LenL + Payload
+    body = [header, cmd, (length >> 8) & 0xFF, length & 0xFF] + payload
+
+    # 3. 计算校验和：全帧异或（Head ^ Cmd ^ LenH ^ LenL ^ Payload 所有字节）
     check_sum = 0
-    for b in payload_hex:
+    for b in body:
         check_sum ^= b
-        
-    # 3. 组合完整数据包
-    packet = bytearray([header, cmd, length] + payload_hex + [check_sum])
-    
-    # 4. UDP 发送
+
+    # 4. 组合完整数据包
+    packet = bytearray(body + [check_sum])
+
+    # 5. UDP 发送
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.sendto(packet, (PC_IP, PC_PORT))
         print(f"已发送: {packet.hex().upper()} [指令: {hex(cmd_hex)}]")
