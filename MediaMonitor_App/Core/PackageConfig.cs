@@ -64,6 +64,13 @@ namespace MediaMonitor.Core
         /// </summary>
         public int SyncIntervalMs { get; set; } = 500;
 
+        /// <summary>
+        /// 发送队列每包间隔(ms)。用于抹平突发流量峰值，避免超过 BLE/UART 物理吞吐上限。
+        /// 推荐 5~15ms，默认 10ms。仅在配置文件 config.json 中可调，UI 不提供入口。
+        /// 设 0 表示不节流（如 UDP 直连场景）。
+        /// </summary>
+        public int SendIntervalMs { get; set; } = 10;
+
         // 补上缺失的逻辑帧属性
         public int UpdateIntervalMs { get; set; } = 50;
 
