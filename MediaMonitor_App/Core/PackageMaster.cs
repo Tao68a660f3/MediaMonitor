@@ -23,7 +23,9 @@ namespace MediaMonitor.Core
         // --- 核心严谨账本 (HashSet) ---
         private HashSet<string> _syncedSlots = new HashSet<string>();
         private int _lastProcessedCIdx = -2;
-        private int _syncTickCounter = 0;
+
+        // --- 同步包调度：使用真实时间戳，避免 Task.Delay 精度不足导致的间隔漂移 ---
+        private long _lastSyncTimeMs = 0;
 
         // --- 统计学习变量 ---
         private double _lastSmtcMediaSec = -1;
@@ -57,11 +59,14 @@ namespace MediaMonitor.Core
             {
                 _isPlaying = (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
 
-                // 立即获取当前进度并同步给硬件
+                // 立即获取当前进度并同步给硬件（单位：毫秒）
                 var prog = _smtc.GetCurrentProgress();
                 if (prog != null)
                 {
-                    SendSyncPacket(prog.Position.TotalSeconds);
+                    SendSyncPacket(prog.Position.TotalMilliseconds);
+
+                    // 同时更新上次同步时间戳，避免后台循环紧接着又补发一包造成重复
+                    _lastSyncTimeMs = Environment.TickCount64;
                 }
             };
         }
@@ -109,7 +114,7 @@ namespace MediaMonitor.Core
 
             UpdateStatistics(prog);
 
-            double cur = prog.Position.TotalSeconds;
+            double cur = prog.Position.TotalMilliseconds;
             int cIdx = _lyricService.Lines.FindLastIndex(l => l.Time <= prog.Position);
 
             LyricChanged?.Invoke(cIdx, _lyricService.GetLine(cIdx));
@@ -117,11 +122,12 @@ namespace MediaMonitor.Core
             if (!_transport.IsConnected)
                 return;
 
-            // 1. 同步包发送 (不涉及竞争变量，不需要锁)
-            int syncThreshold = Math.Max(1, Config.SyncIntervalMs / _frameInterval); // 刷新间隔10ms
-            if (++_syncTickCounter >= syncThreshold)
+            // 1. 同步包发送：基于真实时间戳调度，不受 Task.Delay 精度影响
+            long nowMs = Environment.TickCount64;
+            if (nowMs - _lastSyncTimeMs >= Config.SyncIntervalMs)
             {
                 SendSyncPacket(cur);
+                _lastSyncTimeMs = nowMs;
             }
 
             // 2. 歌词行变动处理
@@ -299,17 +305,14 @@ namespace MediaMonitor.Core
             _isPlaying = (info.Status == PlaybackState.Playing);
         }
 
-        private void SendSyncPacket(double currentSeconds)
+        private void SendSyncPacket(double currentMs)
         {
             if (!_transport.IsConnected || !Config.IsAdvancedMode)
                 return;
 
-            // 构造并发送同步包
-            var p = PackageBuilder.BuildSync(_isPlaying, (uint)(currentSeconds * 1000), (uint)(_totalSeconds * 1000));
+            // 构造并发送同步包（单位：毫秒，直接透传不再转换）
+            var p = PackageBuilder.BuildSync(_isPlaying, (uint)currentMs, (uint)(_totalSeconds * 1000));
             _transport.Send(p);
-
-            // 发送后重置计数器，避免 Tick 线程紧接着又发一次
-            _syncTickCounter = 0;
         }
 
         public void SendMetadata(string title, string artist, string album)

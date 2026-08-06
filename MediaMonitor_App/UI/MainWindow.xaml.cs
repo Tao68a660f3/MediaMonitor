@@ -242,7 +242,7 @@ namespace MediaMonitor
                 // --- 4. 参数列表 ---
                 TxtLineLimit.Text = cfg.LineLimit.ToString();
                 TxtOffset.Text = cfg.Offset.ToString();
-                TxtUpdateRate.Text = cfg.UpdateIntervalMs.ToString();
+                //TxtUpdateRate.Text = cfg.UpdateIntervalMs.ToString();
                 TxtSyncInterval.Text = cfg.SyncIntervalMs.ToString();
 
                 // --- 5. 核心状态同步 (解决 UDP 模式重新打开时的显示问题) ---
@@ -574,8 +574,8 @@ namespace MediaMonitor
                 cfg.LineLimit = ll;
             if (int.TryParse(TxtOffset.Text, out int off))
                 cfg.Offset = off;
-            if (int.TryParse(TxtUpdateRate.Text, out int ur))
-                cfg.UpdateIntervalMs = ur;
+            //if (int.TryParse(TxtUpdateRate.Text, out int ur))
+            //    cfg.UpdateIntervalMs = ur;
             if (int.TryParse(TxtSyncInterval.Text, out int si))
                 cfg.SyncIntervalMs = si;
 
