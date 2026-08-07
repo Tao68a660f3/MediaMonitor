@@ -27,6 +27,9 @@ namespace MediaMonitor.Core
         // --- 同步包调度：使用真实时间戳，避免 Task.Delay 精度不足导致的间隔漂移 ---
         private long _lastSyncTimeMs = 0;
 
+        // --- Seek/进度跳变检测（切歌的大跳变也归入 Seek，立即补发同步包）---
+        private double _lastSeenPositionMs = -1;   // 上一帧看到的播放器进度
+
         // --- 统计学习变量 ---
         private double _lastSmtcMediaSec = -1;
         private double _lastSmtcWallSec = -1;
@@ -52,6 +55,15 @@ namespace MediaMonitor.Core
                 _lyricService.LoadAndParse(props.Title, props.Artist);
                 Invalidate(); // 切歌强制清空账本
                 SendMetadata(props.Title, props.Artist, props.AlbumTitle);
+
+                // 切歌后立即发送一次同步包（重置硬件端时间轴）
+                var prog = _smtc.GetCurrentProgress();
+                if (prog != null)
+                {
+                    SendSyncPacket(prog.Position.TotalMilliseconds);
+                    _lastSeenPositionMs = prog.Position.TotalMilliseconds;
+                    _lastSyncTimeMs = Environment.TickCount64;
+                }
             };
 
             // 监听播放状态
@@ -64,6 +76,9 @@ namespace MediaMonitor.Core
                 if (prog != null)
                 {
                     SendSyncPacket(prog.Position.TotalMilliseconds);
+
+                    // 重置 Seek 基线，防止 Play 瞬间被误判为 Seek 又补一包
+                    _lastSeenPositionMs = prog.Position.TotalMilliseconds;
 
                     // 同时更新上次同步时间戳，避免后台循环紧接着又补发一包造成重复
                     _lastSyncTimeMs = Environment.TickCount64;
@@ -122,9 +137,16 @@ namespace MediaMonitor.Core
             if (!_transport.IsConnected)
                 return;
 
-            // 1. 同步包发送：基于真实时间戳调度，不受 Task.Delay 精度影响
+            // 1. 同步包发送：基于真实时间戳调度 + Seek/切歌即时补发
             long nowMs = Environment.TickCount64;
-            if (nowMs - _lastSyncTimeMs >= Config.SyncIntervalMs)
+
+            // --- Seek 检测：当前位置比上一帧跳变超过 1.5s（支持正跳、回跳及切歌大跳变）---
+            bool isSeek = _lastSeenPositionMs >= 0 &&
+                          Math.Abs(cur - _lastSeenPositionMs) > 1500;
+            _lastSeenPositionMs = cur;
+
+            if (isSeek ||
+                nowMs - _lastSyncTimeMs >= Config.SyncIntervalMs)
             {
                 SendSyncPacket(cur);
                 _lastSyncTimeMs = nowMs;

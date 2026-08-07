@@ -86,12 +86,14 @@ namespace MediaMonitor.Tools
             return BuildPacket(0x10, p.ToArray());
         }
 
-        // 0x11: 同步包
+        // 0x11: 同步包（13 字节 Payload：isPlaying + currentMs + totalMs + remoteTickMs）
         public static byte[] BuildSync(bool isPlaying, uint currentMs, uint totalMs)
         {
+            uint remoteTickMs = (uint)Environment.TickCount64; // 发送时刻的系统 Tick
             List<byte> p = new List<byte> { (byte)(isPlaying ? 1 : 0) };
             p.AddRange(BitConverter.GetBytes(currentMs));
             p.AddRange(BitConverter.GetBytes(totalMs));
+            p.AddRange(BitConverter.GetBytes(remoteTickMs));
             return BuildPacket(0x11, p.ToArray());
         }
 
