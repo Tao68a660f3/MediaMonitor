@@ -332,8 +332,24 @@ namespace MediaMonitor.Core
             if (!_transport.IsConnected || !Config.IsAdvancedMode)
                 return;
 
+            uint safeMs;
+            double offset = Config.SyncCurrentOffsetMs;
+
+            // 零点保护：真实进度落在 [0, |偏移量|] 区间内时不加偏移，直接发真实进度。
+            // 正偏移会在该区间制造"假进度"（0→10ms），负偏移会因钳位丢失进度细节（50ms→0ms），
+            // 都会破坏硬件端"0ms = 起点锚点"的语义。
+            if (currentMs <= Math.Abs(offset))
+            {
+                safeMs = (uint)Math.Max(0, currentMs);
+            }
+            else
+            {
+                // 超出偏移区间后才应用偏移 + 下限保护（防负偏移导致 uint 溢出成巨数）
+                safeMs = (uint)Math.Max(0, currentMs + offset);
+            }
+
             // 构造并发送同步包（单位：毫秒，直接透传不再转换）
-            var p = PackageBuilder.BuildSync(_isPlaying, (uint)currentMs, (uint)(_totalSeconds * 1000));
+            var p = PackageBuilder.BuildSync(_isPlaying, safeMs, (uint)(_totalSeconds * 1000));
             _transport.Send(p);
         }
 

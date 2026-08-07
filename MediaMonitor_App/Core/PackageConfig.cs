@@ -65,6 +65,15 @@ namespace MediaMonitor.Core
         public int SyncIntervalMs { get; set; } = 500;
 
         /// <summary>
+        /// 同步包 (0x11) 中 currentMs 的时间偏移量(ms)，用于修正传输链路时间偏移。
+        /// 正值表示提前（发出的 currentMs = 实际进度 + 偏移），负值表示延后。
+        /// 默认 +10ms（提前 10ms）；设为 0 表示无偏移。
+        /// 零点保护：真实进度落在 [0, |偏移量|] 区间内时不加偏移，保持起点锚点语义。
+        /// 仅在 config.json 中可调，UI 不提供入口（与 SendIntervalMs 同策略）。
+        /// </summary>
+        public int SyncCurrentOffsetMs { get; set; } = 10;
+
+        /// <summary>
         /// 发送队列每包间隔(ms)。用于抹平突发流量峰值，避免超过 BLE/UART 物理吞吐上限。
         /// 推荐 5~15ms，默认 10ms。仅在配置文件 config.json 中可调，UI 不提供入口。
         /// 设 0 表示不节流（如 UDP 直连场景）。
