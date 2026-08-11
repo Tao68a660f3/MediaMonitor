@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Windows.Media.Control;
 
@@ -29,7 +30,22 @@ namespace MediaMonitor.Services
         private GlobalSystemMediaTransportControlsSessionManager? _manager;
         private GlobalSystemMediaTransportControlsSession? _currentSession;
         private GlobalSystemMediaTransportControlsSessionTimelineProperties? _lastTimeline;
-        private bool _isSystemValidated = false;
+
+        // --- 暂停→恢复播放的锚点 ---
+        // Chrome 等浏览器在恢复播放瞬间只触发 PlaybackInfoChanged（状态→Playing），
+        // 但 Timeline/LastUpdatedTime 仍停留在暂停时刻。若不设锚点，
+        // GetCurrentProgress 会按 LastUpdatedTime 外推，把整个暂停时长虚增进首个同步包。
+        // 因此用"进入 Playing 的事件瞬间"作为新外推基准，直到系统 Timeline 刷新到锚点之后。
+        private GlobalSystemMediaTransportControlsSessionPlaybackStatus _lastStatus =
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed;
+        private TimeSpan _resumeBasePosition;
+        private DateTimeOffset _resumeBaseTime;
+        private bool _resumeAnchorValid = false;
+
+        // 媒体属性更新序号：切歌/切会话瞬间系统会连发多个 MediaPropertiesChanged，
+        // 且 async void 中 await 的完成顺序不保证与触发顺序一致。
+        // 只有"最后一次触发的事件"序号最新才允许生效，旧事件的延迟完成直接丢弃。
+        private long _mediaUpdateSeq = 0;
 
         public event Action<GlobalSystemMediaTransportControlsSessionPlaybackStatus>? PlaybackChanged;
         public Action<GlobalSystemMediaTransportControlsSessionMediaProperties>? OnMediaUpdated;
@@ -39,7 +55,6 @@ namespace MediaMonitor.Services
         {
             _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
             _manager.SessionsChanged += (s, e) => {
-                _isSystemValidated = false; // 会话列表变动时重置状态
                 SessionsListChanged?.Invoke();
             };
         }
@@ -56,12 +71,17 @@ namespace MediaMonitor.Services
                 _currentSession.PlaybackInfoChanged -= Session_PlaybackInfoChanged;
             }
 
+            // 切换会话：使旧会话的所有在途事件全部失效
+            Interlocked.Increment(ref _mediaUpdateSeq);
+
+            // 跨会话重置状态，避免用上一个会话的播放状态/锚点误判
+            _lastStatus = GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed;
+            _resumeAnchorValid = false;
+
             _currentSession = session;
 
             if (_currentSession != null)
             {
-                _isSystemValidated = false;
-
                 _currentSession.MediaPropertiesChanged += Session_MediaPropertiesChanged;
                 _currentSession.TimelinePropertiesChanged += Session_TimelinePropertiesChanged;
                 _currentSession.PlaybackInfoChanged += Session_PlaybackInfoChanged;
@@ -114,9 +134,8 @@ namespace MediaMonitor.Services
             try
             {
                 _lastTimeline = sender.GetTimelineProperties();
-                _isSystemValidated = true;
             }
-            catch { _isSystemValidated = false; }
+            catch { /* SMTC 时间线获取失败时忽略 */ }
         }
 
         private void Session_PlaybackInfoChanged(GlobalSystemMediaTransportControlsSession sender, PlaybackInfoChangedEventArgs args)
@@ -124,13 +143,22 @@ namespace MediaMonitor.Services
             try
             {
                 var status = sender.GetPlaybackInfo().PlaybackStatus;
-                if (status != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+
+                // 检测"非播放 → 播放"转换：暂停/停止后恢复（含切歌后首播）。
+                // 用事件触发瞬间的 Position + 墙钟建立恢复锚点，
+                // 避免用陈旧的 LastUpdatedTime 外推导致首个进度包虚增整个暂停时长。
+                if (_lastStatus != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
+                    && status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                 {
-                    _isSystemValidated = false;
+                    _resumeBasePosition = sender.GetTimelineProperties().Position;
+                    _resumeBaseTime = DateTimeOffset.Now;
+                    _resumeAnchorValid = true;
                 }
+                _lastStatus = status;
+
                 PlaybackChanged?.Invoke(status);
             }
-            catch { _isSystemValidated = false; }
+            catch { /* SMTC 播放信息获取失败时忽略 */ }
         }
 
         private async void Session_MediaPropertiesChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs? args)
@@ -138,9 +166,21 @@ namespace MediaMonitor.Services
             try
             {
                 // 核心修复：防止在切歌或关闭时因 Session 失效导致的 COM 崩溃
+                long seq = Interlocked.Increment(ref _mediaUpdateSeq); // 本次事件序号
+
                 var props = await sender.TryGetMediaPropertiesAsync();
-                if (props != null && sender == _currentSession)
+
+                // 只有"最后一次触发的事件"才允许生效：
+                // 切歌瞬间系统可能连发多个事件，且 await 完成顺序不保证与触发一致，
+                // 旧事件的延迟完成会覆盖新歌词，必须用序号丢弃。
+                if (props != null && sender == _currentSession
+                    && seq == Volatile.Read(ref _mediaUpdateSeq))
                 {
+                    // 过滤切歌过渡期的空属性事件（Title 为空），
+                    // 防止触发 LoadAndParse 清空已加载歌词、以及发出空的元数据包
+                    if (string.IsNullOrEmpty(props.Title))
+                        return;
+
                     CurrentTitle = props.Title; // 赋值
                     CurrentArtist = props.Artist; // 赋值
                     CurrentAlbum = props.AlbumTitle;
@@ -190,17 +230,39 @@ namespace MediaMonitor.Services
 
                 TimeSpan pos = timeline.Position;
 
-                if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing && _isSystemValidated)
+                // Chrome 等浏览器不会像常规播放器那样频繁刷新 SMTC Position/LastUpdatedTime，
+                // 旧的 10 秒插值窗口会让进度在播放约 10 秒后停止前进（用户观察到的"卡住"）。
+                // 去掉时间窗上限，按 LastUpdatedTime + 播放速率持续外推；
+                // 下方 EndTime/0 钳位兜底，确保外推永远不会越过曲目范围。
+                if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                 {
-                    var timePassed = DateTimeOffset.Now - timeline.LastUpdatedTime;
-                    if (timePassed.TotalSeconds >= 0 && timePassed.TotalSeconds < 10)
+                    if (_resumeAnchorValid)
                     {
-                        pos += TimeSpan.FromTicks((long)(timePassed.Ticks * (playback.PlaybackRate ?? 1.0)));
+                        // 刚恢复播放：Timeline/LastUpdatedTime 仍停留在暂停时刻，
+                        // 必须从"恢复锚点"（进入 Playing 事件瞬间的 Position + 墙钟）外推，
+                        // 否则会把整个暂停时长虚增进第一个进度包。
+                        var resumePassed = DateTimeOffset.Now - _resumeBaseTime;
+                        if (resumePassed.TotalSeconds >= 0)
+                        {
+                            pos = _resumeBasePosition + TimeSpan.FromTicks(
+                                (long)(resumePassed.Ticks * (playback.PlaybackRate ?? 1.0)));
+                        }
+
+                        // 系统 Timeline 已刷新到恢复时刻之后 → 恢复正常 LastUpdatedTime 外推
+                        if (timeline.LastUpdatedTime >= _resumeBaseTime)
+                        {
+                            _resumeAnchorValid = false;
+                            pos = timeline.Position;
+                        }
                     }
-                }
-                else
-                {
-                    _isSystemValidated = false;
+                    else
+                    {
+                        var timePassed = DateTimeOffset.Now - timeline.LastUpdatedTime;
+                        if (timePassed.TotalSeconds >= 0)
+                        {
+                            pos += TimeSpan.FromTicks((long)(timePassed.Ticks * (playback.PlaybackRate ?? 1.0)));
+                        }
+                    }
                 }
 
                 if (pos > timeline.EndTime) pos = timeline.EndTime;

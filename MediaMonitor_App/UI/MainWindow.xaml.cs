@@ -368,6 +368,13 @@ namespace MediaMonitor
             if (App.TransportMgr.IsConnected)
             {
                 UpdateConnectButtonState(true);
+
+                // 5. 新链路建立后立即补发一次当前元数据，
+                //    让硬件端从连接开始就显示正确的歌曲信息（断开重连/切换模式也会走到这里）
+                App.Master?.SendMetadata(
+                    App.Smtc?.CurrentTitle ?? "",
+                    App.Smtc?.CurrentArtist ?? "",
+                    App.Smtc?.CurrentAlbum ?? "");
             }
             else
             {

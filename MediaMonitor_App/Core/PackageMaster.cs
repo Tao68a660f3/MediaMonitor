@@ -52,6 +52,10 @@ namespace MediaMonitor.Core
             // 监听媒体更新
             _smtc.OnMediaUpdated = props =>
             {
+                // 过渡期空属性事件不触发加载/发送，避免清空歌词和发出空元数据包（双保险）
+                if (string.IsNullOrWhiteSpace(props.Title))
+                    return;
+
                 _lyricService.LoadAndParse(props.Title, props.Artist);
                 Invalidate(); // 切歌强制清空账本
                 SendMetadata(props.Title, props.Artist, props.AlbumTitle);
@@ -335,10 +339,10 @@ namespace MediaMonitor.Core
             uint safeMs;
             double offset = Config.SyncCurrentOffsetMs;
 
-            // 零点保护：真实进度落在 [0, |偏移量|] 区间内时不加偏移，直接发真实进度。
+            // 零点保护：真实进度落在 0 时不加偏移，直接发真实进度。
             // 正偏移会在该区间制造"假进度"（0→10ms），负偏移会因钳位丢失进度细节（50ms→0ms），
             // 都会破坏硬件端"0ms = 起点锚点"的语义。
-            if (currentMs <= Math.Abs(offset))
+            if (currentMs == 0)
             {
                 safeMs = (uint)Math.Max(0, currentMs);
             }
