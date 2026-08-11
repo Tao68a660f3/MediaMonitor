@@ -24,6 +24,9 @@ namespace MediaMonitor.Core
         private HashSet<string> _syncedSlots = new HashSet<string>();
         private int _lastProcessedCIdx = -2;
 
+        // --- 歌词代际检测（切歌瞬间 Lyrics 原子替换后强制作废旧账本，防止新旧歌词混杂漏发）---
+        private int _lastLrcGeneration = -1;
+
         // --- 同步包调度：使用真实时间戳，避免 Task.Delay 精度不足导致的间隔漂移 ---
         private long _lastSyncTimeMs = 0;
 
@@ -134,9 +137,22 @@ namespace MediaMonitor.Core
             UpdateStatistics(prog);
 
             double cur = prog.Position.TotalMilliseconds;
-            int cIdx = _lyricService.Lines.FindLastIndex(l => l.Time <= prog.Position);
 
-            LyricChanged?.Invoke(cIdx, _lyricService.GetLine(cIdx));
+            // ① 原子捕获歌词快照：整帧内所有歌词读取基于同一实例，
+            // 与 LoadAndParse 的局部构建 + 一次性发布配合，保证绝不读到新旧混杂的半成品
+            var lrc = _lyricService.Lines;
+
+            // ② 歌词代际检测：Lyrics 被原子替换（切歌/换歌）时强制作废旧帧账本并重发当前行
+            if (_lyricService.Generation != _lastLrcGeneration)
+            {
+                _lastLrcGeneration = _lyricService.Generation;
+                Invalidate();
+                _lastProcessedCIdx = -2;
+            }
+
+            int cIdx = lrc.FindLastIndex(l => l.Time <= prog.Position);
+
+            LyricChanged?.Invoke(cIdx, _lyricService.GetLine(cIdx, lrc));
 
             if (!_transport.IsConnected)
                 return;
@@ -173,11 +189,11 @@ namespace MediaMonitor.Core
             // 关键：在锁外面执行耗时的发送逻辑
             if (shouldOutput)
             {
-                HandleOutput(cIdx, isJump);
+                HandleOutput(cIdx, isJump, lrc);
             }
         }
 
-        private void HandleOutput(int cIdx, bool forceRefresh)
+        private void HandleOutput(int cIdx, bool forceRefresh, IReadOnlyList<LyricLine> lrc)
         {
             // 基础校验
             if (!_transport.IsConnected)
@@ -192,7 +208,7 @@ namespace MediaMonitor.Core
             // --- 核心循环修复 ---
             while (currentPhysicalRow < Config.LineLimit)
             {
-                var line = _lyricService.GetLine(lyricIdx);
+                var line = _lyricService.GetLine(lyricIdx, lrc);
 
                 // 1. 处理原文槽位 (强制占用 1 个物理行)
                 // 普通行已升级为 0x15 增强原文行（带结束时间），账本键同步更新
@@ -218,7 +234,7 @@ namespace MediaMonitor.Core
                     {
                         // 普通行模式包：0x15 增强原文行（带结束时间）
                         // _totalSeconds 来自 SmtcService.GetCurrentProgress().Duration（当前曲目总时长）
-                        var endTime = _lyricService.GetEndTime(lyricIdx, TimeSpan.FromSeconds(_totalSeconds));
+                        var endTime = _lyricService.GetEndTime(lyricIdx, lrc, TimeSpan.FromSeconds(_totalSeconds));
                         advPackage = PackageBuilder.BuildEnhancedLyricLine((short)lyricIdx, line.Time, endTime, mText);
                     }
                 }
@@ -259,7 +275,7 @@ namespace MediaMonitor.Core
                 lyricIdx++;
 
                 // 兜底安全跳出，防止在极端配置下死循环
-                if (lyricIdx > _lyricService.Lines.Count + Config.LineLimit)
+                if (lyricIdx > lrc.Count + Config.LineLimit)
                     break;
             }
 
