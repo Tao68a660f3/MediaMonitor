@@ -19,6 +19,10 @@ namespace MediaMonitor.Services
         public event Action<byte[]> OnRawDataReceived = _ => { };
         public event Action<string>? OnTransportError;
 
+        // --- 报错去重：链路异常时避免高频刷屏 ---
+        private string? _lastError;
+        private long _lastErrorTicks;
+
         // --- 新增：当串口列表发生变化时触发的事件 ---
         public event Action<string[]>? OnPortListChanged;
 
@@ -101,16 +105,32 @@ namespace MediaMonitor.Services
         public void Send(byte[] data)
         {
             if (!_port.IsOpen)
+            {
+                // 与 UDP 侧一致：不再静默丢包，让用户立刻看到原因
+                ReportError("串口未打开或已断开，数据被丢弃 —— 请重新点击『开始连接』");
                 return;
+            }
             try
             {
                 _port.Write(data, 0, data.Length);
             }
             catch (Exception ex)
             {
-                OnTransportError?.Invoke($"发送错误: {ex.Message}");
+                ReportError($"发送错误: {ex.Message}");
                 Disconnect();
             }
+        }
+
+        /// <summary>同类错误 2 秒内只报一次，防止刷屏与日志框被冲掉</summary>
+        private void ReportError(string msg)
+        {
+            long now = Environment.TickCount64;
+            if (msg == _lastError && now - _lastErrorTicks < 2000)
+                return;
+
+            _lastError = msg;
+            _lastErrorTicks = now;
+            OnTransportError?.Invoke(msg);
         }
 
         private void SerialPort_DataReceived(object sender, SerialDataReceivedEventArgs e)

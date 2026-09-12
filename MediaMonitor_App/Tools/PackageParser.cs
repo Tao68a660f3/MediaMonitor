@@ -6,7 +6,8 @@ namespace MediaMonitor.Tools
 {
     public static class PackageParser
     {
-        private const byte MCU_TO_PC = 0xAB; // 回控包头
+        /// <summary>硬件 -> PC 包头（分帧搜索用，供 ProtocolLatencyTester 等复用）</summary>
+        public const byte McuToPc = 0xAB;
 
         /// <summary>
         /// 尝试解析回控指令包：AB [Cmd] [LenH] [LenL] [Payload] [Check]
@@ -21,7 +22,7 @@ namespace MediaMonitor.Tools
                 return false;
 
             // 2. 查找包头
-            if (data[0] != MCU_TO_PC)
+            if (data[0] != McuToPc)
                 return false;
 
             cmd = data[1];
@@ -43,6 +44,29 @@ namespace MediaMonitor.Tools
             if (check != data[data.Length - 1])
                 return false;
 
+            return true;
+        }
+
+        /// <summary>
+        /// 尝试解析 0xAF 延迟回包（Pong）：
+        /// AB AF 00 09 [1B DevID] [4B C#_T1_ms 原样透传] [4B STM32_Proc_us] [Check]
+        /// </summary>
+        /// <param name="data">必须是"恰好一帧"的数据（调用方先自行分帧）</param>
+        public static bool TryParsePong(byte[] data, out byte devId, out uint t1Ms, out uint procUs)
+        {
+            devId = 0;
+            t1Ms = 0;
+            procUs = 0;
+
+            if (!TryParse(data, out byte cmd, out byte[] payload))
+                return false;
+
+            if (cmd != 0xAF || payload.Length != 9)
+                return false;
+
+            devId = payload[0];
+            t1Ms = BitConverter.ToUInt32(payload, 1);   // C# 下发的时间戳，原样透传
+            procUs = BitConverter.ToUInt32(payload, 5); // STM32 从 DMA 中断到组包发送的微秒数
             return true;
         }
     }

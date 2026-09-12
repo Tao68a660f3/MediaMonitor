@@ -70,6 +70,16 @@ namespace MediaMonitor.Tools
             return BuildPacket(0x20, payload);
         }
 
+        // 0x1F: 全链路延迟探测 Ping（1B 目标ID + 4B C#_T1_ms）
+        // 用于测量 PC -> UDP -> ESP32 -> UART -> STM32 的单向传输延迟，
+        // 硬件端应原样回传 T1 并附带自己的处理耗时（见 0xAF Pong）。
+        public static byte[] BuildLatencyPing(byte targetId, uint t1Ms)
+        {
+            List<byte> p = new List<byte> { targetId };
+            p.AddRange(BitConverter.GetBytes(t1Ms)); // 小端序
+            return BuildPacket(0x1F, p.ToArray());
+        }
+
         // 0x10: 媒体元数据
         public static byte[] BuildMetadata(string title, string artist, string album)
         {

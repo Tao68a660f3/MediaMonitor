@@ -21,6 +21,9 @@ namespace MediaMonitor
         private TrayManager _tray;
         private bool _isRealExit = false;
 
+        // 全链路延迟测试：全部交互逻辑封装在 UI\LatencyTestController.cs，这里只留调用点
+        private LatencyTestController? _latencyTest;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -85,6 +88,13 @@ namespace MediaMonitor
             // 初始化 LogService 并绑定 UI 上的 RichTextBox (假设叫 LogBox)
             App.LogSvc = new LogService(this.HexPreview);
 
+            // 延迟测试控制器（按钮交互 / 统计展示 / 日志全部封装在 LatencyTestController 内）
+            _latencyTest = new LatencyTestController(
+                App.TransportMgr,
+                BtnLatencyTest,
+                Dispatcher,
+                (msg, color) => App.LogSvc?.LogInfo(msg, color));
+
             // 顺便把串口/UDP 的报错也接过来
             App.TransportMgr.OnTransportError += (msg) =>
             {
@@ -111,6 +121,7 @@ namespace MediaMonitor
             else
             {
                 // 只有彻底退出时才释放资源
+                _latencyTest?.Dispose();
                 _tray.Dispose();
             }
             base.OnClosing(e);
@@ -244,6 +255,7 @@ namespace MediaMonitor
                 TxtOffset.Text = cfg.Offset.ToString();
                 //TxtUpdateRate.Text = cfg.UpdateIntervalMs.ToString();
                 TxtSyncInterval.Text = cfg.SyncIntervalMs.ToString();
+                TxtSyncOffset.Text = cfg.SyncCurrentOffsetMs.ToString();
 
                 // --- 5. 核心状态同步 (解决 UDP 模式重新打开时的显示问题) ---
                 // 显式强制刷新 Grid 的可见性，而不完全依赖自动触发的事件
@@ -484,6 +496,9 @@ namespace MediaMonitor
                     case "TxtSyncInterval":
                         tb.Text = Math.Clamp(val, 100, 30000).ToString();
                         break;
+                    case "TxtSyncOffset":
+                        tb.Text = Math.Clamp(val, -1000, 1000).ToString();
+                        break;
                     case "TxtRemotePort":
                         tb.Text = Math.Clamp(val, 1, 65535).ToString();
                         break;
@@ -502,10 +517,24 @@ namespace MediaMonitor
         // --- 3. 唯一的 IP 校验 (因为它不是纯数字，逻辑独立) ---
         private void TxtRemoteIp_LostFocus(object sender, RoutedEventArgs e)
         {
-            if (System.Net.IPAddress.TryParse(TxtRemoteIp.Text.Trim(), out var address))
-                TxtRemoteIp.Text = address.ToString();
-            else
+            string raw = TxtRemoteIp.Text.Trim();
+
+            // 0.0.0.0 / :: 是【本机监听地址】，不是合法的发送目标：
+            // 真发出去会报 10049「在其上下文中，该请求的地址无效」。
+            if (!System.Net.IPAddress.TryParse(raw, out var address) ||
+                address.Equals(System.Net.IPAddress.Any) ||
+                address.Equals(System.Net.IPAddress.IPv6Any))
+            {
+                App.LogSvc?.LogInfo(
+                    $"[远程IP] 「{raw}」不能作为发送目标（0.0.0.0/:: 是本机监听地址）。" +
+                    "对端是同机程序请填 127.0.0.1，对端是 ESP32/另一台机器请填它的局域网 IP。已回退为 127.0.0.1。",
+                    Brushes.OrangeRed);
                 TxtRemoteIp.Text = "127.0.0.1";
+            }
+            else
+            {
+                TxtRemoteIp.Text = address.ToString();
+            }
 
             SyncAndSaveConfig();
         }
@@ -585,6 +614,8 @@ namespace MediaMonitor
             //    cfg.UpdateIntervalMs = ur;
             if (int.TryParse(TxtSyncInterval.Text, out int si))
                 cfg.SyncIntervalMs = si;
+            if (int.TryParse(TxtSyncOffset.Text, out int so))
+                cfg.SyncCurrentOffsetMs = so;
 
             // --- D. 持久化与分发 ---
             App.ConfigSvc.Save(); //
@@ -600,5 +631,11 @@ namespace MediaMonitor
         {
             App.Master?.SendTimeSync();
         } //
+
+        // 全链路延迟测试：具体逻辑见 UI\LatencyTestController.cs
+        private void BtnLatencyTest_Click(object sender, RoutedEventArgs e)
+        {
+            _latencyTest?.Toggle();
+        }
     }
 }

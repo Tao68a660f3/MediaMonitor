@@ -69,6 +69,29 @@ namespace MediaMonitor.Services
         public void Connect() => _activeTransport?.Connect();
         public void Disconnect() => _activeTransport?.Disconnect();
 
+        /// <summary>
+        /// 绕过节流队列与协议日志的"直发"（探测帧专用）。
+        ///
+        /// 与 <see cref="Send"/> 的区别：
+        /// 1) 不入 BlockingCollection 队列，避免被 SendIntervalMs 节流；
+        ///    否则播放中歌词包排队时，0x1F 探测帧会硬吃 10~20ms 的排队偏置，把毫秒级测量结果彻底污染。
+        /// 2) 不调用 App.LogSvc.LogProtocol，避免 0x1F 落进"未知指令"分支高频刷屏（会触发日志框自动清空）。
+        /// </summary>
+        public void SendImmediate(byte[] data)
+        {
+            if (data == null || data.Length == 0)
+                return;
+
+            IMediaTransport? transport;
+            lock (_transportLock)
+            {
+                transport = _activeTransport;
+            }
+
+            if (transport != null && transport.IsConnected)
+                transport.Send(data);
+        }
+
         // 转发底层信号
         private void HandleRawData(byte[] data) => OnRawDataReceived?.Invoke(data);
         private void HandleError(string msg) => OnTransportError?.Invoke(msg);

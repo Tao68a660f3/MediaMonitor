@@ -1,6 +1,6 @@
 ﻿<Window x:Class="MediaMonitor.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="媒体同步调试终端 V2.6.2" Height="850" Width="520" Background="#F0F0F0">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="媒体同步调试终端 V2.6.3" Height="850" Width="520" Background="#F0F0F0">
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -87,10 +87,19 @@
                                 </ComboBox>
                             </StackPanel>
 
-                            <Button x:Name="BtnSyncTime" Content="同步系统时间 (0x20)" Click="BtnSyncTime_Click" 
-                                HorizontalAlignment="Right" Width="130" Height="24"
-                                Background="#0078D7" Foreground="White" BorderThickness="0" Cursor="Hand">
-                            </Button>
+                            <!-- 按钮组：BtnSyncTime 原本是 DockPanel 的末位元素，靠"填充剩余空间 + 右对齐"实现右对齐，
+                                 新增按钮后必须包进右停靠容器，否则会退化成左对齐 -->
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="BtnLatencyTest" Content="测延迟" Click="BtnLatencyTest_Click"
+                                    Width="120" Height="24" Margin="0,0,5,0" FontSize="11"
+                                    Background="#2D7D46" Foreground="White" BorderThickness="0" Cursor="Hand"
+                                    ToolTip="全链路单向延迟测量：Base(固化延迟) / Avg(平均) / Jitter(抖动)"/>
+                                <Button x:Name="BtnSyncTime" Content="同步系统时间 (0x20)" Click="BtnSyncTime_Click"
+                                    Width="130" Height="24"
+                                    Background="#0078D7" Foreground="White" BorderThickness="0" Cursor="Hand">
+                                </Button>
+
+                            </StackPanel>
                         </DockPanel>
 
                         <StackPanel Margin="2,5,2,10">
@@ -100,15 +109,15 @@
                                 <TextBox x:Name="TxtLrcPath" Text="C:\Lyrics" IsReadOnly="True" VerticalContentAlignment="Center" Height="22"/>
                             </DockPanel>
                         </StackPanel>
-                        
+
                         <WrapPanel Margin="0,8">
                             <CheckBox x:Name="ChkAdvancedMode" Content="高级协议(0xAA)" Click="CheckBox_Click" IsChecked="True" Margin="0,0,10,0"/>
                             <CheckBox x:Name="ChkIncremental" Content="增量差分" Click="CheckBox_Click" IsChecked="True" Margin="0,0,10,0"/>
                             <CheckBox x:Name="ChkTransOccupies" Content="翻译占行" Click="CheckBox_Click" IsChecked="True"/>
-                            
+
                         </WrapPanel>
 
-                        <UniformGrid Columns="3" Margin="0,0,0,10">
+                        <UniformGrid Columns="4" Margin="0,0,0,10">
                             <StackPanel Orientation="Horizontal" Margin="0,2">
                                 <TextBlock Text="缓冲区行数:" VerticalAlignment="Center" Width="65"/>
                                 <TextBox x:Name="TxtLineLimit" Text="2" Width="40" PreviewTextInput="OnlyNumber_PreviewTextInput" DataObject.Pasting="NumberTextBox_Pasting" LostFocus="NumberTextBox_LostFocus"/>
@@ -120,6 +129,12 @@
                             <StackPanel Orientation="Horizontal" Margin="0,2">
                                 <TextBlock Text="同步包间隔:" VerticalAlignment="Center" Width="65"/>
                                 <TextBox x:Name="TxtSyncInterval" Text="500" Width="40" PreviewTextInput="OnlyNumber_PreviewTextInput" DataObject.Pasting="NumberTextBox_Pasting" LostFocus="NumberTextBox_LostFocus"/>
+                            </StackPanel>
+                            <!-- 注意：UniformGrid 中 Collapsed 的子项依旧占格子，
+                                 所以本项必须插在折叠的「逻辑帧」之前，4 个可见项才能齐占第一行 -->
+                            <StackPanel Orientation="Horizontal" Margin="0,2">
+                                <TextBlock Text="同步偏移:" VerticalAlignment="Center" Width="65"/>
+                                <TextBox x:Name="TxtSyncOffset" Text="10" Width="40" PreviewTextInput="OnlyNumber_PreviewTextInput" DataObject.Pasting="NumberTextBox_Pasting" LostFocus="NumberTextBox_LostFocus"/>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Margin="0,2" Visibility="Collapsed">
                                 <TextBlock Text="逻辑帧(ms):" VerticalAlignment="Center" Width="65"/>
@@ -133,7 +148,7 @@
             </Expander>
         </StackPanel>
 
-        <TextBlock Grid.Row="3" Text="真·串口协议解析流 (TX):" FontWeight="Bold" Margin="0,10,0,5" Foreground="#444444"/>
+        <TextBlock Grid.Row="3" Text="真·协议解析流 (TX):" FontWeight="Bold" Margin="0,10,0,5" Foreground="#444444"/>
 
         <RichTextBox Grid.Row="4" x:Name="HexPreview" Background="#1E1E1E" Foreground="#CCCCCC" FontFamily="Consolas" IsReadOnly="True" VerticalScrollBarVisibility="Auto">
             <FlowDocument>

@@ -69,9 +69,24 @@ namespace MediaMonitor.Core
         /// 正值表示提前（发出的 currentMs = 实际进度 + 偏移），负值表示延后。
         /// 默认 +10ms（提前 10ms）；设为 0 表示无偏移。
         /// 零点保护：真实进度落在 [0, |偏移量|] 区间内时不加偏移，保持起点锚点语义。
-        /// 仅在 config.json 中可调，UI 不提供入口（与 SendIntervalMs 同策略）。
+        /// 可在界面「同步偏移(ms)」(TxtSyncOffset) 热改并落盘 config.json；
+        /// 该值可参考「测延迟」按钮测出的固化延迟(Base) 手动填写。
         /// </summary>
         public int SyncCurrentOffsetMs { get; set; } = 10;
+
+        /// <summary>
+        /// 「测延迟」连续无回包的**停止**超时(ms)。默认 10000ms：
+        /// 覆盖 ESP32 从 Wi-Fi 休眠唤醒的首包、链路抖动、STM32 主循环正忙等场景。
+        /// 仅在 config.json 中可调（与 SendIntervalMs 同策略）。
+        /// </summary>
+        public int LatencyTimeoutMs { get; set; } = 10000;
+
+        /// <summary>
+        /// 「测延迟」连续无回包的**等待告警**阈值(ms)。默认 3000ms：
+        /// 到点只在日志里提示"仍在等待"，不停止测试；真正停止由 LatencyTimeoutMs 决定。
+        /// 仅在 config.json 中可调。
+        /// </summary>
+        public int LatencyWarnMs { get; set; } = 3000;
 
         /// <summary>
         /// 发送队列每包间隔(ms)。用于抹平突发流量峰值，避免超过 BLE/UART 物理吞吐上限。
