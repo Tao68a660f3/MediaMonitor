@@ -353,7 +353,6 @@ namespace MediaMonitor.Core
                 return;
 
             uint safeMs;
-            double offset = Config.SyncCurrentOffsetMs;
 
             // 零点保护：真实进度落在 0 时不加偏移，直接发真实进度。
             // 正偏移会在该区间制造"假进度"（0→10ms），负偏移会因钳位丢失进度细节（50ms→0ms），
@@ -364,6 +363,8 @@ namespace MediaMonitor.Core
             }
             else
             {
+                // 只有在播放时才应用偏移；暂停/停止时透传真实进度，避免硬件端位置漂移
+                double offset = _isPlaying ? Config.SyncCurrentOffsetMs : 0;
                 // 超出偏移区间后才应用偏移 + 下限保护（防负偏移导致 uint 溢出成巨数）
                 safeMs = (uint)Math.Max(0, currentMs + offset);
             }
