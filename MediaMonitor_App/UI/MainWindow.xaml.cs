@@ -107,11 +107,17 @@ namespace MediaMonitor
             // 4. 执行初始化“点火”：根据配置决定是串口还是 UDP
             bool isSerialMode = RbSerial.IsChecked ?? true;
             SwitchTransportMode(isSerialMode);
+
+            // 5. 恢复上次的窗口位置与大小（位置不合理会自动忽略，见 UI/WindowPlacement.cs）
+            WindowPlacement.Apply(this, App.ConfigSvc?.Current);
         }
 
         // 2. 拦截关闭按钮：让它“隐藏”而不是“毁灭”
         protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
         {
+            // 窗口布局落盘：点 X 只是隐藏到托盘，这里必须也保存，否则"从托盘退出"时就没有第二次机会了
+            SaveWindowPlacement();
+
             if (!_isRealExit)
             {
                 // 如果不是点击了托盘里的“退出”，就取消关闭，改为隐藏
@@ -128,6 +134,17 @@ namespace MediaMonitor
                 _tray.Dispose();
             }
             base.OnClosing(e);
+        }
+
+        /// <summary>把当前窗口布局写进 config.json（复用唯一写盘入口：整体写回内存配置）</summary>
+        private void SaveWindowPlacement()
+        {
+            var cfg = App.ConfigSvc?.Current;
+            if (cfg == null)
+                return;
+
+            WindowPlacement.Capture(this, cfg);
+            App.ConfigSvc?.Save();
         }
 
         private void TransMode_Changed(object sender, RoutedEventArgs e)

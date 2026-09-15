@@ -114,15 +114,21 @@ namespace MediaMonitor.Services
             }
         }
 
-        /// <summary>按属性名（大小写不敏感）找可写的公开属性；[JsonIgnore] 的项（如 Encoding）跳过</summary>
+        /// <summary>
+        /// 按属性名（大小写不敏感）找可写的公开属性。
+        /// 只跳过"彻底不参与读写"的 [JsonIgnore]（Condition = Always，如 Encoding / TargetDeviceId）；
+        /// 带 Condition = WhenWritingNull 之类的项（如 WindowBounds）仍要正常读取。
+        /// </summary>
         private static PropertyInfo? FindWritableProperty(PropertyInfo[] props, string jsonName)
         {
             foreach (var p in props)
             {
                 if (p.SetMethod?.IsPublic != true)
                     continue;
-                if (p.GetCustomAttribute<JsonIgnoreAttribute>() != null)
+
+                if (p.GetCustomAttribute<JsonIgnoreAttribute>() is { Condition: JsonIgnoreCondition.Always })
                     continue;
+
                 if (string.Equals(p.Name, jsonName, StringComparison.OrdinalIgnoreCase))
                     return p;
             }

@@ -23,7 +23,8 @@ namespace MediaMonitor.Core
     /// <para><b>落盘约定</b>：只有"公开且可写"的属性参与读写；标了
     /// <see cref="System.Text.Json.Serialization.JsonIgnoreAttribute"/> 的属性是<b>代码内视图</b>，
     /// 由对应的字符串属性驱动、不直接落盘：
-    /// <see cref="Encoding"/> ← <see cref="EncodingName"/>，<see cref="TargetDeviceId"/> ← <see cref="TargetSerialMaster"/>。</para>
+    /// <see cref="Encoding"/> ← <see cref="EncodingName"/>，<see cref="TargetDeviceId"/> ← <see cref="TargetSerialMaster"/>。
+    /// 若该特性带 <c>Condition</c>（如 <see cref="WindowBounds"/> 的 WhenWritingNull），则只表示"值为 null 时不写盘"，读写照常。</para>
     /// </summary>
     public class PackageConfig
     {
@@ -130,6 +131,18 @@ namespace MediaMonitor.Core
             get => $"0x{TargetDeviceId:X2}";
             set => TargetDeviceId = ParseTargetDeviceId(value);
         }
+
+        // === 窗口布局（静默项：UI 无入口；程序在关闭时写入、启动时校验后读取） ===
+
+        /// <summary>
+        /// 窗口位置与大小，格式 "left,top,width,height"（四个十进制整数，逗号分隔，允许空格）。
+        /// null = 尚无记录（首装或键被手删），此时启动不做任何设置，窗口位置交给系统；
+        /// 值非法（段数不对、含非数字、宽高 ≤ 0、坐标离谱、位置不在当前屏幕内）同样按"无记录"处理，只影响本项。
+        /// 解析与校验由 UI/WindowPlacement.cs 负责；本项是程序自动维护的 —— 手改可临时生效，
+        /// 但下次关闭窗口会被实际布局覆盖（自我修复）。
+        /// </summary>
+        [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+        public string? WindowBounds { get; set; } = null;
 
         // === 内部视图与常量（不落盘，见类注释的「落盘约定」） ===
 
