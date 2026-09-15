@@ -95,6 +95,9 @@ namespace MediaMonitor
                 Dispatcher,
                 (msg, color) => App.LogSvc?.LogInfo(msg, color));
 
+            // 启动时注入一次配置（静默项以此为准；界面有入口的项在每次保存时再注入）
+            _latencyTest.ApplyConfig(App.ConfigSvc?.Current);
+
             // 顺便把串口/UDP 的报错也接过来
             App.TransportMgr.OnTransportError += (msg) =>
             {
@@ -188,8 +191,8 @@ namespace MediaMonitor
                 }
                 catch (Exception ex)
                 {
-                    // 在大项目里，建议用状态栏显示错误，而不是弹窗打断用户
-                    //StatusTextBlock.Text = $"更新串口列表失败: {ex.Message}";
+                    // 刷新串口列表失败不打断用户：只留在调试输出里
+                    Debug.WriteLine($"[UI] 刷新串口列表失败: {ex.Message}");
                 }
             });
         }
@@ -619,6 +622,10 @@ namespace MediaMonitor
 
             // --- D. 持久化与分发 ---
             App.ConfigSvc.Save(); //
+
+            // 再次注入：静默项（无 UI 入口）不会在这里被改动，因此仍是"仅启动时生效"
+            App.TransportMgr.ApplyConfig(cfg);
+            _latencyTest?.ApplyConfig(cfg);
 
             if (App.Lyrics != null)
                 App.Lyrics.LyricFolder = cfg.LyricFolder;

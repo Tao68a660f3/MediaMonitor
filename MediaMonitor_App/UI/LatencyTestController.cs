@@ -33,6 +33,7 @@ namespace MediaMonitor
 
         private ProtocolLatencyTester? _tester;
         private Action<byte[]>? _rawHandler;
+        private PackageConfig? _cfg;
 
         /// <summary>发包间隔(ms)</summary>
         public int PingIntervalMs { get; set; } = 100;
@@ -40,11 +41,18 @@ namespace MediaMonitor
         /// <summary>滑动窗口容量（样本数）</summary>
         public int WindowSize { get; set; } = 30;
 
-        /// <summary>连续无回包超时(ms)：默认取 config.json 的 LatencyTimeoutMs（缺省 10s）</summary>
+        /// <summary>连续无回包超时(ms)：显式 &gt;0 时优先，否则取注入配置的 LatencyTimeoutMs（缺省 10s）</summary>
         public int ReplyTimeoutMs { get; set; } = 0;
 
-        /// <summary>仍在等待的告警阈值(ms)：默认取 config.json 的 LatencyWarnMs（缺省 3s）</summary>
+        /// <summary>仍在等待的告警阈值(ms)：显式 &gt;0 时优先，否则取注入配置的 LatencyWarnMs（缺省 3s）</summary>
         public int ReplyWarnMs { get; set; } = 0;
+
+        /// <summary>
+        /// 注入配置（启动时一次 + 每次 UI 保存时一次）。
+        /// 静默项（LatencyTimeoutMs / LatencyWarnMs / TargetSerialMaster，UI 均无入口）
+        /// 因此实际只受"启动注入"影响 —— 改 config.json 需重启程序。
+        /// </summary>
+        public void ApplyConfig(PackageConfig? cfg) => _cfg = cfg;
 
         /// <summary>空闲态按钮文案</summary>
         public string IdleText { get; set; } = "测延迟";
@@ -83,8 +91,8 @@ namespace MediaMonitor
 
             _tester?.Dispose();
 
-            // 超时阈值：优先用调用方显式设置的值，否则读 config.json（缺省 告警3s / 超时10s）
-            var cfg = App.ConfigSvc?.Current;
+            // 超时阈值：优先用调用方显式设置的值(>0)，否则用注入的配置（缺省 告警3s / 超时10s）
+            var cfg = _cfg;
             int timeoutMs = this.ReplyTimeoutMs > 0
                 ? Math.Clamp(this.ReplyTimeoutMs, 1000, 120000)
                 : Math.Clamp(cfg?.LatencyTimeoutMs ?? 10000, 1000, 120000);
@@ -92,9 +100,13 @@ namespace MediaMonitor
                 ? Math.Clamp(this.ReplyWarnMs, 500, timeoutMs)
                 : Math.Clamp(cfg?.LatencyWarnMs ?? 3000, 500, timeoutMs);
 
+            // 0x1F Ping 的目标设备 ID：config.json 的静态项，缺省 0x01
+            byte targetId = cfg?.TargetDeviceId ?? PackageConfig.DefaultTargetDeviceId;
+
             var tester = new ProtocolLatencyTester(frame => _transport.SendImmediate(frame))
             {
                 PingIntervalMs = this.PingIntervalMs,
+                TargetSerialMaster = targetId,
                 ReplyTimeoutMs = timeoutMs,
                 ReplyWarnMs = warnMs,
                 LinkAliveProbe = () => _transport.IsConnected   // 超时时区分"对端没回"与"本机链路已断"
@@ -121,7 +133,7 @@ namespace MediaMonitor
             tester.Start(WindowSize);
             SetButtonText($"测量中 0/{tester.WindowSize}");
 
-            Log($"[延迟测试] 开始 链路={DescribeLink()} 间隔={tester.PingIntervalMs}ms 窗口={tester.WindowSize}", isWarn: false);
+            Log($"[延迟测试] 开始 链路={DescribeLink()} 目标ID=0x{targetId:X2} 间隔={tester.PingIntervalMs}ms 窗口={tester.WindowSize}", isWarn: false);
         }
 
         public void Dispose()
@@ -160,7 +172,7 @@ namespace MediaMonitor
 
         private string DescribeLink()
         {
-            var cfg = App.ConfigSvc?.Current;
+            var cfg = _cfg;
             if (cfg == null)
                 return "未知";
 

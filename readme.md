@@ -34,7 +34,7 @@
 | **0x14** | 逐字动态行 | 2B(索引) + 4B(开始时间ms) + 1B(词数) + [2B偏移+1B长度+文本]*N |
 | **0x15** | **增强原文行** | 2B(索引) + 4B(开始时间ms) + 4B(结束时间ms) + 内容字符串 |
 | **0x16** | **协议纯文本** | **封装在 0xAA 结构下的纯文本字符串** |
-| **0x1F** | **全链路延迟探测 Ping** | 1B(目标ID, `0x01`=串口STM32主设备) + 4B(C#_T1_ms, uint32 小端) |
+| **0x1F** | **全链路延迟探测 Ping** | 1B(目标ID, 默认 `0x01`=串口STM32主设备，可用 config.json 的 `TargetSerialMaster` 改) + 4B(C#_T1_ms, uint32 小端) |
 
 ### 上行协议 (硬件 -> PC, 头码 `0xAB`)
 格式：`0xAB [指令号] [LenH] [LenL] [载荷...] [校验和]`
@@ -90,6 +90,7 @@ OneWay   = (RTT - proc_us / 1000.0) / 2
 | :--- | :--- | :--- |
 | `LatencyTimeoutMs` | `10000` | 连续无回包的停止超时(ms)，1s~120s |
 | `LatencyWarnMs` | `3000` | 连续无回包的等待告警阈值(ms)，0.5s~超时值 |
+| `TargetSerialMaster` | `"0x01"` | `0x1F` Ping 的目标设备 ID，**只认十六进制的一个字节**（1~2 位，`"0x01"`/`"1"`/`"ff"` 均可，`"12"` 按十六进制解释为 `0x12`；超长/非法字符/空值一律回退 `0x01`），UI 无入口 |
 
 > 首包慢的典型来源：ESP32 刚从 Wi-Fi modem-sleep 唤醒 / 首次 ARP 解析 / STM32 主循环正忙（`proc_us` 偏大）/ 串口 TX 排队。这些场景下 3 秒确实会误判，所以停止阈值默认放宽到 10 秒。
 - 结果直接显示在按钮上（如 `延迟 3.21ms`），鼠标悬停可看 Base / Avg / Jitter / 样本数，逐样本明细同步打进下方 `HexPreview` 日志。
@@ -108,8 +109,9 @@ OneWay   = (RTT - proc_us / 1000.0) / 2
 ```csharp
 var tester = new ProtocolLatencyTester(frame => App.TransportMgr.SendImmediate(frame))
 {
-    PingIntervalMs = 100,    // 发包间隔
-    ReplyTimeoutMs = 3000    // 无回包超时
+    PingIntervalMs = 100,      // 发包间隔
+    ReplyTimeoutMs = 3000,     // 无回包超时
+    TargetSerialMaster = 0x01  // 0x1F Ping 的目标设备 ID（来自 config.json）
 };
 
 tester.LogMessage   += msg => App.LogSvc?.LogInfo(msg, Brushes.DeepSkyBlue);
@@ -238,6 +240,41 @@ void HandleLatencyPing(uint8_t target_id, uint32_t t1_ms)
 | 日志 `UDP 未连接或链路已断开，数据被丢弃` | 未连接就发包，或链路中途断开 | 重新点击「开始连接」 |
 | mock 一直刷 `[忽略] 非法/非 Ping 帧` | 那都是上位机的 `0x10/0x11/0x15` 常规帧 | 正常现象（打印已按秒节流），看有没有 `<- Ping` 行即可 |
 | 测得延迟比预期**大好几倍**、mock 一行行 `<- Ping` 很少 | 旧版 mock 的两个缺陷：`time.sleep` 粒度 15.6ms 让 `proc_us` 实际睡成 8~15.6ms；单线程阻塞收包被业务流量挤爆缓冲 | 已修复（`precise_sleep` + 独立线程回包 + 1MB 接收缓冲）；另建议**测延迟时不要同时播放音乐**，或临时把 `SendIntervalMs` 调大到 30~50ms |
+
+---
+
+## ⚙️ 配置项生效时机（重要）
+
+配置只有一个来源、一个分发点：**启动时读一次 → 注入各消费者；界面有入口的项在每次保存时再注入一次**。
+
+```text
+config.json --(启动 Load，逐项容错)--> ConfigSvc.Current --(启动注入一次)--> TransportMgr / Master / Lyrics / LatencyTestController
+                                                          --(界面保存时再注入)--> 同上
+```
+
+### 界面有入口的项 → 动态生效（改完立即作用到链路与逻辑层）
+
+| 界面入口 | 配置项 | 生效时机 |
+| :--- | :--- | :--- |
+| 串口/UDP 单选框 | `TransportMode` | 立即切换底层引擎实例；点「开始连接」按新参数连接 |
+| 端口 / 波特率 / 远程IP / 远程端口 | `SerialPortName` `BaudRate` `RemoteIp` `RemotePort` | 点「开始连接」时读取 |
+| 编码下拉框 | `EncodingName` | 立即更新 `PackageBuilder` 的全局编码（元数据 0x10、歌词 0x12~0x15 都用它） |
+| 高级协议 / 增量差分 / 翻译占行 | `IsAdvancedMode` `IsIncremental` `TransOccupies` | 下一轮歌词循环立即生效 |
+| 缓冲区行数 / 歌词偏移 / 同步包间隔 / 同步偏移 | `LineLimit` `Offset` `SyncIntervalMs` `SyncCurrentOffsetMs` | 下一轮循环立即生效 |
+| 歌词目录 | `LyricFolder` | 立即重新加载歌词 |
+
+### 界面无入口的「静默项」 → **仅启动时生效**（改完 `config.json` 必须重启程序）
+
+| 静默项 | 默认 | 说明 |
+| :--- | :--- | :--- |
+| `SendIntervalMs` | `10` | 发送队列每包间隔(ms)，0~200，0 = 不节流 |
+| `LatencyTimeoutMs` | `10000` | 「测延迟」连续无回包的停止超时(ms)，1s~120s |
+| `LatencyWarnMs` | `3000` | 「测延迟」连续无回包的等待告警阈值(ms)，0.5s~超时值 |
+| `TargetSerialMaster` | `"0x01"` | `0x1F` Ping 的目标设备 ID，只认十六进制的一个字节（1~2 位；`"12"` 按十六进制解释为 `0x12`；超长/非法字符/空值回退 `0x01`） |
+
+> ⚠️ **两条使用铁律**
+> 1. 程序运行中**不要**手改 `config.json`：任意一次界面操作（勾选框 / 下拉框 / 输入框回车或失焦 / 点「开始连接」）都会把内存里的配置**整体覆盖写回**该文件，手改会被静默丢弃。正确姿势：**关程序 → 改文件 → 再启动**。
+> 2. 配置项写错**只回退那错误的一项**：`ConfigService.Load()` 是逐项容错的（例如 `"LineLimit": "abc"` 会保留默认 `2`、`"TargetSerialMaster": "0xZZ"` 会保留 `0x01`），控制台会打印 `[配置] 配置项 xxx 的值 ... 非法，已回退默认 ...`；未知键打印 `[配置] 未知配置项 "xxx" 已忽略`。只有 JSON 结构本身损坏（括号不闭合等）才会整份回退默认配置。
 
 ---
 

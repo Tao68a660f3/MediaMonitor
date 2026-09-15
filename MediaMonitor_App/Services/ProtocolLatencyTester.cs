@@ -1,3 +1,4 @@
+using MediaMonitor.Core;
 using MediaMonitor.Tools;
 using System;
 using System.Collections.Concurrent;
@@ -45,8 +46,12 @@ namespace MediaMonitor.Services
     /// </summary>
     public class ProtocolLatencyTester : IDisposable
     {
-        /// <summary>0x01 = 串口 STM32 主设备（其他设备收到静默丢弃）</summary>
-        public const byte TargetSerialMaster = 0x01;
+        /// <summary>
+        /// 0x1F Ping 的目标设备 ID（0x01 = 串口 STM32 主设备，其他设备收到后静默丢弃）。
+        /// 由上层从 config.json 的 TargetSerialMaster 注入（静默设置项，缺省 0x01）：
+        /// 本类刻意不引用 App.ConfigSvc，保持"传输/配置无关"。
+        /// </summary>
+        public byte TargetSerialMaster { get; set; } = PackageConfig.DefaultTargetDeviceId;
 
         /// <summary>上行 Pong 指令码</summary>
         public const byte PongCmd = 0xAF;

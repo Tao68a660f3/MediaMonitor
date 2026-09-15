@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using MediaMonitor.Core;
@@ -29,27 +30,110 @@ namespace MediaMonitor.Services
         }
 
         /// <summary>
-        /// 从磁盘加载配置，如果文件不存在或损坏则返回默认配置
+        /// 从磁盘加载配置（**逐项容错**）。
+        ///
+        /// 与"整体反序列化 + 一个 catch 全丢"的区别：
+        ///   1) 先构建默认配置，再用 JsonDocument **逐项**覆盖；
+        ///   2) 某一项类型/格式非法（如 "LineLimit": "abc"、"TargetSerialMaster": "0xZZ"）时，
+        ///      **只回退该项到默认值**并在控制台说明原因，其余项全部保留；
+        ///   3) config.json 里出现未知键（改名/废弃项）只提示并忽略；
+        ///   4) 只有 JSON 结构本身损坏（括号不闭合等）才会整体回退默认配置。
         /// </summary>
         public PackageConfig Load()
         {
+            var cfg = CreateDefault();
+
+            if (!File.Exists(_configPath))
+                return cfg;
+
+            string json;
             try
             {
-                if (File.Exists(_configPath))
-                {
-                    string json = File.ReadAllText(_configPath);
-                    var config = JsonSerializer.Deserialize<PackageConfig>(json, _options);
-                    return config ?? CreateDefault();
-                }
+                json = File.ReadAllText(_configPath);
             }
             catch (Exception ex)
             {
-                // 这里可以记录日志，暂时返回默认值保证程序不崩溃
-                Console.WriteLine($"配置加载失败: {ex.Message}");
+                Console.WriteLine($"[配置] 读取 {_configPath} 失败，整体使用默认配置: {ex.Message}");
+                return cfg;
             }
 
-            return CreateDefault();
+            try
+            {
+                using var doc = JsonDocument.Parse(json, new JsonDocumentOptions
+                {
+                    CommentHandling = JsonCommentHandling.Skip,  // 容忍 // 与 /* */ 注释
+                    AllowTrailingCommas = true                  // 容忍尾随逗号
+                });
+                ApplyJsonTo(doc.RootElement, cfg);
+            }
+            catch (JsonException ex)
+            {
+                Console.WriteLine($"[配置] config.json 结构损坏，整体回退默认配置: {ex.Message}");
+                return CreateDefault();
+            }
+
+            return cfg;
         }
+
+        /// <summary>把 JSON 对象逐项套用到配置实例上：单项非法只回退该项，其余照常生效</summary>
+        private static void ApplyJsonTo(JsonElement root, PackageConfig cfg)
+        {
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                Console.WriteLine("[配置] config.json 顶层不是 JSON 对象，整体使用默认配置");
+                return;
+            }
+
+            var props = typeof(PackageConfig).GetProperties(BindingFlags.Public | BindingFlags.Instance);
+
+            foreach (var item in root.EnumerateObject())
+            {
+                var prop = FindWritableProperty(props, item.Name);
+                if (prop == null)
+                {
+                    Console.WriteLine($"[配置] 未知配置项 \"{item.Name}\" 已忽略");
+                    continue;
+                }
+
+                try
+                {
+                    object? value = item.Value.Deserialize(prop.PropertyType, _options);
+                    if (value is null)
+                    {
+                        Console.WriteLine($"[配置] 配置项 {prop.Name} 为 null，已忽略（保留默认 {prop.GetValue(cfg)}）");
+                        continue;
+                    }
+
+                    prop.SetValue(cfg, value);
+                }
+                catch (Exception ex)
+                {
+                    // 只回退这一项：实例里保留 CreateDefault() 给的值
+                    Console.WriteLine($"[配置] 配置项 {prop.Name} 的值 {item.Value.GetRawText()} 非法，已回退默认 {prop.GetValue(cfg)}：{UnwrapMessage(ex)}");
+                }
+            }
+        }
+
+        /// <summary>按属性名（大小写不敏感）找可写的公开属性；[JsonIgnore] 的项（如 Encoding）跳过</summary>
+        private static PropertyInfo? FindWritableProperty(PropertyInfo[] props, string jsonName)
+        {
+            foreach (var p in props)
+            {
+                if (p.SetMethod?.IsPublic != true)
+                    continue;
+                if (p.GetCustomAttribute<JsonIgnoreAttribute>() != null)
+                    continue;
+                if (string.Equals(p.Name, jsonName, StringComparison.OrdinalIgnoreCase))
+                    return p;
+            }
+            return null;
+        }
+
+        /// <summary>取出反射/序列化异常的真正原因（TargetInvocationException 会把内层异常包一层）</summary>
+        private static string UnwrapMessage(Exception ex)
+            => ex is TargetInvocationException { InnerException: not null } wrapped
+                ? wrapped.InnerException!.Message
+                : ex.Message;
 
         /// <summary>
         /// 将当前内存中的配置持久化到磁盘

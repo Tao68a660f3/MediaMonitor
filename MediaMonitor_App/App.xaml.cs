@@ -62,6 +62,13 @@ namespace MediaMonitor
                 ConfigSvc = new ConfigService();
                 var cfg = ConfigSvc.Current;
 
+                // 配置分发（启动时注入一次）：静默项（UI 无入口的 SendIntervalMs 等）只在此刻生效；
+                // 界面有入口的项由 MainWindow.SyncAndSaveConfig() 在保存时再次注入。
+                TransportMgr.ApplyConfig(cfg);
+
+                // 编码是"文本包"的全局开关（PackageBuilder 内部是静态状态），启动即对齐一次配置
+                PackageBuilder.UpdateEncoding(cfg.Encoding);
+
                 // 按照你定义的属性初始化歌词服务
                 Lyrics = new LyricService
                 {

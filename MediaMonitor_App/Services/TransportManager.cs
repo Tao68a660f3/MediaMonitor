@@ -1,4 +1,5 @@
 ﻿using System;
+using MediaMonitor.Core;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Threading;
@@ -11,6 +12,13 @@ namespace MediaMonitor.Services
         // 内部持有的真实引擎，初始为 null
         private IMediaTransport? _activeTransport;
         private readonly object _transportLock = new object();
+
+        /// <summary>
+        /// 当前生效的配置（由 App 在启动时注入一次、UI 保存时再注入一次）。
+        /// 本类内部不再反查 App.ConfigSvc：UI 无入口的静默项（如 SendIntervalMs）
+        /// 因此只受"启动注入"影响 —— 改 config.json 需重启程序。
+        /// </summary>
+        private PackageConfig? _cfg;
 
         // --- 发送队列：业务层入队即返回，后台线程按节奏真实发送 ---
         private readonly BlockingCollection<byte[]> _sendQueue = new BlockingCollection<byte[]>();
@@ -50,6 +58,12 @@ namespace MediaMonitor.Services
                 _activeTransport.OnTransportError += HandleError;
             }
         }
+
+        /// <summary>
+        /// 注入配置（启动时一次 + 每次 UI 保存时一次）。
+        /// 引用赋值本身是原子的，发送循环只会读到"旧配置"或"新配置"，不会读到半份配置。
+        /// </summary>
+        public void ApplyConfig(PackageConfig? cfg) => _cfg = cfg;
 
         // --- 业务层调用不变：立即入队返回，不阻塞调用线程 ---
         public void Send(byte[] data)
@@ -117,7 +131,7 @@ namespace MediaMonitor.Services
                         transport.Send(data);
 
                         // 协议日志移到“实际发出时”记录，保证日志时序与真实发送一致
-                        var enc = App.ConfigSvc?.Current?.Encoding ?? System.Text.Encoding.UTF8;
+                        var enc = _cfg?.Encoding ?? System.Text.Encoding.UTF8;
                         App.LogSvc?.LogProtocol(data, enc);
                     }
                 }
@@ -142,12 +156,12 @@ namespace MediaMonitor.Services
             }
         }
 
-        // 从配置读取每包间隔，Clamp 0~200ms（0 表示不节流）
+        // 从注入的配置读取每包间隔，Clamp 0~200ms（0 表示不节流）
         private int GetSendInterval()
         {
             try
             {
-                return Math.Clamp(App.ConfigSvc?.Current?.SendIntervalMs ?? 10, 0, 200);
+                return Math.Clamp(_cfg?.SendIntervalMs ?? 10, 0, 200);
             }
             catch
             {
