@@ -30,6 +30,19 @@ namespace MediaMonitor.Services
         /// </summary>
         public int Generation { get; private set; }
 
+        /// <summary>
+        /// 当前歌词文件头部 [offset:N] 标签的【原始值】（毫秒；无标签或标签非法时为 0）。
+        /// 注意：这里保留文件里写的符号（负值 = 歌词偏快、需延后），
+        /// 真正采用的时间平移量是 -CurrentOffsetMs，且已在解析阶段应用到各行（含逐字）时间上；
+        /// 本属性仅作记录、供排查问题用，读取方不要拿它再做一次时间换算。
+        /// </summary>
+        public int CurrentOffsetMs { get; private set; }
+
+        // LRC 头部 offset 标签：[offset:N]（毫秒，可带 +/-，允许空格与大小写差异）
+        // 这里只负责取出文件原值，符号语义（负值 = 歌词偏快、需延后）见 ApplyOffset
+        private static readonly Regex OffsetRegex =
+            new Regex(@"^\s*\[offset\s*:\s*(?<v>[+-]?\d+)\s*\]\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
         // --- 不可变快照机制 ---
         // Lines 永远指向一个"不再被修改"的列表实例：加载/解析期间只在局部 newLines 构建，
         // 完成后一次性原子替换。读取方（后台 10ms 循环）每帧捕获一次引用作为快照，
@@ -88,12 +101,12 @@ namespace MediaMonitor.Services
             // --- 闸门 1：拦截无效元数据 ---
             if (string.IsNullOrWhiteSpace(title) || title.Length < 1)
             {
-                PublishLyrics(newLines, newPath);
+                PublishLyrics(newLines, newPath, 0);
                 return;
             }
             if (string.IsNullOrWhiteSpace(LyricFolder) || !Directory.Exists(LyricFolder))
             {
-                PublishLyrics(newLines, newPath);
+                PublishLyrics(newLines, newPath, 0);
                 return;
             }
 
@@ -102,12 +115,12 @@ namespace MediaMonitor.Services
             string sA = Regex.Replace(artist ?? "", @"[\/?:*""<>|]", "_").Trim();
 
             // 2. 增强清洗
-            string cT = Regex.Replace(sT, @"\.(mp3|flac|wav|m4a|ape|ogg)$", "", RegexOptions.IgnoreCase);
+            string cT = Regex.Replace(sT, @"\.(mp3|flac|wav|m4a|ape|ogg|dsf)$", "", RegexOptions.IgnoreCase);
 
             // --- 闸门 2：如果清洗完标题变空了（比如原标题就是 ".mp3"），立即止损 ---
             if (string.IsNullOrWhiteSpace(cT))
             {
-                PublishLyrics(newLines, newPath);
+                PublishLyrics(newLines, newPath, 0);
                 return;
             }
 
@@ -131,8 +144,8 @@ namespace MediaMonitor.Services
                     if (match != null)
                     {
                         newPath = match;
-                        ParseInto(newLines, newPath);
-                        PublishLyrics(newLines, newPath);
+                        int offsetMs = ParseInto(newLines, newPath);
+                        PublishLyrics(newLines, newPath, offsetMs);
                         return;
                     }
                 }
@@ -156,33 +169,39 @@ namespace MediaMonitor.Services
                 });
             }
 
+            int parsedOffsetMs = 0;
             if (newPath != null)
             {
-                ParseInto(newLines, newPath);
+                parsedOffsetMs = ParseInto(newLines, newPath);
             }
-            PublishLyrics(newLines, newPath);
+            PublishLyrics(newLines, newPath, parsedOffsetMs);
         }
 
         /// <summary>
         /// 原子发布歌词：一次性替换共享引用并递增代际号。
-        /// 这是唯一修改 Lines / CurrentLyricPath / Generation 的地方，
+        /// 这是唯一修改 Lines / CurrentLyricPath / CurrentOffsetMs / Generation 的地方，
         /// 保证读取方永远看到"完整的新列表"或"完整的旧列表"，绝不看到半成品。
         /// </summary>
-        private void PublishLyrics(List<LyricLine> newLines, string? newPath)
+        private void PublishLyrics(List<LyricLine> newLines, string? newPath, int offsetMs)
         {
             Lines = newLines;
             CurrentLyricPath = newPath;
+            CurrentOffsetMs = offsetMs;
             Generation++;
         }
 
         // 在 ParseInto 方法中，确保对 Words 处理的健壮性
         // 解析进调用方传入的目标列表（局部构建），不触碰共享字段
-        private void ParseInto(List<LyricLine> target, string path)
+        // 返回文件头部 [offset:N] 标签的原始值（毫秒，无标签或标签非法时为 0；符号语义见 ApplyOffset）
+        private int ParseInto(List<LyricLine> target, string path)
         {
             var raw = File.ReadAllLines(path);
             // 宽容正则，匹配 [00:00.00] 或 <00:00.00>
             var lRegex = new Regex(@"[\[\<](?<t>\d{2,}:\d{2}(?:\.\d{2,3})?)[\]\>](?<c>.*)$");
             var wRegex = new Regex(@"[\[\<](?<t>\d{2,}:\d{2}\.\d{2,3})[\]\>](?<w>[^\[\<]*)");
+
+            // --- 头部 offset 标签预扫描：[offset:+/-毫秒] ---
+            int offsetMs = ParseHeaderOffset(raw, lRegex);
 
             foreach (var line in raw)
             {
@@ -239,7 +258,74 @@ namespace MediaMonitor.Services
                     target.Add(newLine);
                 }
             }
+
+            // --- 头部 [offset:N] 标签：整体平移时间轴（新时间 = 标签时间 - offset，详见 ApplyOffset 注释）---
+            ApplyOffset(target, offsetMs);
+
             target.Sort((a, b) => a.Time.CompareTo(b.Time));
+            return offsetMs;
+        }
+
+        /// <summary>
+        /// 预扫描歌词文件头部，取第一个有效的 [offset:N] 标签（毫秒，支持 +/-、空格与大小写）。
+        /// 只扫描到第一个带时间戳的歌词行为止，避免把正文里的 [offset:..] 误当标签；
+        /// 与 [ti:]/[ar:]/[by:] 等元数据行任意先后顺序都能正确识别。
+        /// 无标签、标签在正文中或数值非法时返回 0（即不偏移，保持原有行为）。
+        /// 返回值是文件里写的【原始】数值（不取反），真正的时间平移在 ApplyOffset 里完成。
+        /// </summary>
+        private static int ParseHeaderOffset(string[] raw, Regex lRegex)
+        {
+            foreach (var line in raw)
+            {
+                string trimmed = line.Trim().TrimStart('\uFEFF');
+                if (lRegex.IsMatch(trimmed)) break;      // 已进入歌词正文，停止扫描
+
+                var m = OffsetRegex.Match(trimmed);
+                if (m.Success && int.TryParse(m.Groups["v"].Value, out int v))
+                    return v;                            // 只认第一个有效标签
+            }
+            return 0;
+        }
+
+        /// <summary>
+        /// 应用 LRC 头部 [offset:N] 标签：把每一行（含行内逐字）的时间整体平移，使歌词与音频重新对齐。
+        ///
+        /// 符号语义（Negative = 歌词比音频"快"，即唱早了，需要整体【延后】）：
+        ///     N &lt; 0 → 歌词偏快 → 时间 +|N|（延后）
+        ///     N &gt; 0 → 歌词偏慢 → 时间 -N  （提前）
+        /// 统一写成：新时间 = 标签时间 - offset。
+        /// 例：[offset:-2800] 且首行是 [00:00.20]，结果是 00:03.00（整行延后 2.8 秒）。
+        ///
+        /// 唯一的额外保护：若某行平移后会落到 0ms 之前（说明这一行本应在曲目开始前就唱完），
+        /// 则只把【该行】的平移量收敛到"让该行正好从 0ms 起"，行内逐字共用同一平移量。
+        /// 原因：PackageBuilder 里是 (uint)startTime.TotalMilliseconds，负数会翻转成约 42.9 亿 ms
+        /// 直接污染硬件端；而逐字偏移是相对量，必须和整行共用同一平移量才不会打乱逐字节奏。
+        /// 该收敛只影响这一行，其余行仍按完整 offset 平移，整体对齐量不受影响。
+        /// </summary>
+        private static void ApplyOffset(List<LyricLine> lines, int offsetMs)
+        {
+            if (offsetMs == 0 || lines.Count == 0) return;
+
+            // 全程用 long 的 Tick 做整数运算：既没有 double 舍入误差，
+            // 也避免 -offsetMs 在 int 域溢出（[offset:-2147483648] 这类离谱值不会把符号又翻回去）
+            long shiftTicks = -(long)offsetMs * TimeSpan.TicksPerMillisecond;
+
+            foreach (var l in lines)
+            {
+                long lineTicks = l.Time.Ticks;
+
+                // 平移量默认取整轨偏移；若该行会被推到 0ms 之前，则只收敛本行到 0ms 起
+                long deltaTicks = shiftTicks;
+                if (lineTicks + deltaTicks < 0) deltaTicks = -lineTicks;
+
+                if (deltaTicks == 0) continue;
+
+                l.Time = TimeSpan.FromTicks(lineTicks + deltaTicks);
+
+                // 行内逐字走同一个 deltaTicks，保证 (w.Time - line.Time) 的相对节奏完全不变
+                foreach (var w in l.Words)
+                    w.Time = TimeSpan.FromTicks(w.Time.Ticks + deltaTicks);
+            }
         }
     }
 }
