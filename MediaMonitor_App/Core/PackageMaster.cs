@@ -91,6 +91,23 @@ namespace MediaMonitor.Core
                     _lastSyncTimeMs = Environment.TickCount64;
                 }
             };
+
+            // 会话消失（播放器退出/关闭）：只清上位机（歌词列表 + 通知界面复位），
+            // 按约定不向硬件下发任何清场/停止包，硬件保留最后一帧画面。
+            _smtc.MediaCleared += () =>
+            {
+                _isPlaying = false;
+                _lastSeenPositionMs = -1;
+                _totalSeconds = 0;
+                _lastSmtcMediaSec = -1;
+                _lastSmtcWallSec = -1;
+
+                _lyricService.LoadAndParse("", "");   // 闸门 1 → 发布空歌词（不会产生占位行）
+                Invalidate();                         // 清上位机账本；恢复播放时首帧整屏重发
+
+                // ProcessTick 此时已因 prog == null 停摆，不会自己刷新界面 → 主动清掉歌词预览
+                LyricChanged?.Invoke(-1, new LyricLine());
+            };
         }
 
         public void Invalidate()
@@ -343,7 +360,14 @@ namespace MediaMonitor.Core
             }
             _lastSmtcMediaSec = info.Position.TotalSeconds;
             _lastSmtcWallSec = nowWall;
-            _totalSeconds = info.Duration.TotalSeconds;
+
+            // 0x15 的结束时间是账本门控的：曲目总时长变化后必须失效重发，
+            // 否则末行/占位行会被硬件按旧的结束时间（兜底 +5s）提前清屏
+            double newTotalSeconds = info.Duration.TotalSeconds;
+            if (Math.Abs(newTotalSeconds - _totalSeconds) >= 1.0)
+                Invalidate();
+            _totalSeconds = newTotalSeconds;
+
             _isPlaying = (info.Status == PlaybackState.Playing);
         }
 

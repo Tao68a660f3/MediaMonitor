@@ -38,6 +38,13 @@ namespace MediaMonitor.Services
         /// </summary>
         public int CurrentOffsetMs { get; private set; }
 
+        /// <summary>
+        /// 当前 Lines 是否是"未找到歌词"时的歌曲信息占位行：
+        /// true 时 Lines 恒为 1 行（Content = 歌曲信息）、CurrentLyricPath 为 null、CurrentOffsetMs 为 0。
+        /// 仅用于界面区分"真的加载到 lrc"与"只是占位"，不要拿它参与时间/发送逻辑。
+        /// </summary>
+        public bool IsPlaceholder { get; private set; }
+
         // LRC 头部 offset 标签：[offset:N]（毫秒，可带 +/-，允许空格与大小写差异）
         // 这里只负责取出文件原值，符号语义（负值 = 歌词偏快、需延后）见 ApplyOffset
         private static readonly Regex OffsetRegex =
@@ -92,6 +99,14 @@ namespace MediaMonitor.Services
             return start + TimeSpan.FromSeconds(5);
         }
 
+        /// <summary>
+        /// 拼接歌曲信息文案："歌名 - 歌手"（无歌手时只有歌名）。
+        /// 「有 SMTC 会话但没找到歌词」时，占位歌词用的就是这串文本
+        /// （与托盘提示里的 songInfo 同规则，但不含程序标题）。
+        /// </summary>
+        public static string ComposeSongInfo(string? title, string? artist)
+            => string.IsNullOrEmpty(artist) ? (title ?? "") : $"{title} - {artist}";
+
         public void LoadAndParse(string title, string artist)
         {
             Debug.WriteLine($"尝试载入歌词{title}-{artist}");
@@ -106,7 +121,7 @@ namespace MediaMonitor.Services
             }
             if (string.IsNullOrWhiteSpace(LyricFolder) || !Directory.Exists(LyricFolder))
             {
-                PublishLyrics(newLines, newPath, 0);
+                PublishLyricsOrPlaceholder(newLines, newPath, 0, title, artist);
                 return;
             }
 
@@ -120,7 +135,7 @@ namespace MediaMonitor.Services
             // --- 闸门 2：如果清洗完标题变空了（比如原标题就是 ".mp3"），立即止损 ---
             if (string.IsNullOrWhiteSpace(cT))
             {
-                PublishLyrics(newLines, newPath, 0);
+                PublishLyricsOrPlaceholder(newLines, newPath, 0, title, artist);
                 return;
             }
 
@@ -145,7 +160,7 @@ namespace MediaMonitor.Services
                     {
                         newPath = match;
                         int offsetMs = ParseInto(newLines, newPath);
-                        PublishLyrics(newLines, newPath, offsetMs);
+                        PublishLyricsOrPlaceholder(newLines, newPath, offsetMs, title, artist);
                         return;
                     }
                 }
@@ -174,20 +189,49 @@ namespace MediaMonitor.Services
             {
                 parsedOffsetMs = ParseInto(newLines, newPath);
             }
-            PublishLyrics(newLines, newPath, parsedOffsetMs);
+            PublishLyricsOrPlaceholder(newLines, newPath, parsedOffsetMs, title, artist);
         }
 
         /// <summary>
         /// 原子发布歌词：一次性替换共享引用并递增代际号。
-        /// 这是唯一修改 Lines / CurrentLyricPath / CurrentOffsetMs / Generation 的地方，
+        /// 这是唯一修改 Lines / CurrentLyricPath / CurrentOffsetMs / IsPlaceholder / Generation 的地方，
         /// 保证读取方永远看到"完整的新列表"或"完整的旧列表"，绝不看到半成品。
         /// </summary>
-        private void PublishLyrics(List<LyricLine> newLines, string? newPath, int offsetMs)
+        private void PublishLyrics(List<LyricLine> newLines, string? newPath, int offsetMs, bool isPlaceholder = false)
         {
             Lines = newLines;
             CurrentLyricPath = newPath;
             CurrentOffsetMs = offsetMs;
+            IsPlaceholder = isPlaceholder;
             Generation++;
+        }
+
+        /// <summary>
+        /// 统一收尾发布：有歌词行就正常发布；一行都没有、但当前确实有歌曲信息时
+        /// （没搜到文件 / 歌词目录不可用 / 文件里没有可解析的时间戳），退化为一行"歌曲信息占位歌词"。
+        /// 占位行只写起点 0ms，终点时间交给 GetEndTime 的末行分支 = 曲目总时长，
+        /// 因此占位行会从 0ms 一直显示到歌曲结束（无需在此写死终点）。
+        /// </summary>
+        private void PublishLyricsOrPlaceholder(List<LyricLine> newLines, string? newPath, int offsetMs, string title, string? artist)
+        {
+            if (newLines.Count > 0)
+            {
+                PublishLyrics(newLines, newPath, offsetMs);
+                return;
+            }
+
+            string tip = ComposeSongInfo(title, artist);
+            if (string.IsNullOrEmpty(tip))
+            {
+                PublishLyrics(newLines, null, 0);   // 连歌名都没有（闸门 1）：保持原有的空歌词行为
+                return;
+            }
+
+            var placeholder = new List<LyricLine>
+            {
+                new LyricLine { Time = TimeSpan.Zero, Content = tip }
+            };
+            PublishLyrics(placeholder, null, 0, isPlaceholder: true);
         }
 
         // 在 ParseInto 方法中，确保对 Words 处理的健壮性

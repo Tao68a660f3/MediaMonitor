@@ -331,18 +331,26 @@ namespace MediaMonitor
                 //TxtTime.Text = $"{prog.Position:mm\\:ss} / {prog.Duration:mm\\:ss}";
                 TxtTime.Text = $"{FormatTime(prog.Position)} / {FormatTime(prog.Duration)}";
             }
+            else
+            {
+                // SMTC 丢失（播放器退出/未选中会话）：进度控件是被动刷新的，不主动复位就会停在最后一帧
+                PbProgress.Maximum = 1;
+                PbProgress.Value = 0;
+                TxtTime.Text = "--:-- / --:--";
+            }
 
-            // 更新歌词状态
+            // 更新歌词状态：区分"真的加载到 lrc"与"未找到歌词的歌曲信息占位"
             int lrcCount = App.Lyrics.Lines?.Count ?? 0;
             string lrcPath = App.Lyrics.CurrentLyricPath ?? "";
-            TxtLrcStatus.Text = lrcCount > 0 ? $"已加载 {lrcPath}, {lrcCount} 行" : "未找到歌词";
+            if (App.Lyrics.IsPlaceholder)
+                TxtLrcStatus.Text = "未找到歌词（已用歌曲信息占位）";
+            else
+                TxtLrcStatus.Text = lrcCount > 0 ? $"已加载 {lrcPath}, {lrcCount} 行" : "未找到歌词";
 
-            // 同步托盘提示：歌曲信息 + 主程序标题（含版本号）
+            // 同步托盘提示：歌曲信息 + 主程序标题（含版本号）；歌曲信息与占位歌词共用一份拼接实现
             string song = App.Smtc.CurrentTitle ?? "未在播放";
             string artist = App.Smtc.CurrentArtist ?? "";
-            string songInfo = string.IsNullOrEmpty(artist) ? song : $"{song} - {artist}";
-            string trayTip = $"{songInfo} | {this.Title}";
-            _tray.UpdateTooltip(trayTip);
+            _tray.UpdateTooltip($"{LyricService.ComposeSongInfo(song, artist)} | {this.Title}");
         }
 
         // MainWindow.xaml.cs 内部

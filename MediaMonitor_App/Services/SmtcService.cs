@@ -51,10 +51,17 @@ namespace MediaMonitor.Services
         public Action<GlobalSystemMediaTransportControlsSessionMediaProperties>? OnMediaUpdated;
         public event Action? SessionsListChanged;
 
+        /// <summary>
+        /// 当前会话消失（播放器退出/会话被关闭、或手动清空选择）时触发：
+        /// 此时 CurrentTitle/Artist/Album 已被清空，上层应同步清掉自己的残留状态。
+        /// </summary>
+        public event Action? MediaCleared;
+
         public async Task InitializeAsync()
         {
             _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
             _manager.SessionsChanged += (s, e) => {
+                DetachIfSessionGone();
                 SessionsListChanged?.Invoke();
             };
         }
@@ -62,8 +69,32 @@ namespace MediaMonitor.Services
         public IReadOnlyList<GlobalSystemMediaTransportControlsSession> GetSessions()
             => _manager?.GetSessions() ?? new List<GlobalSystemMediaTransportControlsSession>();
 
-        public void SelectSession(GlobalSystemMediaTransportControlsSession? session)
+        /// <summary>
+        /// 当前会话是否已被系统移除（播放器退出/会话关闭）：是则彻底清场并通知上层。
+        /// 不清场的话 CurrentTitle/Artist/Album 会一直保留上一首的残留值，
+        /// 界面与托盘会"假装还在播放"，而 GetCurrentProgress() 其实已经返回 null。
+        /// </summary>
+        private void DetachIfSessionGone()
         {
+            if (_currentSession == null) return;
+
+            try
+            {
+                if (_manager?.GetSessions().Contains(_currentSession) == true) return;
+            }
+            catch { return; }   // 查询失败按"会话还在"处理，避免误清
+
+            DetachCurrentSession(notify: true);
+        }
+
+        /// <summary>
+        /// 解绑并丢弃当前会话，同时清空缓存的元数据（残留信息的源头就在这里）。
+        /// notify = true 时通知上层"已经没有会话了"（MediaCleared）。
+        /// </summary>
+        private void DetachCurrentSession(bool notify)
+        {
+            bool hadSession = _currentSession != null;
+
             if (_currentSession != null)
             {
                 _currentSession.MediaPropertiesChanged -= Session_MediaPropertiesChanged;
@@ -71,12 +102,32 @@ namespace MediaMonitor.Services
                 _currentSession.PlaybackInfoChanged -= Session_PlaybackInfoChanged;
             }
 
-            // 切换会话：使旧会话的所有在途事件全部失效
+            // 丢弃会话：使旧会话的所有在途事件全部失效
             Interlocked.Increment(ref _mediaUpdateSeq);
 
             // 跨会话重置状态，避免用上一个会话的播放状态/锚点误判
             _lastStatus = GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed;
             _resumeAnchorValid = false;
+            _lastTimeline = null;
+
+            _currentSession = null;
+
+            // 元数据一并清空，否则界面/托盘会继续显示上一首
+            CurrentTitle = null;
+            CurrentArtist = null;
+            CurrentAlbum = null;
+
+            if (notify && hadSession)
+                MediaCleared?.Invoke();
+        }
+
+        public void SelectSession(GlobalSystemMediaTransportControlsSession? session)
+        {
+            // 切换会话只解绑、不通知（新会话紧接着会立刻推送自己的属性）；
+            // 但"清空选择"等于没有会话了，必须通知上层清掉残留的歌曲信息
+            bool hadSession = _currentSession != null;
+
+            DetachCurrentSession(notify: false);
 
             _currentSession = session;
 
@@ -94,6 +145,10 @@ namespace MediaMonitor.Services
 
                 // 立即触发一次更新
                 Session_MediaPropertiesChanged(_currentSession, null);
+            }
+            else if (hadSession)
+            {
+                MediaCleared?.Invoke();
             }
         }
 
