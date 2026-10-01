@@ -759,8 +759,9 @@ def parse_args():
                     help="会话建立后每隔 N 秒发一次 CONTROL(PLAY_PAUSE)，用于验证 PC 侧回控")
     ap.add_argument("--run-seconds", type=float, default=0.0, help="运行 N 秒后自动退出（0 = 一直跑）")
     ap.add_argument("--art-dir", default="art_recv", help="收到的歌词/封面落盘目录")
-    ap.add_argument("--cover-format", type=lambda s: int(s, 0), default=0x10,
-                    help="请求封面时指定的 FORMAT：0x01=JPEG 0x02=PNG 0x10=RGB565（默认）")
+    ap.add_argument("--cover-format", type=lambda s: int(s, 0), default=0x01,
+                    help="请求封面时指定的 FORMAT：0x01=JPEG（默认，比 RGB565 小一个数量级）"
+                         "0x02=PNG 0x10=RGB565")
     ap.add_argument("--quiet", action="store_true", help="不逐帧打印")
     return ap.parse_args()
 

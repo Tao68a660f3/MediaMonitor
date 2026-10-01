@@ -363,9 +363,10 @@ python MediaMonitor_App/A_tools/mock_esp32_gui.py          # 图形版（开窗�
 
 * **同一个内核**：`mock_esp32_new.py` 里的 `MockServer` 类被 CLI 与 GUI 共用（socket + 真 C 代码），GUI 只负责把收到的帧**解码后画出来**；
 * **线程安全**：C 侧是全局单例，所以**所有 DLL 调用都在 `MockServer` 的后台线程里**；GUI 只做两件事 —— `snapshot()` 读状态快照、`post()` 投命令（手动发 CONTROL / 请求歌词 / 请求封面）；
-* **显示**：会话与统计、`MEDIA`（标题/艺术家/专辑）、`TIMELINE`（进度条 + chunk 时间戳）、`ALBUMCOVER` 预览（RGB565 → PPM → `PhotoImage`；JPEG/PNG 有 PIL 才解码）、`LYRICS` 行（`[mm:ss.mmm] 正文`，翻译行缩进、逐字行标词数）、事件日志；
+* **显示**：会话与统计、`MEDIA`（标题/艺术家/专辑）、`TIMELINE`（进度条 + chunk 时间戳）、`ALBUMCOVER` 预览（**默认请求 JPEG**，有 PIL 即解码；RGB565 走 PPM 直接渲染）、`LYRICS` 行（`[mm:ss.mmm] 正文`，翻译行缩进、逐字行标词数）、事件日志；顶栏可随时切换请求格式（JPEG / PNG / RGB565，只影响下一次 REQUEST）；
+* **刷新策略**：所有控件都走"值变了才 `configure`"（`_upd` 辅助函数），歌词/封面只在**资源更新时**整体重画 —— 早期版本每 200ms 重画歌词区，导致用户选不中、滚不动（实测踩过）；
 * **断线后继续监听**（`serve_forever=True`），方便反复联调；每次新连接都会 `np_dll_init/session_init/res_init/timeline_init`，避免上一次的残留；
-* `--headless --seconds N` 可无窗口跑一遍并打印解码摘要（自动化验证用）。
+* `--headless --seconds N` 可无窗口跑一遍并打印解码摘要（自动化验证用）；`--trace` 把事件同时打到控制台，便于留日志。
 
 **实测基线**（`--caps lyrics,cover,jpeg,rgb565 --max-edge 240`）：帧率 2 帧/秒（`cur` 每 ~500ms 递增）、总帧数 ~78/30s、`crc错=0 重同步=0`、歌词资源 39B（占位歌词）CRC 由 C 侧校验通过、延迟 `Base≈0.1ms Avg≈7.5ms`（loopback + mock 150µs 模拟处理）。
 

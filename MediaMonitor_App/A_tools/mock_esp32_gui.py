@@ -42,6 +42,10 @@ FONT = ("Microsoft YaHei UI", 9)
 FONT_BOLD = ("Microsoft YaHei UI", 10, "bold")
 FONT_MONO = ("Consolas", 9)
 
+# 封面格式（与规范 §11 的 FORMAT 字段一致）
+FMT_NAMES = {0x00: "NONE", 0x01: "JPEG", 0x02: "PNG", 0x10: "RGB565"}
+FMT_CODES = {"JPEG": 0x01, "PNG": 0x02, "RGB565": 0x10}
+
 
 def fmt_ms(ms):
     ms = int(ms or 0)
@@ -58,6 +62,7 @@ class MockGui:
         self._photo = None
         self._pil_photo = None
         self._cover_key = None
+        self._lyrics_key = None
         self._log_lines = 0
 
         root.title("对端模拟器 · ESP32 / New Protocol V1.1")
@@ -93,8 +98,14 @@ class MockGui:
         self.lbl_phase = ttk.Label(top, text="未启动", font=FONT_BOLD, foreground="#555555")
         self.lbl_phase.pack(side="left", padx=16)
 
-        ttk.Label(top, text="上位机填 → New 模式 / TCP / 对端 = 本机 IP:端口",
-                  font=FONT, foreground="#888888").pack(side="left")
+        ttk.Label(top, text="请求封面格式:", font=FONT).pack(side="left", padx=(10, 2))
+        self.var_fmt = tk.StringVar(value=FMT_NAMES.get(self.args.cover_format, "JPEG"))
+        cbo = ttk.Combobox(top, textvariable=self.var_fmt, width=7, state="readonly",
+                           values=list(FMT_CODES.keys()), font=FONT)
+        cbo.pack(side="left")
+        cbo.bind("<<ComboboxSelected>>", self.on_format_changed)
+        ttk.Label(top, text="（JPEG 比 RGB565 小一个数量级，但 ESP32 要解码器）",
+                  font=FONT, foreground="#888888").pack(side="left", padx=6)
 
         # --- 会话与统计 ---
         info = ttk.LabelFrame(self.root, text=" 会话与统计 ")
@@ -179,6 +190,16 @@ class MockGui:
 
     # ------------------------------------------------------------------ 动作
 
+    def _fmt_code(self):
+        return FMT_CODES.get(self.var_fmt.get(), 0x01)
+
+    def on_format_changed(self, _evt=None):
+        """改封面请求格式：只影响下一次 ALBUMCOVER REQUEST，立刻生效（不用重启服务端）"""
+        fmt = self._fmt_code()
+        if self.server is not None:
+            self.server.cover_format = fmt
+        self._append_log("封面请求格式 → %s（0x%02X）" % (self.var_fmt.get(), fmt))
+
     def on_start(self):
         try:
             port = int(self.var_port.get())
@@ -195,15 +216,16 @@ class MockGui:
             max_resource=self.args.max_resource,
             tick_ms=self.args.tick_ms,
             art_dir=self.args.art_dir,
-            cover_format=self.args.cover_format,
+            cover_format=self._fmt_code(),
             quiet=True,                      # GUI 里不逐帧刷控制台
-            cli=False,
+            cli=self.args.trace,             # --trace 时把事件同时打到控制台（留日志用）
             serve_forever=True)              # 断线后继续监听，方便反复联调
         self.server.start()
 
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self._append_log("已启动服务端（内核 np_ref.dll —— 与真固件同一份 C 代码）")
+        self._append_log("已启动服务端（内核 np_ref.dll —— 与真固件同一份 C 代码）；"
+                         "封面请求格式 = %s" % self.var_fmt.get())
 
     def on_stop(self):
         if self.server is not None:
@@ -226,60 +248,79 @@ class MockGui:
 
     # ------------------------------------------------------------------ 刷新
 
+    @staticmethod
+    def _upd(widget, key, **kw):
+        """值没变就**不碰控件**：避免每 200ms 无谓重绘（会打断选择/滚动，看起来像卡住）"""
+        if getattr(widget, "_np_key", None) == key:
+            return False
+        widget._np_key = key
+        widget.configure(**kw)
+        return True
+
     def _tick(self):
         if self.server is not None:
             self._render(self.server.snapshot())
         self.root.after(200, self._tick)
 
     def _render(self, st):
-        # 顶栏
-        self.lbl_phase.config(text=st["phase"],
-                              foreground="#0A7D28" if st["session_state"] == 4 else "#B36B00")
+        # 顶栏：阶段
+        self._upd(self.lbl_phase, (st["phase"], st["session_state"]),
+                  text=st["phase"],
+                  foreground="#0A7D28" if st["session_state"] == 4 else "#B36B00")
 
         # 会话与统计
-        self.lbl_session.config(text="会话: %s" % st["session_name"],
-                                foreground="#0A7D28" if st["session_state"] == 4 else "#444444")
-        self.lbl_sid.config(text="SESSION_ID: 0x%08X" % st["session_id"])
-        self.lbl_stats.config(text="帧=%d  crc错=%d  重同步=%d  tx丢弃=%d"
-                                   % (st["frames_rx"], st["crc_errors"], st["resyncs"], st["tx_dropped"]))
-        self.lbl_extra.config(text="延迟应答=%d  回控发出=%d  对端=%s"
-                                   % (st["latency_responded"], st["control_sent"], st["peer"] or "-"))
+        self._upd(self.lbl_session, (st["session_name"], st["session_state"]),
+                  text="会话: %s" % st["session_name"],
+                  foreground="#0A7D28" if st["session_state"] == 4 else "#444444")
+        self._upd(self.lbl_sid, st["session_id"],
+                  text="SESSION_ID: 0x%08X" % st["session_id"])
+        self._upd(self.lbl_stats,
+                  (st["frames_rx"], st["crc_errors"], st["resyncs"], st["tx_dropped"]),
+                  text="帧=%d  crc错=%d  重同步=%d  tx丢弃=%d"
+                       % (st["frames_rx"], st["crc_errors"], st["resyncs"], st["tx_dropped"]))
+        self._upd(self.lbl_extra,
+                  (st["latency_responded"], st["control_sent"], st["peer"]),
+                  text="延迟应答=%d  回控发出=%d  对端=%s"
+                       % (st["latency_responded"], st["control_sent"], st["peer"] or "-"))
 
         # 媒体
         media = st["media"]
         if media:
-            self.lbl_title.config(text=media["title"] or "(空标题)")
-            self.lbl_artist.config(text=media["artist"] or "-")
-            self.lbl_album.config(text=media["album"] or "-")
+            k = (media["title"], media["artist"], media["album"])
+            self._upd(self.lbl_title, k, text=media["title"] or "(空标题)")
+            self._upd(self.lbl_artist, k, text=media["artist"] or "-")
+            self._upd(self.lbl_album, k, text=media["album"] or "-")
 
-        # 时间轴
+        # 时间轴（进度条该动就动，但只在数值变化时 set）
         tl = st["timeline"]
         if tl:
             total = max(tl["total_ms"], 1)
-            self.pb.config(maximum=total, value=min(tl["cur_ms"], total))
-            self.lbl_time.config(text="%s / %s    播放中: %s"
-                                      % (fmt_ms(tl["cur_ms"]), fmt_ms(tl["total_ms"]),
-                                         "是" if tl["playing"] else "否"))
-            self.lbl_tick.config(text="HOST_TICK=%d  LOCAL_TICK=%d   已投递 %d 帧"
-                                      % (tl["host_tick"], tl["local_tick"], tl["delivered"]))
+            self._upd(self.pb, (tl["cur_ms"], total),
+                      maximum=total, value=min(tl["cur_ms"], total))
+            self._upd(self.lbl_time, (tl["cur_ms"], tl["total_ms"], tl["playing"]),
+                      text="%s / %s    播放中: %s"
+                           % (fmt_ms(tl["cur_ms"]), fmt_ms(tl["total_ms"]),
+                              "是" if tl["playing"] else "否"))
+            self._upd(self.lbl_tick, (tl["host_tick"], tl["local_tick"], tl["delivered"]),
+                      text="HOST_TICK=%d  LOCAL_TICK=%d   已投递 %d 帧"
+                           % (tl["host_tick"], tl["local_tick"], tl["delivered"]))
 
-        # 歌词（资源变了才重画）
+        # 歌词：**只在资源换了才重画**（以前靠"读控件首行"比较，首行还带字节数 → 永远不相等 → 每 200ms 重画，抢焦点）
         lyrics = st["lyrics"]
-        if lyrics and (self.txt_lyrics.get("1.0", "2.0").strip() != "// " + lyrics["path"]):
-            self.txt_lyrics.delete("1.0", "end")
-            self.txt_lyrics.insert("end", "// %s（%d 字节）\n\n" % (lyrics["path"], lyrics["size"]))
-            for ln in lyrics["lines"]:
-                mark = {"line": "  ", "trans": "    ↳", "word": "  ~"}[ln["kind"]]
-                tail = "（逐字 %d 词）" % len(ln["words"]) if ln["kind"] == "word" else ""
-                self.txt_lyrics.insert("end", "%s[%s] %s%s\n"
-                                       % (mark, fmt_ms(ln["start_ms"]), ln["text"], tail))
+        if lyrics:
+            key = (lyrics["path"], lyrics["size"], len(lyrics["lines"]))
+            if key != self._lyrics_key:
+                self._lyrics_key = key
+                self._fill_lyrics(lyrics)
 
         # 封面
         cover = st["cover"]
         if cover:
-            self.lbl_cover.config(text="格式=0x%02X  %dx%d  %d 字节  → %s"
-                                       % (cover["format"], cover["w"], cover["h"],
-                                          cover["size"], cover["path"]))
+            self._upd(self.lbl_cover,
+                      (cover["path"], cover["format"], cover["w"], cover["h"], cover["size"]),
+                      text="格式=%s  0x%02X  %dx%d  %d 字节  → %s"
+                           % (FMT_NAMES.get(cover["format"], "?"), cover["format"],
+                              cover["w"], cover["h"], cover["size"], cover["path"]))
             key = (cover["path"], cover["format"], cover["w"], cover["h"], cover["size"])
             if key != self._cover_key:
                 self._cover_key = key
@@ -291,6 +332,17 @@ class MockGui:
             for line in events[self._log_lines:]:
                 self._append_log(line)
             self._log_lines = len(events)
+
+    def _fill_lyrics(self, lyrics):
+        self.txt_lyrics.delete("1.0", "end")
+        self.txt_lyrics.insert("end", "// %s（%d 字节，%d 行）\n\n"
+                               % (lyrics["path"], lyrics["size"], len(lyrics["lines"])))
+        for ln in lyrics["lines"]:
+            mark = {"line": "  ", "trans": "    ↳", "word": "  ~"}[ln["kind"]]
+            tail = "（逐字 %d 词）" % len(ln["words"]) if ln["kind"] == "word" else ""
+            self.txt_lyrics.insert("end", "%s[%s] %s%s\n"
+                                   % (mark, fmt_ms(ln["start_ms"]), ln["text"], tail))
+        self._append_log("歌词区已渲染：%d 行（只在资源更新时重画）" % len(lyrics["lines"]))
 
     def _show_cover(self, cover):
         fmt, w, h, data = cover["format"], cover["w"], cover["h"], cover["data"]
@@ -348,6 +400,8 @@ class MockGui:
 
     def _append_log(self, text):
         self.txt_log.insert("end", text + "\n")
+        if getattr(self.args, "trace", False):
+            print("[gui] %s" % text, flush=True)      # --trace：GUI 侧消息也进控制台日志
         lines = int(self.txt_log.index("end-1c").split(".")[0])
         if lines > 600:
             self.txt_log.delete("1.0", "150.0")
@@ -366,7 +420,11 @@ def parse_args():
     ap.add_argument("--max-resource", type=int, default=262144)
     ap.add_argument("--tick-ms", type=int, default=10)
     ap.add_argument("--art-dir", default="art_recv")
-    ap.add_argument("--cover-format", type=lambda s: int(s, 0), default=0x10)
+    ap.add_argument("--cover-format", type=lambda s: int(s, 0), default=0x01,
+                    help="请求封面时指定的 FORMAT：0x01=JPEG（默认，比 RGB565 小一个数量级）"
+                         "0x02=PNG 0x10=RGB565")
+    ap.add_argument("--trace", action="store_true",
+                    help="把事件同时打印到控制台（GUI 出问题时留日志用）")
     ap.add_argument("--headless", action="store_true", help="不开窗口，只跑服务端（脚本化验证用）")
     ap.add_argument("--seconds", type=float, default=0.0, help="headless 模式跑 N 秒后打印摘要并退出")
     return ap.parse_args()
