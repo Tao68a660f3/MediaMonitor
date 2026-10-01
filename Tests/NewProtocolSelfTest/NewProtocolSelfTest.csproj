@@ -19,6 +19,10 @@
 
   <ItemGroup>
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Codec\*.cs" LinkBase="Codec" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Transport\INewTransport.cs" LinkBase="Transport" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Transport\TcpTransport.cs" LinkBase="Transport" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\NewSendScheduler.cs" LinkBase="Service" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\SessionManager.cs" LinkBase="Service" />
   </ItemGroup>
 
 </Project>

@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using MediaMonitor.Protocol.New.Codec;
+using MediaMonitor.Protocol.New.Service;
+using MediaMonitor.Protocol.New.Transport;
 using NewProtocolSelfTest;
 
 /// <summary>
@@ -288,9 +292,72 @@ internal static class Program
         Check("解析器无报错统计", parser.Stats.CrcErrors == 0 && parser.Stats.DroppedBadLen == 0);
     }
 
-    private static int Main()
+    /* ---------------- 端到端握手（PC ↔ Python mock，对端跑真 C 代码） ---------------- */
+
+    private static async Task<int> TcpHandshakeDemo(string hostPort)
+    {
+        string[] parts = hostPort.Split(':');
+        string host = parts[0];
+        int port = (parts.Length > 1) ? int.Parse(parts[1]) : 9100;
+
+        Console.WriteLine($"[demo] 连接 {host}:{port} ...");
+
+        using var transport = new TcpTransport(host, port);
+        using var scheduler = new NewSendScheduler(transport, frameIntervalMs: 5);
+        scheduler.Start();
+        using var session = new SessionManager(scheduler);
+        var parser = new NpStreamParser();
+
+        transport.DataReceived += data => parser.Feed(data.Span);
+        parser.FrameReceived += f => session.OnFrame(f);
+        session.StateChanged += st =>
+            Console.WriteLine($"[demo] 状态 -> {st}" + (st == ProtocolState.Active ? $"  SessionId=0x{session.SessionId:X8}" : string.Empty));
+        session.BusinessFrame += f => Console.WriteLine($"[demo] 业务帧 T=0x{f.Type:X2} C=0x{f.Code:X2} len={f.PayloadLen}");
+        transport.Disconnected += r => Console.WriteLine($"[demo] 链路断开: {r}");
+
+        if (!await transport.ConnectAsync(3000))
+        {
+            Console.WriteLine("[demo] TCP 连接失败（mock 没在跑？）");
+            return 4;
+        }
+
+        Console.WriteLine("[demo] TCP 已连接，发起 HELLO");
+        session.LinkUp();
+
+        var sw = Stopwatch.StartNew();
+        while (sw.ElapsedMilliseconds < 8000)
+        {
+            session.Tick();
+            await Task.Delay(10);
+            if (session.State == ProtocolState.Active)
+            {
+                await scheduler.WaitDrainedAsync(500);
+                break;
+            }
+        }
+
+        bool ok = (session.State == ProtocolState.Active) && (session.SessionId != 0);
+
+        Console.WriteLine($"[demo] 结果: State={session.State} SessionId=0x{session.SessionId:X8}" +
+                          $" helloTx={session.StatHelloTx} helloRx={session.StatHelloRx} helloAckRx={session.StatHelloAckRx}" +
+                          $" sessStartRx={session.StatSessionStartRx} ackTx={session.StatAckTx}" +
+                          $" sentFrames={scheduler.SentFrames} 对端能力=0x{(session.RemoteCaps?.Caps ?? 0):X8}" +
+                          $" 解析: 帧={parser.Stats.FramesOk} crc错={parser.Stats.CrcErrors} 重同步={parser.Stats.Resyncs}");
+        Console.WriteLine(ok ? "[demo] === 握手成功（PC ↔ 假 ESP32）===" : "[demo] === 握手失败 ===");
+        return ok ? 0 : 5;
+    }
+
+    private static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
+
+        // 端到端握手模式：dotnet run -- --tcp 127.0.0.1:9100
+        // （对端用 A_tools/mock_esp32_new.py，它跑的是 ref_c 编出来的真 C 代码）
+        if ((args.Length >= 2) && (args[0] == "--tcp"))
+        {
+            return TcpHandshakeDemo(args[1]).GetAwaiter().GetResult();
+        }
+
         Console.WriteLine("=== New Protocol V1.1  C# 编解码层自测 ===");
         Console.WriteLine($"HeaderLenFixed={NpConstants.HeaderLenFixed}  MaxHeaderLen={NpConstants.MaxHeaderLen}  " +
                           $"MaxPayloadLen={NpConstants.MaxPayloadLen}  MaxFrameLen={NpConstants.MaxFrameLen}\n");
