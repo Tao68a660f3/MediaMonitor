@@ -1,5 +1,6 @@
 ﻿using MediaMonitor;
 using MediaMonitor.Core;
+using MediaMonitor.Protocol.New.Service;
 using MediaMonitor.Services;
 using MediaMonitor.Tools;
 using System;
@@ -21,6 +22,27 @@ namespace MediaMonitor
             get; private set;
         }
         public static ConfigService? ConfigSvc
+        {
+            get; private set;
+        }
+
+        /// <summary>
+        /// 新协议模式的配置服务（`config.new.json`）：与 Legacy 的 <see cref="ConfigSvc"/> 各自独立，
+        /// 公共项各存一份 —— 唯一的约定是"从当前模式的配置文件读、写回同一个文件"。
+        /// </summary>
+        public static ConfigService<NewProtocolConfig>? NewConfigSvc
+        {
+            get; private set;
+        }
+
+        /// <summary>
+        /// 当前协议模式（**运行期状态，不落盘**）：启动默认新协议，
+        /// 切换见 MainWindow.ProtoMode_Changed（断开 → 换配置 → 重连）。
+        /// </summary>
+        public static ProtocolMode Mode { get; set; } = ProtocolMode.New;
+
+        /// <summary>新协议栈（P2~P5 的服务装配，见 Protocol/New/Service/NewProtocolStack.cs）</summary>
+        public static NewProtocolStack? NewStack
         {
             get; private set;
         }
@@ -62,6 +84,9 @@ namespace MediaMonitor
                 ConfigSvc = new ConfigService();
                 var cfg = ConfigSvc.Current;
 
+                // 新协议模式的配置（config.new.json）：独立文件、独立默认值，公共项各存一份
+                NewConfigSvc = new ConfigService<NewProtocolConfig>("config.new.json");
+
                 // 配置分发（启动时注入一次）：静默项（UI 无入口的 SendIntervalMs 等）只在此刻生效；
                 // 界面有入口的项由 MainWindow.SyncAndSaveConfig() 在保存时再次注入。
                 TransportMgr.ApplyConfig(cfg);
@@ -84,6 +109,10 @@ namespace MediaMonitor
                 // 初始化大脑 (Master)，默认传入一个空的传输层
                 // 等你在 MainWindow 点“开启服务”时，我们再通过 Master.UpdateTransport 换成真正的串口或 UDP
                 Master = new PackageMaster(TransportMgr, Lyrics, Smtc);
+
+                // 新协议栈（Transport → Codec → Session → 各 Service 的装配）。
+                // 创建即订阅 SMTC/歌词数据源；只有 MainWindow 在 New 模式下点了「开始连接」才真正建链路。
+                NewStack = new NewProtocolStack(NewConfigSvc.Current, Smtc, Lyrics);
 
                 // 异步启动 SMTC 服务
                 await Smtc.InitializeAsync();

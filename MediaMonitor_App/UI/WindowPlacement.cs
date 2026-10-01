@@ -35,9 +35,15 @@ namespace MediaMonitor
         /// <summary>
         /// 启动时应用上次保存的窗口布局。没有记录 / 格式非法 / 位置不合理 → 什么都不做（保持系统默认）。
         /// </summary>
-        public static void Apply(Window window, PackageConfig? cfg)
+        public static void Apply(Window window, PackageConfig? cfg) => Apply(window, cfg?.WindowBounds);
+
+        /// <summary>
+        /// 同上，但直接吃 "left,top,width,height" 文本 —— 新协议模式用的是自己的 config.new.json
+        /// （公共项各存一份），因此这里不再绑定具体的配置类型。
+        /// </summary>
+        public static void Apply(Window window, string? boundsText)
         {
-            if (!TryParseBounds(cfg?.WindowBounds, out Rect saved))
+            if (!TryParseBounds(boundsText, out Rect saved))
                 return;
 
             Rect screen = GetVirtualScreen();
@@ -68,16 +74,28 @@ namespace MediaMonitor
             if (cfg == null)
                 return;
 
+            string? bounds = CaptureBounds(window);
+            if (bounds != null)
+                cfg.WindowBounds = bounds;
+        }
+
+        /// <summary>
+        /// 捕获窗口布局文本（无效时返回 <c>null</c>）。调用方决定写进哪一份配置 ——
+        /// Legacy 与 New 各存一份 <c>WindowBounds</c>，因此这里只负责算。
+        /// </summary>
+        public static string? CaptureBounds(Window window)
+        {
             Rect bounds = window.RestoreBounds;
             if (bounds.IsEmpty || double.IsNaN(bounds.Width) || bounds.Width <= 0 ||
                 double.IsNaN(bounds.Height) || bounds.Height <= 0)
             {
                 Debug.WriteLine($"[界面] 窗口还原边界无效 {Format(bounds)}，本次不保存窗口布局");
-                return;
+                return null;
             }
 
-            cfg.WindowBounds = Format(bounds);
-            Debug.WriteLine($"[界面] 已记录窗口布局 {cfg.WindowBounds}");
+            string text = Format(bounds);
+            Debug.WriteLine($"[界面] 已记录窗口布局 {text}");
+            return text;
         }
 
         // === 纯函数：解析 / 判定 / 收敛 ===

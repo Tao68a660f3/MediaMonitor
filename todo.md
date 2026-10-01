@@ -53,9 +53,26 @@
 
 ## 🖼️ 封面支持（面向新协议；与 legacy 的 0xAA/0xAB 无关）
 - [x] **抓取与缓存**：`SmtcService.CurrentThumbnail` / `OnThumbnailUpdated`（SHA256 内容去重 + 切歌/切会话时丢弃过期结果）。
-- [x] **压缩到指定分辨率**：`Tools/ArtworkProcessor.ProcessToJpeg/ProcessToPng`（等比填满 + 居中裁剪，输出尺寸严格等于目标，不引入新依赖）。
-- [x] **验证手段**：封面更新时弹窗显示 600×600 压缩结果（`UI/ArtworkPreviewWindow`，开关 `MainWindow.ShowArtworkPreviewOnUpdate`，联调完成后整体删除）。
-- [ ] **下发**：等新协议定稿后接线（分片、清场帧、重连补发等均未实现；当前 legacy 协议不承载封面）。
+- [x] **压缩到指定分辨率**：`Tools/ArtworkProcessor.ProcessToJpeg/ProcessToPng/ProcessToRgb565`（等比填满 + 居中裁剪，输出尺寸严格等于目标，不引入新依赖）。
+- [x] **验证手段**：主界面「Show Artwork」按钮按需弹窗看 600×600 压缩结果（`UI/ArtworkPreviewWindow`）。
+- [x] **下发**：新协议 V1.1 的 `ALBUMCOVER` 资源下发已接线（尺寸/格式由对端 `REQUEST` 决定；无封面回 `FORMAT=NONE` 空资源；未就绪回 `ACK(NOT_READY)`）。
+
+## 📡 新协议 V1.1（`5A A5`，与 Legacy 双轨共存）
+实施计划与规范：`RLCCProject/Q_Series/Protocol/protocolImplementation.md` / `protocolDesign_1.1_final.md`。
+
+- [x] **P0–P2** 准备 + 编解码层 + 会话层（C# `Protocol/New/**`；C `ref_c/**`；两端向量自检逐字节一致）
+- [x] **P3** 实时数据：MEDIA / TIMELINE / CONTROL（回控映射 0xA1/0xA2/0xA3）
+- [x] **P4** 资源传输：歌词池 + 封面（JPEG/PNG/RGB565），单资源互斥 + ABORT + 对端 `MAX_RESOURCE_SIZE` 预校验
+- [x] **P5** 延迟测量 + 时间轴投递层（`Sync_OnPacketAt` 对接点）
+- [x] **P6** UI 与模式切换：
+    - [x] `UI/ProtocolStackView.cs`（`IProtocolStackView` + Legacy/New 两个实现）
+    - [x] `Protocol/New/Service/NewProtocolStack.cs` 装配（Transport→Codec→Session→各 Service）
+    - [x] `Protocol/New/Transport/ComTransport.cs`（USB CDC 复用 `SerialService`）
+    - [x] 新面板 + 协议模式单选 + 共用按钮行（连接/测延迟/Show Artwork；对时按钮仅 Legacy 显示）
+    - [x] `config.new.json`（与 `config.json` 各存一份，公共项各留一份；`ConfigService<T>` 泛型化，Legacy 用法零改动）
+    - [x] 只读区：会话状态 / 对端能力（来自 `HELLO_ACK`）/ 延迟
+- [ ] **P7 收尾**：`technical.md` / `readme.md` 的新协议章节细化；`np_vectors.json` 单一事实源 + 生成脚本（目前两侧各手抄同一份附录 A，互为验证）
+- [ ] **ESP32 固件**：把 `ref_c/` 接进真实固件并做硬件联调（当前只到 Python mock：mock 通过 ctypes 跑**真 C 代码**）
 
 ---
 **当前状态：**

@@ -3,11 +3,12 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="媒体同步调试终端 V2.6.4" Height="850" Width="520" Background="#F0F0F0">
     <Grid Margin="10">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>   <!-- 0 媒体源 -->
+            <RowDefinition Height="Auto"/>   <!-- 1 播放信息卡 -->
+            <RowDefinition Height="Auto"/>   <!-- 2 协议模式 + 设置面板 -->
+            <RowDefinition Height="Auto"/>   <!-- 3 操作按钮行（两种模式共用） -->
+            <RowDefinition Height="Auto"/>   <!-- 4 日志标题 -->
+            <RowDefinition Height="*"/>      <!-- 5 日志 -->
         </Grid.RowDefinitions>
 
         <DockPanel Grid.Row="0" Margin="0,0,0,10">
@@ -35,7 +36,98 @@
         </Border>
 
         <StackPanel Grid.Row="2" TextBox.KeyDown="Global_TextBox_KeyDown">
-            <Expander Header="硬件与路径设置" IsExpanded="True" Background="Transparent">
+            <!-- 协议模式：运行期选择（不落盘）。切模式 = 断开 → 重注入该模式配置 → 重连 -->
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBlock Text="协议模式:" VerticalAlignment="Center" FontWeight="Bold" Margin="0,0,10,0"/>
+                <RadioButton x:Name="RbProtoNew" Content="New (5A A5)" GroupName="ProtoMode" IsChecked="True" Margin="0,0,12,0" Click="ProtoMode_Changed" Checked="ProtoMode_Changed"/>
+                <RadioButton x:Name="RbProtoLegacy" Content="Legacy (0xAA / 0xAB)" GroupName="ProtoMode" Click="ProtoMode_Changed" Checked="ProtoMode_Changed"/>
+                <TextBlock Text="（切换会先断开当前链路）" FontSize="10" Foreground="Gray" VerticalAlignment="Center" Margin="10,0,0,0"/>
+            </StackPanel>
+
+            <!-- ==================== 新协议面板（规范 V1.1） ==================== -->
+            <Expander x:Name="PanelNew" Header="新协议设置" IsExpanded="True" Background="Transparent">
+                <Border Background="#E8E8E8" Padding="10" CornerRadius="5" Margin="0,5">
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                            <TextBlock Text="传输方式:" VerticalAlignment="Center" FontWeight="Bold" Margin="0,0,10,0"/>
+                            <RadioButton x:Name="RbNewCom" Content="串口 (USB CDC)" IsChecked="True" GroupName="NewTransMode" Margin="0,0,10,0" Click="NewTransMode_Changed"/>
+                            <RadioButton x:Name="RbNewTcp" Content="TCP (ESP32 为服务端)" GroupName="NewTransMode" Click="NewTransMode_Changed"/>
+                        </StackPanel>
+
+                        <Grid x:Name="GridNewCom" Margin="0,0,0,8" Visibility="Visible">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*"/>
+                                <ColumnDefinition Width="1*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Margin="2">
+                                <TextBlock Text="串口号:" FontSize="10" Foreground="Gray"/>
+                                <ComboBox x:Name="ComboNewPorts" SelectionChanged="ComboNewConfig_SelectionChanged"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Margin="2">
+                                <TextBlock Text="波特率:" FontSize="10" Foreground="Gray"/>
+                                <ComboBox x:Name="ComboNewBaud" IsEditable="True" SelectionChanged="ComboNewConfig_SelectionChanged" LostFocus="NewNumberTextBox_LostFocus">
+                                    <ComboBoxItem Content="115200" IsSelected="True"/>
+                                    <ComboBoxItem Content="921600"/>
+                                </ComboBox>
+                            </StackPanel>
+                        </Grid>
+                        <Grid x:Name="GridNewTcp" Margin="0,0,0,8" Visibility="Collapsed">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*"/>
+                                <ColumnDefinition Width="1*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Margin="2">
+                                <TextBlock Text="ESP32 IP 地址:" FontSize="10" Foreground="Gray"/>
+                                <TextBox x:Name="TxtNewIp" Text="127.0.0.1" LostFocus="TxtNewIp_LostFocus" VerticalContentAlignment="Center" Height="22"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Margin="2">
+                                <TextBlock Text="端口:" FontSize="10" Foreground="Gray"/>
+                                <TextBox x:Name="TxtNewPort" Text="9100" PreviewTextInput="OnlyNumber_PreviewTextInput" DataObject.Pasting="NumberTextBox_Pasting" LostFocus="NewNumberTextBox_LostFocus" VerticalContentAlignment="Center" Height="22"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <UniformGrid Columns="2" Margin="0,0,0,8">
+                            <StackPanel Orientation="Horizontal" Margin="0,2">
+                                <TextBlock Text="时间轴间隔 (ms):" VerticalAlignment="Center" Width="100"/>
+                                <TextBox x:Name="TxtNewSyncInterval" Text="500" Width="60" PreviewTextInput="OnlyNumber_PreviewTextInput" DataObject.Pasting="NumberTextBox_Pasting" LostFocus="NewNumberTextBox_LostFocus"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,2">
+                                <TextBlock Text="同步偏移 (ms):" VerticalAlignment="Center" Width="100"/>
+                                <TextBox x:Name="TxtNewSyncOffset" Text="10" Width="60" PreviewTextInput="OnlyNumber_PreviewTextInput" DataObject.Pasting="NumberTextBox_Pasting" LostFocus="NewNumberTextBox_LostFocus"/>
+                            </StackPanel>
+                        </UniformGrid>
+
+                        <StackPanel Margin="2,2,2,8">
+                            <TextBlock Text="歌词搜索目录:" FontSize="10" Foreground="Gray"/>
+                            <DockPanel>
+                                <Button x:Name="BtnNewBrowse" Content="浏览..." DockPanel.Dock="Right" Width="60" Margin="5,0,0,0" Click="BtnNewBrowse_Click"/>
+                                <TextBox x:Name="TxtNewLrcPath" IsReadOnly="True" VerticalContentAlignment="Center" Height="22"/>
+                            </DockPanel>
+                        </StackPanel>
+
+                        <!-- 只读区：会话状态 / 对端能力 / 延迟（只显示，不给设） -->
+                        <Border Background="#F7F7F7" BorderBrush="#D0D0D0" BorderThickness="1" Padding="8" CornerRadius="4">
+                            <StackPanel>
+                                <DockPanel>
+                                    <TextBlock Text="会话状态:" FontSize="10" Foreground="Gray" Width="58" VerticalAlignment="Top"/>
+                                    <TextBlock x:Name="TxtNewSession" Text="未连接" TextWrapping="Wrap"/>
+                                </DockPanel>
+                                <DockPanel Margin="0,4,0,0">
+                                    <TextBlock Text="对端能力:" FontSize="10" Foreground="Gray" Width="58" VerticalAlignment="Top"/>
+                                    <TextBlock x:Name="TxtNewCaps" Text="（尚未收到 HELLO_ACK）" TextWrapping="Wrap"/>
+                                </DockPanel>
+                                <DockPanel Margin="0,4,0,0">
+                                    <TextBlock Text="延迟:" FontSize="10" Foreground="Gray" Width="58" VerticalAlignment="Top"/>
+                                    <TextBlock x:Name="TxtNewLatency" Text="（未测量）" TextWrapping="Wrap"/>
+                                </DockPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </Border>
+            </Expander>
+
+            <!-- ==================== Legacy 面板（已封存，仅维护） ==================== -->
+            <Expander x:Name="PanelLegacy" Header="硬件与路径设置" IsExpanded="True" Background="Transparent" Visibility="Collapsed">
                 <Border Background="#E8E8E8" Padding="10" CornerRadius="5" Margin="0,5">
                     <StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
@@ -43,7 +135,6 @@
                             <RadioButton x:Name="RbSerial" Content="串口模式" IsChecked="True" GroupName="TransMode" Margin="0,0,10,0" Click="TransMode_Changed"/>
                             <RadioButton x:Name="RbUdp" Content="UDP网络" GroupName="TransMode" Click="TransMode_Changed"/>
                         </StackPanel>
-
                         <Grid x:Name="GridSerialConfig" Margin="0,0,0,10" Visibility="Visible">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="2*"/>
@@ -78,29 +169,13 @@
                             </StackPanel>
                         </Grid>
 
-                        <DockPanel Margin="2,0,2,10">
-                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <TextBlock Text="数据编码:" FontSize="10" Foreground="Gray" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                <ComboBox x:Name="ComboEncoding" SelectionChanged="ComboConfig_SelectionChanged" Width="100" VerticalContentAlignment="Center">
-                                    <ComboBoxItem Content="UTF-8" IsSelected="True"/>
-                                    <ComboBoxItem Content="GB2312"/>
-                                </ComboBox>
-                            </StackPanel>
-
-                            <!-- 按钮组：BtnSyncTime 原本是 DockPanel 的末位元素，靠"填充剩余空间 + 右对齐"实现右对齐，
-                                 新增按钮后必须包进右停靠容器，否则会退化成左对齐 -->
-                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
-                                <Button x:Name="BtnLatencyTest" Content="测延迟" Click="BtnLatencyTest_Click"
-                                    Width="120" Height="24" Margin="0,0,5,0" FontSize="11"
-                                    Background="#2D7D46" Foreground="White" BorderThickness="0" Cursor="Hand"
-                                    ToolTip="全链路单向延迟测量：Base(固化延迟) / Avg(平均) / Jitter(抖动)"/>
-                                <Button x:Name="BtnSyncTime" Content="同步系统时间 (0x20)" Click="BtnSyncTime_Click"
-                                    Width="130" Height="24"
-                                    Background="#0078D7" Foreground="White" BorderThickness="0" Cursor="Hand">
-                                </Button>
-
-                            </StackPanel>
-                        </DockPanel>
+                        <StackPanel Orientation="Horizontal" Margin="2,0,2,10">
+                            <TextBlock Text="数据编码:" FontSize="10" Foreground="Gray" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <ComboBox x:Name="ComboEncoding" SelectionChanged="ComboConfig_SelectionChanged" Width="100" VerticalContentAlignment="Center">
+                                <ComboBoxItem Content="UTF-8" IsSelected="True"/>
+                                <ComboBoxItem Content="GB2312"/>
+                            </ComboBox>
+                        </StackPanel>
 
                         <StackPanel Margin="2,5,2,10">
                             <TextBlock Text="歌词搜索目录:" FontSize="10" Foreground="Gray"/>
@@ -109,7 +184,6 @@
                                 <TextBox x:Name="TxtLrcPath" Text="C:\Lyrics" IsReadOnly="True" VerticalContentAlignment="Center" Height="22"/>
                             </DockPanel>
                         </StackPanel>
-
                         <WrapPanel Margin="0,8">
                             <CheckBox x:Name="ChkAdvancedMode" Content="高级协议(0xAA)" Click="CheckBox_Click" IsChecked="True" Margin="0,0,10,0"/>
                             <CheckBox x:Name="ChkIncremental" Content="增量差分" Click="CheckBox_Click" IsChecked="True" Margin="0,0,10,0"/>
@@ -141,16 +215,33 @@
                                 <TextBox x:Name="TxtUpdateRate" Text="50" Width="40" PreviewTextInput="OnlyNumber_PreviewTextInput" DataObject.Pasting="NumberTextBox_Pasting" LostFocus="NumberTextBox_LostFocus"/>
                             </StackPanel>
                         </UniformGrid>
-
-                        <Button x:Name="BtnConnect" Content="开始连接" Click="BtnConnect_Click" Height="35" Background="#0078D7" Foreground="White" BorderThickness="0" FontWeight="Bold"/>
                     </StackPanel>
                 </Border>
             </Expander>
         </StackPanel>
 
-        <TextBlock Grid.Row="3" Text="真·协议解析流 (TX):" FontWeight="Bold" Margin="0,10,0,5" Foreground="#444444"/>
+        <!-- ==================== 操作按钮（两种模式共用） ==================== -->
+        <WrapPanel Grid.Row="3" Margin="0,8,0,0">
+            <Button x:Name="BtnConnect" Content="开始连接" Click="BtnConnect_Click"
+                    Height="32" Width="120" Margin="0,0,8,0"
+                    Background="#0078D7" Foreground="White" BorderThickness="0" FontWeight="Bold" Cursor="Hand"/>
+            <Button x:Name="BtnLatencyTest" Content="测延迟" Click="BtnLatencyTest_Click"
+                    Height="32" Width="100" Margin="0,0,8,0"
+                    Background="#2D7D46" Foreground="White" BorderThickness="0" Cursor="Hand"
+                    ToolTip="全链路单向延迟测量：Base(固化延迟) / Avg(平均) / Jitter(抖动)"/>
+            <Button x:Name="BtnSyncTime" Content="同步系统时间 (0x20)" Click="BtnSyncTime_Click"
+                    Height="32" Width="150" Margin="0,0,8,0" Visibility="Collapsed"
+                    Background="#0078D7" Foreground="White" BorderThickness="0" Cursor="Hand"
+                    ToolTip="Legacy 专有（0x20 时间同步包），新协议模式不显示"/>
+            <Button x:Name="BtnShowArtwork" Content="Show Artwork" Click="BtnShowArtwork_Click"
+                    Height="32" Width="130"
+                    Background="#555555" Foreground="White" BorderThickness="0" Cursor="Hand"
+                    ToolTip="弹窗查看当前 SMTC 封面（按 600×600 压缩显示，与协议模式无关）"/>
+        </WrapPanel>
 
-        <RichTextBox Grid.Row="4" x:Name="HexPreview" Background="#1E1E1E" Foreground="#CCCCCC" FontFamily="Consolas" IsReadOnly="True" VerticalScrollBarVisibility="Auto">
+        <TextBlock Grid.Row="4" Text="真·协议解析流 (TX):" FontWeight="Bold" Margin="0,10,0,5" Foreground="#444444"/>
+
+        <RichTextBox Grid.Row="5" x:Name="HexPreview" Background="#1E1E1E" Foreground="#CCCCCC" FontFamily="Consolas" IsReadOnly="True" VerticalScrollBarVisibility="Auto">
             <FlowDocument>
                 <Paragraph>
                     <Run Text="等待串口数据发送..." Foreground="#555555"/>
@@ -159,3 +250,5 @@
         </RichTextBox>
     </Grid>
 </Window>
+
+

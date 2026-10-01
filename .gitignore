@@ -361,3 +361,6 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# 新协议 mock 收到的资源落盘目录（A_tools/mock_esp32_new.py --art-dir 的产物）
+MediaMonitor_App/A_tools/art_recv/

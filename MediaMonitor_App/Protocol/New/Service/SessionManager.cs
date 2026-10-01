@@ -261,9 +261,12 @@ namespace MediaMonitor.Protocol.New.Service
         public void Tick()
         {
             long now = Now;
+            ProtocolState before;
 
             lock (_gate)
             {
+                before = State;
+
                 if (State == ProtocolState.Handshake || State == ProtocolState.WaitSessionStart)
                 {
                     if (now - _timerMs >= HelloTimeoutMs)
@@ -311,7 +314,14 @@ namespace MediaMonitor.Protocol.New.Service
                 }
             }
 
-            RaiseStateChanged();
+            // 只有"状态真的变了"才通知。
+            // Tick() 是 10ms 的周期驱动，只负责"时间条件"（HELLO 重发 / ACK 超时重传 / 握手判死）——
+            // 状态跃迁本身仍然由 OnFrame() 的事件驱动；若这里无条件通知，
+            // 上层会把"心跳跑了一拍"误当成"刚进入 Active"，每秒重发上百帧（实测把 500ms 打成 ~50 帧/秒）。
+            if (State != before)
+            {
+                RaiseStateChanged();
+            }
         }
 
         private void HandleAck(uint ackedSeq, byte status)

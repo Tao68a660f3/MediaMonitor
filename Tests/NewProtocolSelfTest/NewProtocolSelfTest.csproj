@@ -31,10 +31,19 @@
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\LyricResourceBuilder.cs" LinkBase="Service" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\ArtworkResourceBuilder.cs" LinkBase="Service" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\LatencyManager.cs" LinkBase="Service" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\OffsetTimelineSource.cs" LinkBase="Service" />
     <!-- 业务数据源（纯逻辑，无 WPF 依赖）：歌词解析 + Legacy 帧构造 + 封面重编码 -->
     <Compile Include="..\..\MediaMonitor_App\Services\LyricService.cs" LinkBase="App" />
     <Compile Include="..\..\MediaMonitor_App\Tools\PackageBuilder.cs" LinkBase="App" />
     <Compile Include="..\..\MediaMonitor_App\Tools\ArtworkProcessor.cs" LinkBase="App" />
+    <!-- 配置层（P6）：泛型容错读写 + 新协议配置 + 运行期模式枚举 -->
+    <Compile Include="..\..\MediaMonitor_App\Core\PackageConfig.cs" LinkBase="App" />
+    <Compile Include="..\..\MediaMonitor_App\Core\ProtocolMode.cs" LinkBase="App" />
+    <Compile Include="..\..\MediaMonitor_App\Core\NewProtocolConfig.cs" LinkBase="App" />
+    <Compile Include="..\..\MediaMonitor_App\Services\ConfigService.cs" LinkBase="App" />
+    <!-- SMTC 真源（P6 探针用：探针模式下用真实播放器数据量发包节奏） -->
+    <Compile Include="..\..\MediaMonitor_App\Services\SmtcService.cs" LinkBase="App" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\SmtcTimelineSource.cs" LinkBase="Service" />
     <!-- 注意：SmtcTimelineSource.cs 不链接（它依赖 WPF 应用里的 SmtcService） -->
   </ItemGroup>
 

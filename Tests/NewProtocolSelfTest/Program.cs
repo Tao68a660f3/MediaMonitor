@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using MediaMonitor.Core;
 using MediaMonitor.Protocol.New.Codec;
 using MediaMonitor.Protocol.New.Service;
 using MediaMonitor.Protocol.New.Transport;
@@ -547,6 +548,217 @@ internal static class Program
         Check("R9 白 = FF FF", (img.Data[6] == 0xFF) && (img.Data[7] == 0xFF));
     }
 
+    /* ---------------- R10：时间轴同步偏移包装（SyncCurrentOffsetMs） ---------------- */
+
+    /// <summary>固定快照的数据源（R10 用：不依赖 SMTC，也就没有时间漂移）</summary>
+    private sealed class FixedTimelineSource : ITimelineSource
+    {
+        private readonly TimelineSnapshot? _snap;
+
+        public FixedTimelineSource(TimelineSnapshot? snap) => _snap = snap;
+
+        public TimelineSnapshot? GetSnapshot() => _snap;
+    }
+
+    private static void TestOffsetSource()
+    {
+        Console.WriteLine("R10 时间轴同步偏移（SyncCurrentOffsetMs）");
+
+        var src = new FixedTimelineSource(new TimelineSnapshot(true, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(100)));
+
+        var pass = new OffsetTimelineSource(src, 0).GetSnapshot();
+        Check("偏移 0 → 位置不动", (pass is { } p0) && (Math.Abs(p0.Position.TotalMilliseconds - 10000) < 0.001));
+
+        var lead = new OffsetTimelineSource(src, 250).GetSnapshot();
+        Check("偏移 +250ms → 位置前移 250ms（提前发出）",
+              (lead is { } p1) && (Math.Abs(p1.Position.TotalMilliseconds - 10250) < 0.001));
+        Check("偏移不改变 IS_PLAYING / 总时长",
+              (lead is { } p2) && p2.IsPlaying && (Math.Abs(p2.Duration.TotalMilliseconds - 100000) < 0.001));
+
+        var negSrc = new FixedTimelineSource(new TimelineSnapshot(true, TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(100)));
+        var behind = new OffsetTimelineSource(negSrc, -500).GetSnapshot();
+        Check("偏移 -500ms 且位置仅 100ms → 夹到 0（不出现负进度）",
+              (behind is { } p3) && (p3.Position == TimeSpan.Zero));
+
+        var none = new OffsetTimelineSource(new FixedTimelineSource(null), 100).GetSnapshot();
+        Check("数据源为 null（无会话）→ 仍为 null（发包层据此不发时间轴）", none == null);
+    }
+
+    /* ---------------- R11：配置容错 + 双配置文件（P6） ---------------- */
+
+    private static string ConfigPath(string fileName)
+        => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, fileName);
+
+    private static void WriteConfig(string fileName, string json)
+        => File.WriteAllText(ConfigPath(fileName), json, new UTF8Encoding(false));
+
+    private static void TestConfig()
+    {
+        Console.WriteLine("R11 配置容错（config.json / config.new.json 各自独立）");
+
+        const string newFile = "np_cfg_new_test.json";
+        const string legacyFile = "np_cfg_legacy_test.json";
+
+        try
+        {
+            /* (a) 文件不存在 → 全套默认值 */
+            File.Delete(ConfigPath(newFile));
+            var fresh = new ConfigService<NewProtocolConfig>(newFile).Current;
+            Check("(a) 无文件 → New 默认（Com / COM3 / 115200 / 500ms）",
+                  (fresh.TransportMode == NewTransportType.Com) && (fresh.ComPortName == "COM3") &&
+                  (fresh.BaudRate == 115200) && (fresh.SyncIntervalMs == 500));
+
+            /* (b) 单项非法 → 只回退该项；未知键忽略；枚举可用字符串写 */
+            WriteConfig(newFile, """
+                {
+                  // 注释与尾随逗号都应被容忍
+                  "TransportMode": "Tcp",
+                  "TcpRemotePort": 9200,
+                  "SyncIntervalMs": "abc",
+                  "SyncCurrentOffsetMs": 33,
+                  "LyricFolder": "M:\\Lyrics_New",
+                  "NoSuchKey": 123,
+                }
+                """);
+
+            var mixed = new ConfigService<NewProtocolConfig>(newFile).Current;
+            Check("(b1) 枚举写成字符串 TransportMode=Tcp 生效", mixed.TransportMode == NewTransportType.Tcp);
+            Check("(b2) 合法项 TcpRemotePort / LyricFolder 生效",
+                  (mixed.TcpRemotePort == 9200) && (mixed.LyricFolder == "M:\\Lyrics_New"));
+            Check("(b3) 非法项 SyncIntervalMs 只回退自己（500），不牵连同文件其他项",
+                  (mixed.SyncIntervalMs == 500) && (mixed.SyncCurrentOffsetMs == 33));
+            Check("(b4) 未知键被忽略且不影响解析（ComPortName 仍是默认 COM3）", mixed.ComPortName == "COM3");
+
+            /* (c) 键名大小写不敏感 */
+            WriteConfig(newFile, "{ \"comportname\": \"COM9\", \"syncintervalms\": 750 }");
+            var ci = new ConfigService<NewProtocolConfig>(newFile).Current;
+            Check("(c) 键名大小写不敏感", (ci.ComPortName == "COM9") && (ci.SyncIntervalMs == 750));
+
+            /* (d) 结构损坏 → 整体回退默认（只有这一种情况会整份丢弃） */
+            WriteConfig(newFile, "{ \"SyncIntervalMs\": 750,  ");
+            var broken = new ConfigService<NewProtocolConfig>(newFile).Current;
+            Check("(d) JSON 结构损坏 → 整体回退默认", broken.SyncIntervalMs == 500);
+
+            /* (e) 写盘 → 重新加载一致（WindowBounds 这类运行期字段不会丢） */
+            var svc = new ConfigService<NewProtocolConfig>(newFile);
+            svc.Current.ComPortName = "COM7";
+            svc.Current.SyncIntervalMs = 250;
+            svc.Current.WindowBounds = "100,120,520,850";
+            svc.Save();
+
+            var reload = new ConfigService<NewProtocolConfig>(newFile).Current;
+            Check("(e) 保存后重载一致（ComPortName / SyncIntervalMs / WindowBounds）",
+                  (reload.ComPortName == "COM7") && (reload.SyncIntervalMs == 250) &&
+                  (reload.WindowBounds == "100,120,520,850"));
+
+            /* (f) Legacy 服务泛型化后行为不变 */
+            File.Delete(ConfigPath(legacyFile));
+            var legacy = new ConfigService(legacyFile);
+            Check("(f1) 无文件 → Legacy 默认（Serial / 115200 / 高级模式）",
+                  (legacy.Current.TransportMode == TransportType.Serial) &&
+                  (legacy.Current.BaudRate == 115200) && legacy.Current.IsAdvancedMode);
+
+            legacy.Current.SerialPortName = "COM11";
+            legacy.Update(legacy.Current);
+            var legacyReload = new ConfigService(legacyFile).Current;
+            Check("(f2) Legacy 保存后重载一致", legacyReload.SerialPortName == "COM11");
+            Check("(f3) 两份配置各自独立（互不串味）",
+                  (legacyReload.SyncIntervalMs == 500) && (legacyReload.LyricFolder != "M:\\Lyrics_New"));
+        }
+        finally
+        {
+            File.Delete(ConfigPath(newFile));
+            File.Delete(ConfigPath(legacyFile));
+        }
+    }
+
+    /* ---------------- SMTC 真源探针：量发包节奏与"分因"（P6 抖动问题定位） ---------------- */
+
+    /// <summary>
+    /// 用**真实 SMTC**作为时间轴数据源，连到 mock 跑 N 秒，打印发包总数与分因统计。
+    /// 用途：验证"数据源抖动"是否会把 500ms 节奏打成高频（护栏是否生效）。
+    /// </summary>
+    private static async Task<int> SmtcTimelineProbe(string hostPort, int seconds)
+    {
+        string[] parts = hostPort.Split(':');
+        string host = parts[0];
+        int port = (parts.Length > 1) ? int.Parse(parts[1]) : 9100;
+
+        var smtc = new SmtcService();
+        await smtc.InitializeAsync();
+        await Task.Delay(2000);
+        Console.WriteLine($"[probe] SMTC 就绪：title={smtc.CurrentTitle ?? "(无)"}  thumbnail={(smtc.CurrentThumbnail?.Length ?? 0)}B");
+        using var transport = new TcpTransport(host, port);
+        using var scheduler = new NewSendScheduler(transport, frameIntervalMs: 5);
+        scheduler.Start();
+        using var session = new SessionManager(scheduler);
+        var parser = new NpStreamParser();
+        using var pump = new TimelinePump(session,
+                                          new OffsetTimelineSource(new SmtcTimelineSource(smtc), 10),
+                                          intervalMs: 500);
+
+        transport.DataReceived += d => parser.Feed(d.Span);
+        parser.FrameReceived += f => session.OnFrame(f);
+
+        // 与会话栈同样的消费姿势：**只在"进入 Active"那一次**做事
+        //（会话层的通知可能在状态未变时也会来，不能当成"刚进入"）
+        ProtocolState prevState = ProtocolState.Idle;
+        session.StateChanged += st =>
+        {
+            bool entered = st != prevState;
+            prevState = st;
+
+            if (!entered || (st != ProtocolState.Active))
+            {
+                return;
+            }
+
+            session.SendRealtime(NpType.Media, NpMediaCode.Metadata,
+                                 new MediaPublisher(session).BuildPayload(smtc.CurrentTitle, smtc.CurrentArtist, smtc.CurrentAlbum));
+            pump.PublishNow();
+            pump.Start();
+        };
+
+        if (!await transport.ConnectAsync(3000))
+        {
+            Console.WriteLine("[probe] TCP 连接失败（mock 没在跑？）");
+            return 4;
+        }
+
+        session.LinkUp();
+
+        var sw = Stopwatch.StartNew();
+        long lastTx = 0;
+        Console.WriteLine($"[probe] 运行 {seconds}s；每 5s 打印发包节奏（MinGapMs={pump.MinGapMs}）");
+
+        while (sw.Elapsed.TotalSeconds < seconds)
+        {
+            session.Tick();
+            await Task.Delay(10);
+
+            if ((sw.ElapsedMilliseconds / 5000) != (sw.ElapsedMilliseconds - 10) / 5000)
+            {
+                long tx = pump.StatTimelineTx;
+                Console.WriteLine($"[probe] t={sw.Elapsed.TotalSeconds,5:0.0}s  TIMELINE={tx}（本段 {tx - lastTx}）" +
+                                  $" due={pump.StatSentDue} playing变={pump.StatSentPlayingChange} seek={pump.StatSentSeek} 即时={pump.StatImmediateTx}");
+                lastTx = tx;
+            }
+        }
+
+        double rate = pump.StatTimelineTx / Math.Max(0.001, sw.Elapsed.TotalSeconds);
+        Console.WriteLine($"[probe] 合计 {sw.Elapsed.TotalSeconds:0.0}s  TIMELINE={pump.StatTimelineTx}（{rate:0.00} 帧/秒）" +
+                          $" 会话={session.State}");
+        Console.WriteLine($"[probe] 发送面：调度器已发={scheduler.SentFrames} 丢弃={scheduler.DroppedFrames}" +
+                          $"  HELLO={session.StatHelloTx}/收 {session.StatHelloAckRx}  ACK发={session.StatAckTx}/收={session.StatAckRx}" +
+                          $"  重传超时={session.StatAckTimeout}  业务帧收={session.StatBusinessFrames}");
+        Console.WriteLine($"[probe] 接收面：解析成功={parser.Stats.FramesOk} crc错={parser.Stats.CrcErrors}" +
+                          $" 重同步={parser.Stats.Resyncs} 坏长度={parser.Stats.DroppedBadLen} 字节={parser.Stats.BytesIn}" +
+                          $"  发送队列积压={scheduler.PendingCount}");
+        Console.WriteLine("[probe] 判据：2 帧/秒左右为正常（500ms 节拍）；若远高于此说明抖动护栏/数据源仍需处理");
+
+        return (rate < 6.0) ? 0 : 5;
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -557,6 +769,14 @@ internal static class Program
         if ((args.Length >= 2) && (args[0] == "--tcp"))
         {
             return TcpHandshakeDemo(args[1]).GetAwaiter().GetResult();
+        }
+
+        // SMTC 真源探针：dotnet run -- --tcp-smtc 127.0.0.1:9100 20
+        // （P6 定位"数据源抖动把 500ms 节拍打成高频"用；WinRT 调用放到线程池上避免 STA 死锁）
+        if ((args.Length >= 2) && (args[0] == "--tcp-smtc"))
+        {
+            int secs = (args.Length >= 3) ? int.Parse(args[2]) : 20;
+            return Task.Run(() => SmtcTimelineProbe(args[1], secs)).GetAwaiter().GetResult();
         }
 
         Console.WriteLine("=== New Protocol V1.1  C# 编解码层自测 ===");
@@ -576,6 +796,10 @@ internal static class Program
         TestSticky();
         Console.WriteLine();
         TestRgb565();
+        Console.WriteLine();
+        TestOffsetSource();
+        Console.WriteLine();
+        TestConfig();
 
         Console.WriteLine($"\n=== 通过 {_pass} 项，失败 {_fail} 项 ===");
         return _fail == 0 ? 0 : 1;

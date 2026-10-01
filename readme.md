@@ -152,4 +152,24 @@ python mock_esp32_stm32.py --ip 127.0.0.1 --port 8080    # 同机调试：上位
 
 ---
 
+## 📡 新协议 V1.1（`5A A5`）：与 Legacy 双轨共存
+
+界面上新增「协议模式」单选，两套协议栈**各自独立、互不影响**：
+
+| | Legacy（`0xAA` / `0xAB`） | New V1.1（`5A A5`） |
+| :--- | :--- | :--- |
+| 定位 | 已封存，仅维护 | 新硬件目标（ESP32 + USB CDC / Wi-Fi） |
+| 传输 | 串口 / UDP | 串口(USB CDC) / TCP（**ESP32 是服务端、PC 是客户端**） |
+| 配置文件 | `config.json` | `config.new.json`（公共项各存一份） |
+| 能力 | 媒体/歌词同步、按键回控、延迟测试 | + 资源下发（歌词池 / 封面 JPEG·PNG·RGB565）、会话握手与重连、对端能力协商 |
+| 时间轴 | 同步包 | `TIMELINE`（500ms 节拍，含 `HOST_TICK_MS`，供硬件端做同步算法） |
+
+* **切换规则**：切模式 = 断开当前链路 → 换配置 → （原本连着就）用新模式重连；连接期间单选被禁用；
+* **协议模式本身不落盘**（启动默认 New）；
+* 规范与实施计划：`RLCCProject/Q_Series/Protocol/protocolDesign_1.1_final.md`、`protocolImplementation.md`；
+* 无硬件调试：对端跑 `MediaMonitor_App/A_tools/mock_esp32_new.py`（**协议字节层是真 C 代码**，来自 `ref_c/`，ctypes 调用），上位机选 New + TCP + `127.0.0.1:9100`；
+* 实现要点、两个反直觉坑（`Tick()` 的通知语义、发包节奏护栏）与实测基线见 [technical.md](technical.md) 第 9 节。
+
+---
+
 > **Note:** 代码层面的实现约定（事件驱动的 UI 刷新、上行回控、收包分帧、文本编码等）见 [technical.md](technical.md) 第 8 节。

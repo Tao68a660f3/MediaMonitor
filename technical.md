@@ -274,6 +274,82 @@ void HandleLatencyPing(uint8_t target_id, uint32_t t1_ms)
 * **文本编码**：`PackageBuilder.UpdateEncoding()` 是全局静态开关，UTF-8 / GB2312 影响所有文本包（`0x10`、`0x12`~`0x16`）。
 * **`0x15` 是普通行的默认下行包**（带结束时间）；`0x12` 仅为兼容保留、当前代码路径不再启用。
 
+---
+
+## 9. 新协议 V1.1（`5A A5`）与「协议模式」双轨
+
+规范与落地计划在另一个仓库：`RLCCProject/Q_Series/Protocol/protocolDesign_1.1_final.md`（规范）、`protocolImplementation.md`（实施计划）。
+
+### 9.1 分层与依赖方向（Legacy 零侵入）
+
+```
+UI/ProtocolStackView.cs  ← 主窗口只认这个接口（当前模式 → 一份实现）
+        ├── LegacyStackView → TransportManager / PackageMaster / LatencyTestController（原封不动）
+        └── NewStackView    → Protocol/New/Service/NewProtocolStack（装配下面这些）
+                                 ├── Transport: TcpTransport / ComTransport（包一层 SerialService）
+                                 ├── Codec:     NpEncoder / NpStreamParser / CRC
+                                 ├── Session:   SessionManager + NewSendScheduler
+                                 └── Service:   MediaPublisher / TimelinePump / ControlReceiver
+                                                / ResourceSender / LatencyManager / (Smtc|Offset)TimelineSource
+```
+
+* 新协议**只用** `SmtcService`（歌名/进度/封面）与 `LyricService`（歌词解析）当数据源，不反向依赖 Legacy 逻辑；
+* 唯一侵入点是 `App.xaml.cs`（组合根）与 `MainWindow`（面板/按钮），Legacy 协议文件一行未改。
+
+### 9.2 配置双轨：`config.json` / `config.new.json`
+
+* `Services/ConfigService.cs` 泛型化为 `ConfigService<T>`，`ConfigService`（非泛型）作为 `ConfigService<PackageConfig>` 的子类保留 —— **Legacy 侧用法与默认值完全不变**；
+* 新模式用 `ConfigService<NewProtocolConfig>("config.new.json")`，公共项（歌词目录、`WindowBounds`）**各自留一份**；
+* 读写规则只有一条：**从"当前模式的配置文件"读，写回同一个文件**（实测：New 模式下跑一整天，`config.json` 一个字节都没动）；
+* **协议模式本身不落盘**（`App.Mode`，启动默认 New）——它是一选择，不是配置。
+
+### 9.3 切模式 = 断开 → 换配置 → 重连
+
+`ProtoMode_Changed` 的顺序是：断开当前栈 → 改 `App.Mode` → 对新栈 `ApplyConfig()` → 刷新面板显隐/专有按钮 → 若原本连着则用新模式重连。连接期间模式单选被禁用，避免"跑着换协议"。
+
+### 9.4 两个必须知道的反直觉点（都踩过）
+
+1. **会话状态是事件驱动的，不是轮询出来的**
+   `SessionManager.OnFrame()` 在收到 HELLO / HELLO_ACK / SESSION_START / SESSION_END / ERROR 时才改状态并通知；`Tick()`（10ms）只负责**时间条件**（HELLO 重发、ACK 超时重传、握手判死）。
+   最初 `Tick()` 末尾无条件 `RaiseStateChanged()`，上层把"心跳跑了一拍"误当成"刚进入 Active"，每秒重发上百帧 MEDIA/时间轴 —— 对端实测收到 ~50 帧/秒，把 500ms 节拍和接收方状态机一起冲垮。现在 `Tick()` 只在状态**真的变了**时才通知，且 `NewProtocolStack` 只对**状态跃迁**动作（双保险）。
+
+2. **发包节奏要有硬护栏**
+   `TimelinePump.MinGapMs = clamp(intervalMs/4, 50, 250)`：**任何**路径（包括"切歌/Seek/播放态变化"的即时帧）都不得击穿这个下限。数据源（SMTC / 播放器）可能抖动，护栏保证对端永远看不到"每 20ms 一帧"。诊断用分因计数：`StatSentDue` / `StatSentPlayingChange` / `StatSentSeek`（正常长连应以 `Due` 为主）。
+
+### 9.5 帧分发链（`NewProtocolStack.OnFrame`，顺序不能换）
+
+```
+ResourceSender（Lyrics/AlbumCover 的 REQUEST 与资源 ACK）
+  → SessionManager（SYSTEM：HELLO/SESSION_*/ACK/ERROR）
+  → LatencyManager（LATENCY_REQUEST/RESPONSE/END）
+  → ControlReceiver（CONTROL → 媒体键 0xA1/0xA2/0xA3 + 回 ACK）
+  → 剩下真正无主的帧才记 "未处理帧"
+```
+
+`ResourceSender.OnFrame` 与 `LatencyManager.OnFrame` 是 `void`（P4/P5 定稿的签名），所以"已消费"只能按类型识别；否则每一帧资源和延迟帧都会被误报成"未处理帧"。
+
+### 9.6 端到端验证方式（无硬件）
+
+```powershell
+# 1) 对端：Python mock（协议字节层跑真 C 代码 np_ref.dll，需先 ref_c/tests/build_dll.bat）
+python MediaMonitor_App/A_tools/mock_esp32_new.py --port 9100 --run-seconds 60
+
+# 2) 本机：New 模式 + TCP + 127.0.0.1:9100，点「开始连接」
+#    期望（20s 长连）：对端收到 ~2 帧/秒 TIMELINE、1 帧 MEDIA、歌词资源 CRC32 校验通过、
+#                     延迟 30 样本、断开后对端能立刻重新接受连接
+```
+
+**实测基线**（`--caps lyrics,cover,jpeg,rgb565 --max-edge 240`）：帧率 2 帧/秒（`cur` 每 ~500ms 递增）、总帧数 ~78/30s、`crc错=0 重同步=0`、歌词资源 39B（占位歌词）CRC 由 C 侧校验通过、延迟 `Base≈0.1ms Avg≈7.5ms`（loopback + mock 150µs 模拟处理）。
+
+### 9.7 回归自测
+
+| 工程 | 命令 | 覆盖 |
+| :--- | :--- | :--- |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错**（85 项） |
+| C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 117 项（含资源接收 R8、时间轴投递 R9/R10） |
+| 端到端 | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + mock | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
+| 真 SMTC 探针 | `NewProtocolSelfTest.exe --tcp-smtc 127.0.0.1:9100 20` | 用真实播放器数据量"发包节奏"，验证抖动护栏 |
+
 
 
 

@@ -7,9 +7,26 @@ using MediaMonitor.Core;
 
 namespace MediaMonitor.Services
 {
-    public class ConfigService
+    /// <summary>
+    /// 通用配置服务（**逐项容错**的读写）。
+    ///
+    /// <para>两种协议模式各用一个实例、各读各的文件：<c>config.json</c>（Legacy）与
+    /// <c>config.new.json</c>（New）。公共项各自留一份、允许不一致 —— 规则只有一条：
+    /// <i>一切从"当前模式的配置文件"读，写回同一个文件</i>。</para>
+    ///
+    /// <para>与"整体反序列化 + 一个 catch 全丢"的区别：</para>
+    /// <list type="number">
+    /// <item>先构建默认配置（<see cref="CreateDefault"/>），再用 JsonDocument **逐项**覆盖；</item>
+    /// <item>某一项类型/格式非法（如 "LineLimit": "abc"）时，**只回退该项到默认值**并在控制台说明原因，其余项全部保留；</item>
+    /// <item>文件里出现未知键（改名/废弃项）只提示并忽略；</item>
+    /// <item>只有 JSON 结构本身损坏（括号不闭合等）才会整体回退默认配置。</item>
+    /// </list>
+    /// </summary>
+    public class ConfigService<T> where T : class, new()
     {
         private readonly string _configPath;
+
+        // 静态字段在泛型类里是"每个 T 一份"，两种模式的序列化选项互不影响
         private static readonly JsonSerializerOptions _options = new JsonSerializerOptions
         {
             WriteIndented = true, // 生成易读的格式
@@ -17,10 +34,13 @@ namespace MediaMonitor.Services
             Converters = { new JsonStringEnumConverter() } // 让枚举(如 TransportType)在JSON中显示为字符串
         };
 
-        public PackageConfig Current
+        public T Current
         {
             get; private set;
         }
+
+        /// <summary>本实例读写的配置文件全路径</summary>
+        public string FilePath => _configPath;
 
         public ConfigService(string fileName = "config.json")
         {
@@ -28,6 +48,9 @@ namespace MediaMonitor.Services
             _configPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, fileName);
             Current = Load();
         }
+
+        /// <summary>默认配置（派生类可覆盖，给出该模式自己的默认值）</summary>
+        protected virtual T CreateDefault() => new T();
 
         /// <summary>
         /// 从磁盘加载配置（**逐项容错**）。
@@ -39,9 +62,9 @@ namespace MediaMonitor.Services
         ///   3) config.json 里出现未知键（改名/废弃项）只提示并忽略；
         ///   4) 只有 JSON 结构本身损坏（括号不闭合等）才会整体回退默认配置。
         /// </summary>
-        public PackageConfig Load()
+        public T Load()
         {
-            var cfg = CreateDefault();
+            T cfg = CreateDefault();
 
             if (!File.Exists(_configPath))
                 return cfg;
@@ -76,7 +99,7 @@ namespace MediaMonitor.Services
         }
 
         /// <summary>把 JSON 对象逐项套用到配置实例上：单项非法只回退该项，其余照常生效</summary>
-        private static void ApplyJsonTo(JsonElement root, PackageConfig cfg)
+        private void ApplyJsonTo(JsonElement root, T cfg)
         {
             if (root.ValueKind != JsonValueKind.Object)
             {
@@ -84,7 +107,7 @@ namespace MediaMonitor.Services
                 return;
             }
 
-            var props = typeof(PackageConfig).GetProperties(BindingFlags.Public | BindingFlags.Instance);
+            var props = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
 
             foreach (var item in root.EnumerateObject())
             {
@@ -160,13 +183,24 @@ namespace MediaMonitor.Services
         /// <summary>
         /// 覆盖当前配置
         /// </summary>
-        public void Update(PackageConfig newConfig)
+        public void Update(T newConfig)
         {
             Current = newConfig ?? CreateDefault();
             Save();
         }
+    }
 
-        private PackageConfig CreateDefault()
+    /// <summary>
+    /// Legacy 模式的配置服务（`config.json`）—— **行为与泛型化之前完全一致**：
+    /// 保留原类名与用法，Legacy 侧代码一行未改（默认值仍在，逐项容错逻辑继承自泛型基类）。
+    /// </summary>
+    public sealed class ConfigService : ConfigService<PackageConfig>
+    {
+        public ConfigService(string fileName = "config.json") : base(fileName)
+        {
+        }
+
+        protected override PackageConfig CreateDefault()
         {
             return new PackageConfig
             {

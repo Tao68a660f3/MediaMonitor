@@ -1,7 +1,9 @@
 ﻿using MediaMonitor.Core;
+using MediaMonitor.Protocol.New.Service;
 using MediaMonitor.Services;
 using MediaMonitor.Tools;
 using MediaMonitor.Tray;
+using MediaMonitor.UI;
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -18,11 +20,22 @@ namespace MediaMonitor
         private DispatcherTimer _uiTimer;
         private bool _isInternalChange = false;
 
+        // 正在按代码设置模式单选（用于屏蔽 RadioButton 因程序赋值而产生的假"切换"事件）
+        private bool _applyingMode = false;
+
         private TrayManager _tray;
         private bool _isRealExit = false;
 
         // 全链路延迟测试：全部交互逻辑封装在 UI\LatencyTestController.cs，这里只留调用点
         private LatencyTestController? _latencyTest;
+
+        // ★ 协议栈视图（见 UI/ProtocolStackView.cs）：两种模式各一份实现，
+        //   主窗口只认"当前视图"，因此连接/断开/测延迟只需要一条代码路径。
+        private IProtocolStackView? _newView;
+        private IProtocolStackView? _legacyView;
+
+        // 新协议模式的串口列表来源（与 Legacy 的 SerialService 各自独立，互不干扰）
+        private SerialService? _newPortScanner;
 
         // ★★ 封面验证开关 ★★
         // 自动弹窗已关闭（2026-01 起改用新界面上的「Show Artwork」按钮按需查看：
@@ -118,8 +131,11 @@ namespace MediaMonitor
             bool isSerialMode = RbSerial.IsChecked ?? true;
             SwitchTransportMode(isSerialMode);
 
+            // 4.5 协议栈视图 + 新协议面板（模式来自 App.Mode：默认 New，运行期可切）
+            InitProtocolStackViews();
+
             // 5. 恢复上次的窗口位置与大小（位置不合理会自动忽略，见 UI/WindowPlacement.cs）
-            WindowPlacement.Apply(this, App.ConfigSvc?.Current);
+            ApplyWindowPlacement();
         }
 
         // 2. 拦截关闭按钮：让它“隐藏”而不是“毁灭”
@@ -144,20 +160,52 @@ namespace MediaMonitor
             {
                 // 只有彻底退出时才释放资源
                 _latencyTest?.Dispose();
-                _tray.Dispose();
+                _newView?.Shutdown();          // 新协议栈：摘掉 SMTC 事件 + 停掉心跳定时器
+                _tray.Dispose();               // 串口扫描器随进程退出即可（SerialService 未实现 IDisposable）
             }
             base.OnClosing(e);
         }
 
-        /// <summary>把当前窗口布局写进 config.json（复用唯一写盘入口：整体写回内存配置）</summary>
+        /// <summary>
+        /// 把当前窗口布局写进**当前模式**的配置文件（Legacy→config.json，New→config.new.json）。
+        /// 两份配置各存一份窗口布局，切模式后各自恢复。
+        /// </summary>
         private void SaveWindowPlacement()
         {
-            var cfg = App.ConfigSvc?.Current;
-            if (cfg == null)
+            string? bounds = WindowPlacement.CaptureBounds(this);
+            if (bounds == null)
+            {
                 return;
+            }
 
-            WindowPlacement.Capture(this, cfg);
-            App.ConfigSvc?.Save();
+            if (App.Mode == ProtocolMode.New)
+            {
+                if (App.NewConfigSvc == null)
+                {
+                    return;
+                }
+                App.NewConfigSvc.Current.WindowBounds = bounds;
+                App.NewConfigSvc.Save();
+            }
+            else
+            {
+                if (App.ConfigSvc == null)
+                {
+                    return;
+                }
+                App.ConfigSvc.Current.WindowBounds = bounds;
+                App.ConfigSvc.Save();
+            }
+        }
+
+        /// <summary>按当前模式恢复窗口布局（两份配置各存一份）</summary>
+        private void ApplyWindowPlacement()
+        {
+            string? bounds = (App.Mode == ProtocolMode.New)
+                ? App.NewConfigSvc?.Current?.WindowBounds
+                : App.ConfigSvc?.Current?.WindowBounds;
+
+            WindowPlacement.Apply(this, bounds);
         }
 
         private void TransMode_Changed(object sender, RoutedEventArgs e)
@@ -305,6 +353,9 @@ namespace MediaMonitor
 
                 // 通知大脑（Master）使用当前加载的这一套配置
                 App.Master?.UpdateConfig(cfg);
+
+                // --- 7. 新协议面板（独立配置文件：config.new.json）---
+                LoadNewConfigToUI();
             }
             catch (Exception ex)
             {
@@ -364,6 +415,9 @@ namespace MediaMonitor
             string song = App.Smtc.CurrentTitle ?? "未在播放";
             string artist = App.Smtc.CurrentArtist ?? "";
             _tray.UpdateTooltip($"{LyricService.ComposeSongInfo(song, artist)} | {this.Title}");
+
+            // 新协议面板的只读状态（会话 / 对端能力 / 延迟）：100ms 一次，跨线程由这里统一消化
+            UpdateNewStatusUI();
         }
 
         // MainWindow.xaml.cs 内部
@@ -448,38 +502,39 @@ namespace MediaMonitor
 
         private void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
-            // 1. 如果已经连接，就断开
-            if (App.TransportMgr.IsConnected)
+            IProtocolStackView? view = CurrentView;
+            if (view == null)
             {
-                App.TransportMgr.Disconnect();
-                UpdateConnectButtonState(false);
                 return;
             }
 
-            // 2. 连接前的最后同步（确保波特率、IP 等最新参数已写入配置对象）
-            SyncAndSaveConfig();
-
-            // 3. 这里的神秘之处在于：App.TransportMgr 内部的 _activeTransport 
-            // 已经在你切换 RadioButton 时被 SetTransport 换成了正确的实例（Serial 或 UDP）
-            // 所以我们只需要大喊一声：连接！
-            App.TransportMgr.Connect();
-
-            // 4. 检查是否点火成功
-            if (App.TransportMgr.IsConnected)
+            // 1. 如果已经连接，就断开
+            if (view.IsConnected)
             {
-                UpdateConnectButtonState(true);
+                view.Disconnect();
+                UpdateConnectButtonState(false);
+                UpdateNewStatusUI();
+                return;
+            }
 
-                // 5. 新链路建立后立即补发一次当前元数据，
-                //    让硬件端从连接开始就显示正确的歌曲信息（断开重连/切换模式也会走到这里）
-                App.Master?.SendMetadata(
-                    App.Smtc?.CurrentTitle ?? "",
-                    App.Smtc?.CurrentArtist ?? "",
-                    App.Smtc?.CurrentAlbum ?? "");
+            // 2. 连接前的最后同步（确保界面上的参数都已写进"当前模式"的配置对象）
+            if (view.Mode == ProtocolMode.New)
+            {
+                SyncAndSaveNewConfig();
             }
             else
             {
-                // 如果 Connect 内部报错了（比如端口占用了），Mgr 会触发 OnTransportError 事件
-                // 这里可以给个简单提示
+                SyncAndSaveConfig();
+            }
+
+            // 3. 交给当前模式的协议栈视图去连（新协议内部是异步的，状态由 UI 定时器刷新）
+            view.Connect();
+            bool connected = view.IsConnected;
+            UpdateConnectButtonState(connected);
+            UpdateNewStatusUI();
+
+            if (view.Mode == ProtocolMode.Legacy && !connected)
+            {
                 MessageBox.Show("连接请求已发出，但引擎未能就绪。请检查硬件状态或 Log。");
             }
         }
@@ -488,10 +543,16 @@ namespace MediaMonitor
         private void UpdateConnectButtonState(bool isConnected)
         {
             BtnConnect.Content = isConnected ? "断开连接" : "开始连接";
-            // 连接后禁用模式切换，防止运行中修改导致崩溃
+
+            // 连接后禁用模式切换，防止运行中修改导致崩溃（两种模式一视同仁）
             RbSerial.IsEnabled = !isConnected;
             RbUdp.IsEnabled = !isConnected;
             ComboBaud.IsEnabled = !isConnected;
+
+            RbProtoNew.IsEnabled = !isConnected;
+            RbProtoLegacy.IsEnabled = !isConnected;
+            RbNewCom.IsEnabled = !isConnected;
+            RbNewTcp.IsEnabled = !isConnected;
             // 改变按钮颜色（可选）
             // BtnConnect.Background = isConnected ? Brushes.Tomato : Brushes.LightGreen;
         }
@@ -661,6 +722,10 @@ namespace MediaMonitor
             if (!this.IsLoaded || _isInternalChange)
                 return;
 
+            // Legacy 专用：新协议模式下界面上的 Legacy 控件是隐藏的，不参与读写
+            if (App.Mode != ProtocolMode.Legacy)
+                return;
+
             var cfg = App.ConfigSvc.Current;
 
             // --- A. 传输模式与物理配置 ---
@@ -724,10 +789,406 @@ namespace MediaMonitor
             App.Master?.SendTimeSync();
         } //
 
-        // 全链路延迟测试：具体逻辑见 UI\LatencyTestController.cs
+        // 全链路延迟测试：具体逻辑见 UI\LatencyTestController.cs（Legacy）/ NewProtocolStack.StartLatencyTest（New）
         private void BtnLatencyTest_Click(object sender, RoutedEventArgs e)
         {
-            _latencyTest?.Toggle();
+            CurrentView?.StartLatencyTest();
         }
+
+        /* ==================================================================== */
+        /* 协议模式与协议栈视图                                                  */
+        /*                                                                      */
+        /* 约定（实施计划 §2.7）：                                               */
+        /*   * 模式是**运行期选择**，不落盘；启动默认 New（App.Mode）；           */
+        /*   * 两种模式各用一份配置文件：Legacy→config.json / New→config.new.json；      */
+        /*   * 切模式 = 断开当前链路 → 换配置 → （原本连着的话）用新模式重连。      */
+        /* ==================================================================== */
+
+        /// <summary>当前模式对应的协议栈视图（未初始化时为 null）</summary>
+        private IProtocolStackView? CurrentView
+            => (App.Mode == ProtocolMode.New) ? _newView : _legacyView;
+
+        /// <summary>
+        /// 构建两个协议栈视图并接管新协议面板：New 走 <see cref="NewProtocolStack"/>，
+        /// Legacy 仍是既有的 TransportManager/PackageMaster/LatencyTestController。
+        /// </summary>
+        private void InitProtocolStackViews()
+        {
+            if (App.NewStack is { } stack && App.NewConfigSvc is { } newCfg)
+            {
+                _newView = new NewStackView(stack, newCfg);
+                stack.Log += OnNewStackLog;      // 协议栈日志 → 统一走 LogService
+            }
+
+            if (App.ConfigSvc is { } legacyCfg && _latencyTest != null)
+            {
+                _legacyView = new LegacyStackView(legacyCfg, _latencyTest);
+            }
+
+            // 新协议的串口列表：单独一个 SerialService（各自的扫描定时器互不干扰）
+            _newPortScanner = new SerialService();
+            _newPortScanner.OnPortListChanged += RefreshNewSerialPorts;
+            RefreshNewSerialPorts(_newPortScanner.GetPortNames());
+
+            LoadNewConfigToUI();
+            ApplyProtocolModeUI();
+
+            App.LogSvc?.LogInfo(
+                $"[模式] 当前协议：{(App.Mode == ProtocolMode.New ? "New (5A A5)" : "Legacy (0xAA/0xAB)")}" +
+                "　（切换后各模式使用自己的配置文件）", Brushes.SeaGreen);
+        }
+
+        /// <summary>把当前模式落到界面上：面板显隐、专有按钮显隐、按钮状态、只读状态刷新</summary>
+        private void ApplyProtocolModeUI()
+        {
+            bool isNew = App.Mode == ProtocolMode.New;
+
+            _applyingMode = true;
+            try
+            {
+                RbProtoNew.IsChecked = isNew;
+                RbProtoLegacy.IsChecked = !isNew;
+            }
+            finally
+            {
+                _applyingMode = false;
+            }
+
+            PanelNew.Visibility = isNew ? Visibility.Visible : Visibility.Collapsed;
+            PanelLegacy.Visibility = isNew ? Visibility.Collapsed : Visibility.Visible;
+
+            // 「同步系统时间 (0x20)」是 Legacy 专有包，新协议没有对应命令
+            BtnSyncTime.Visibility = isNew ? Visibility.Collapsed : Visibility.Visible;
+
+            // 切换后按钮状态按新模式的连接状态重算；新协议的"连接中"由轮询体现
+            UpdateConnectButtonState(CurrentView?.IsConnected == true);
+            UpdateNewStatusUI();
+        }
+
+        /// <summary>模式切换（两个 RadioButton 共用）</summary>
+        private void ProtoMode_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!this.IsLoaded || _isInternalChange || _applyingMode)
+            {
+                return;
+            }
+
+            var target = (RbProtoLegacy.IsChecked == true) ? ProtocolMode.Legacy : ProtocolMode.New;
+            if (target == App.Mode)
+            {
+                ApplyProtocolModeUI();
+                return;
+            }
+
+            // 切模式 = 断开 → 换配置 → 重连（原本连着才重连）
+            bool wasConnected = CurrentView?.IsConnected == true;
+            CurrentView?.Disconnect();
+
+            App.Mode = target;
+
+            var view = CurrentView;
+            view?.ApplyConfig();                 // 重新注入"新模式"的配置对象
+            ApplyProtocolModeUI();
+
+            App.LogSvc?.LogInfo(
+                $"[模式] 已切换到 {(target == ProtocolMode.New ? "New (5A A5) → config.new.json" : "Legacy (0xAA/0xAB) → config.json")}",
+                Brushes.SeaGreen);
+
+            if (wasConnected && (view != null))
+            {
+                BtnConnect_Click(this, new RoutedEventArgs());    // 用新模式重新连上
+            }
+        }
+
+        /// <summary>新协议栈日志 → 界面日志（按级别上色；可能来自后台线程，统一回 UI 线程）</summary>
+        private void OnNewStackLog(NpLogLevel level, string msg)
+        {
+            Brush color = level switch
+            {
+                NpLogLevel.Error => Brushes.OrangeRed,
+                NpLogLevel.Warn => Brushes.Orange,
+                _ => Brushes.LightSkyBlue
+            };
+
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.HasShutdownStarted)
+            {
+                return;
+            }
+
+            dispatcher.BeginInvoke(() => App.LogSvc?.LogInfo($"[New] {msg}", color));
+        }
+
+        /// <summary>
+        /// 刷新新协议面板的只读区（会话状态 / 对端能力 / 延迟）。
+        /// 由 100ms 的 UI 定时器驱动：协议栈的事件来自任意线程，这样就不用在每个事件里做跨线程编组。
+        /// </summary>
+        private void UpdateNewStatusUI()
+        {
+            var stack = App.NewStack;
+            if (stack == null)
+            {
+                TxtNewSession.Text = "（新协议栈未初始化）";
+                TxtNewCaps.Text = "—";
+                TxtNewLatency.Text = "—";
+                return;
+            }
+
+            TxtNewSession.Text = (!stack.IsConnected && stack.WantConnect)
+                ? "连接中 / 重连中…"
+                : stack.StateText;
+
+            TxtNewCaps.Text = stack.RemoteCapsText;
+            TxtNewLatency.Text = stack.LatencyText;
+
+            // 连接状态可能从后台变化（断线/握手完成），按钮文案跟着走
+            bool connected = stack.IsConnected;
+            if ((BtnConnect.Content as string != "断开连接") && connected)
+            {
+                UpdateConnectButtonState(true);
+            }
+            else if ((BtnConnect.Content as string == "断开连接") && !connected && (App.Mode == ProtocolMode.New) && !stack.WantConnect)
+            {
+                UpdateConnectButtonState(false);
+            }
+        }
+
+        /* ==================================================================== */
+        /* 新协议面板（config.new.json 的读写）                                  */
+        /* ==================================================================== */
+
+        /// <summary>把 config.new.json 载入新协议面板（只读，不做任何写盘）</summary>
+        private void LoadNewConfigToUI()
+        {
+            var cfg = App.NewConfigSvc?.Current;
+            if (cfg == null)
+            {
+                return;
+            }
+
+            bool isCom = cfg.TransportMode == NewTransportType.Com;
+            RbNewCom.IsChecked = isCom;
+            RbNewTcp.IsChecked = !isCom;
+            GridNewCom.Visibility = isCom ? Visibility.Visible : Visibility.Collapsed;
+            GridNewTcp.Visibility = isCom ? Visibility.Collapsed : Visibility.Visible;
+
+            ComboNewBaud.Text = cfg.BaudRate.ToString();
+
+            // 串口列表由 _newPortScanner 异步刷新；列表还空着时先放一个占位，免得看不见已存端口
+            if ((ComboNewPorts.ItemsSource == null) && !string.IsNullOrEmpty(cfg.ComPortName))
+            {
+                ComboNewPorts.ItemsSource = new[] { cfg.ComPortName };
+                ComboNewPorts.SelectedIndex = 0;
+            }
+
+            TxtNewIp.Text = cfg.TcpRemoteIp;
+            TxtNewPort.Text = cfg.TcpRemotePort.ToString();
+            TxtNewSyncInterval.Text = cfg.SyncIntervalMs.ToString();
+            TxtNewSyncOffset.Text = cfg.SyncCurrentOffsetMs.ToString();
+            TxtNewLrcPath.Text = cfg.LyricFolder;
+        }
+
+        /// <summary>
+        /// 把新协议面板上的值写回 config.new.json。
+        /// 静默项（SendIntervalMs / AckTimeoutMs / ResourceChunkSize 等）没有界面入口，
+        /// 因此只在启动注入 / 这里整体回写时保留原值 —— 与 Legacy 的处理方式一致。
+        /// </summary>
+        private void SyncAndSaveNewConfig()
+        {
+            if (!this.IsLoaded || _isInternalChange)
+            {
+                return;
+            }
+
+            var svc = App.NewConfigSvc;
+            if (svc == null)
+            {
+                return;
+            }
+
+            var cfg = svc.Current;
+
+            // --- A. 传输 ---
+            cfg.TransportMode = (RbNewTcp.IsChecked == true) ? NewTransportType.Tcp : NewTransportType.Com;
+
+            if (ComboNewPorts.SelectedItem != null)
+            {
+                cfg.ComPortName = ComboNewPorts.SelectedItem.ToString() ?? cfg.ComPortName;
+            }
+
+            // 波特率是可编辑 ComboBox：手输的值也算数
+            if (int.TryParse(ComboNewBaud.Text, out int baud))
+            {
+                cfg.BaudRate = Math.Clamp(baud, 1200, 4000000);
+            }
+
+            cfg.TcpRemoteIp = TxtNewIp.Text.Trim();
+            if (int.TryParse(TxtNewPort.Text, out int nport))
+            {
+                cfg.TcpRemotePort = Math.Clamp(nport, 1, 65535);
+            }
+
+            // --- B. 时间轴 ---
+            if (int.TryParse(TxtNewSyncInterval.Text, out int si))
+            {
+                cfg.SyncIntervalMs = Math.Clamp(si, 50, 30000);
+            }
+            if (int.TryParse(TxtNewSyncOffset.Text, out int so))
+            {
+                cfg.SyncCurrentOffsetMs = Math.Clamp(so, -1000, 1000);
+            }
+
+            // --- C. 歌词目录 ---
+            cfg.LyricFolder = TxtNewLrcPath.Text;
+
+            // --- D. 落盘 + 注入（静默项原样保留） ---
+            svc.Save();
+            App.NewStack?.ApplyConfig(cfg);
+
+            if (App.Lyrics != null)
+            {
+                App.Lyrics.LyricFolder = cfg.LyricFolder;
+            }
+        }
+
+        /// <summary>刷新新协议的串口下拉（可能由后台扫描线程触发）</summary>
+        private void RefreshNewSerialPorts(string[] ports)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                try
+                {
+                    string? saved = App.NewConfigSvc?.Current?.ComPortName;
+                    ComboNewPorts.ItemsSource = ports;
+
+                    if (!string.IsNullOrEmpty(saved) && ports.Contains(saved))
+                    {
+                        ComboNewPorts.SelectedItem = saved;
+                    }
+                    else if ((ComboNewPorts.SelectedIndex == -1) && (ports.Length > 0))
+                    {
+                        ComboNewPorts.SelectedIndex = 0;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[UI] 刷新新协议串口列表失败: {ex.Message}");
+                }
+            });
+        }
+
+        private void NewTransMode_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!this.IsLoaded || _isInternalChange)
+            {
+                return;
+            }
+
+            bool isCom = RbNewCom.IsChecked ?? true;
+            GridNewCom.Visibility = isCom ? Visibility.Visible : Visibility.Collapsed;
+            GridNewTcp.Visibility = isCom ? Visibility.Collapsed : Visibility.Visible;
+
+            SyncAndSaveNewConfig();
+        }
+
+        private void ComboNewConfig_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            SyncAndSaveNewConfig();
+        }
+
+        private void BtnNewBrowse_Click(object sender, RoutedEventArgs e)
+        {
+            string initDir = TxtNewLrcPath.Text;
+            if (!Directory.Exists(initDir))
+            {
+                initDir = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            }
+
+            var dialog = new Microsoft.Win32.OpenFolderDialog
+            {
+                Title = "选择歌词搜索目录（新协议）",
+                InitialDirectory = initDir
+            };
+
+            if (dialog.ShowDialog() == true)
+            {
+                TxtNewLrcPath.Text = dialog.FolderName;
+                SyncAndSaveNewConfig();
+
+                // 换目录后立即用当前歌曲信息重新载入（下一帧资源请求就会带上新歌词）
+                App.Lyrics?.LoadAndParse(App.Smtc?.CurrentTitle ?? "", App.Smtc?.CurrentArtist ?? "");
+            }
+        }
+
+        /// <summary>新协议的 IP 校验：规则与 Legacy 相同（0.0.0.0 / :: 是本机监听地址，不能当连接目标）</summary>
+        private void TxtNewIp_LostFocus(object sender, RoutedEventArgs e)
+        {
+            string raw = TxtNewIp.Text.Trim();
+
+            if (!System.Net.IPAddress.TryParse(raw, out var address) ||
+                address.Equals(System.Net.IPAddress.Any) ||
+                address.Equals(System.Net.IPAddress.IPv6Any))
+            {
+                App.LogSvc?.LogInfo(
+                    $"[新协议 IP] 「{raw}」不能作为连接目标（0.0.0.0/:: 是本机监听地址）；" +
+                    "新协议里 ESP32 是服务端、PC 是客户端，请填 ESP32 的局域网 IP。已回退为 127.0.0.1。",
+                    Brushes.OrangeRed);
+                TxtNewIp.Text = "127.0.0.1";
+            }
+            else
+            {
+                TxtNewIp.Text = address.ToString();
+            }
+
+            SyncAndSaveNewConfig();
+        }
+
+        /// <summary>新协议数值框的"安检站"：越界拉回合法区间，乱输则整份重载</summary>
+        private void NewNumberTextBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            if (_isInternalChange)
+            {
+                return;
+            }
+
+            if (sender is TextBox tb)
+            {
+                if (int.TryParse(tb.Text, out int val))
+                {
+                    switch (tb.Name)
+                    {
+                        case "TxtNewPort":
+                            tb.Text = Math.Clamp(val, 1, 65535).ToString();
+                            break;
+                        case "TxtNewSyncInterval":
+                            tb.Text = Math.Clamp(val, 50, 30000).ToString();
+                            break;
+                        case "TxtNewSyncOffset":
+                            tb.Text = Math.Clamp(val, -1000, 1000).ToString();
+                            break;
+                    }
+                }
+                else if (!string.IsNullOrWhiteSpace(tb.Text))
+                {
+                    LoadNewConfigToUI();
+                }
+            }
+            else if (sender is ComboBox cb)     // 波特率（可编辑 ComboBox）
+            {
+                if (int.TryParse(cb.Text, out int baud))
+                {
+                    cb.Text = Math.Clamp(baud, 1200, 4000000).ToString();
+                }
+                else if (!string.IsNullOrWhiteSpace(cb.Text))
+                {
+                    LoadNewConfigToUI();
+                }
+            }
+
+            SyncAndSaveNewConfig();
+        }
+
+        /// <summary>查看当前 SMTC 封面（与协议模式无关：两种模式下都能用）</summary>
+        private void BtnShowArtwork_Click(object sender, RoutedEventArgs e) => ShowArtworkPreview();
     }
 }
