@@ -72,6 +72,7 @@
     - [x] `config.new.json`（与 `config.json` 各存一份，公共项各留一份；`ConfigService<T>` 泛型化，Legacy 用法零改动）
     - [x] 只读区：会话状态 / 对端能力（来自 `HELLO_ACK`）/ 延迟
 - [ ] **P7 收尾**：`technical.md` / `readme.md` 的新协议章节细化；`np_vectors.json` 单一事实源 + 生成脚本（目前两侧各手抄同一份附录 A，互为验证）
+- [x] **对端模拟器图形版**：`A_tools/mock_esp32_gui.py`（tkinter，开窗即监听；把收到的 MEDIA / TIMELINE / 歌词行 / 封面解码后显示，带手动回控与请求按钮）
 - [ ] **ESP32 固件**：把 `ref_c/` 接进真实固件并做硬件联调（当前只到 Python mock：mock 通过 ctypes 跑**真 C 代码**）
 
 ---

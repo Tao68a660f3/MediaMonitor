@@ -14,7 +14,14 @@ namespace MediaMonitor.UI
     {
         ProtocolMode Mode { get; }
 
+        /// <summary>链路是否已建立（TCP 已连上 / 串口已打开）—— 决定"点按钮是连接还是断开"</summary>
         bool IsConnected { get; }
+
+        /// <summary>
+        /// 对端是否**已经回应**（新协议 = SESSION ACTIVE；Legacy 无会话概念，等同 <see cref="IsConnected"/>）。
+        /// 界面上的"已连接 / 断开连接"一律以它为准 —— 链路通但对端没应答时只能叫"取消连接"。
+        /// </summary>
+        bool SessionActive { get; }
 
         /// <summary>给界面看的一行状态文本</summary>
         string StatusText { get; }
@@ -52,6 +59,9 @@ namespace MediaMonitor.UI
         public ProtocolMode Mode => ProtocolMode.Legacy;
 
         public bool IsConnected => App.TransportMgr.IsConnected;
+
+        /// <summary>Legacy 没有"会话握手"概念：链路通就算对端在（回控靠 0xAB，不握手）</summary>
+        public bool SessionActive => App.TransportMgr.IsConnected;
 
         public string StatusText => App.TransportMgr.IsConnected ? "已连接（0xAA/0xAB）" : "未连接";
 
@@ -101,6 +111,8 @@ namespace MediaMonitor.UI
         public ProtocolMode Mode => ProtocolMode.New;
 
         public bool IsConnected => _stack.IsConnected;
+
+        public bool SessionActive => _stack.SessionActive;
 
         public string StatusText => _stack.StateText;
 

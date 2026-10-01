@@ -73,17 +73,40 @@ namespace MediaMonitor.Protocol.New.Service
 
         public bool WantConnect => _wantConnect;
 
-        public bool IsConnected => _transport?.IsConnected == true;
+        /// <summary>链路层：TCP 已连上 / 串口已打开。**不代表对端在**。</summary>
+        public bool LinkUp => _transport?.IsConnected == true;
 
+        /// <summary>会话层：已收到 SESSION_START，对端确实在按新协议对话（这才是"连上了"）。</summary>
+        public bool SessionActive => _session?.IsActive == true;
+
+        /// <summary>握手失败（HELLO 重发用尽仍无 HELLO_ACK）：对端多半没启动/波特率不对/接线有问题</summary>
+        public bool HandshakeFailed => _session?.HandshakeFailed == true;
+
+        public bool IsConnected => LinkUp;
+
+        /// <summary>
+        /// 会话状态文本 —— 严格区分"链路通"与"对端已应答"，避免"没收到 ACK 就显示已连接"。
+        /// </summary>
         public string StateText
         {
             get
             {
-                if (!IsConnected)
+                if (!LinkUp)
                 {
-                    return _wantConnect ? "连接中…" : "未连接";
+                    return _wantConnect ? "连接中…（等待链路）" : "未连接";
                 }
-                return $"已连接 · {StateName(_session?.State ?? ProtocolState.Idle)}";
+
+                if (SessionActive)
+                {
+                    return "已连接 · SESSION ACTIVE";
+                }
+
+                if (HandshakeFailed)
+                {
+                    return "未连接（对端无应答）";
+                }
+
+                return $"链路已通，等待对端应答…（{StateName(_session?.State ?? ProtocolState.Idle)}）";
             }
         }
 
@@ -404,7 +427,19 @@ namespace MediaMonitor.Protocol.New.Service
                 case ProtocolState.Idle:
                 case ProtocolState.WaitSessionStart:
                     _timeline?.Stop();                        // 会话未成立不发时间轴
-                    Emit(NpLogLevel.Info, $"会话状态 → {StateName(st)}");
+
+                    if ((st == ProtocolState.Idle) && (_session?.HandshakeFailed == true))
+                    {
+                        // 这条是用户最常遇到的"看起来连上了其实对端不在"的真相：
+                        // HELLO 重发用尽仍无 HELLO_ACK → 链路通但会话没建立
+                        Emit(NpLogLevel.Error,
+                             "握手失败：HELLO 重发用尽仍无 HELLO_ACK —— 对端可能没启动 / 串口被占用 / 波特率不一致。" +
+                             "New 模式的对端可用：python MediaMonitor_App/A_tools/mock_esp32_gui.py");
+                    }
+                    else
+                    {
+                        Emit(NpLogLevel.Info, $"会话状态 → {StateName(st)}");
+                    }
                     break;
 
                 default:

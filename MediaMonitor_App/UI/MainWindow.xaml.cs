@@ -529,32 +529,38 @@ namespace MediaMonitor
 
             // 3. 交给当前模式的协议栈视图去连（新协议内部是异步的，状态由 UI 定时器刷新）
             view.Connect();
-            bool connected = view.IsConnected;
-            UpdateConnectButtonState(connected);
+            UpdateConnectButtonState(view.IsConnected, view.SessionActive);
             UpdateNewStatusUI();
 
-            if (view.Mode == ProtocolMode.Legacy && !connected)
+            if (view.Mode == ProtocolMode.Legacy && !view.IsConnected)
             {
                 MessageBox.Show("连接请求已发出，但引擎未能就绪。请检查硬件状态或 Log。");
             }
         }
 
         // 辅助方法：美化 UI 状态
-        private void UpdateConnectButtonState(bool isConnected)
+        //
+        // linkUp        = 链路已建立（TCP 连上 / 串口打开）
+        // sessionActive = **对端已应答**（新协议 = SESSION ACTIVE；Legacy 传 null，按链路算）
+        //
+        // 这个区分很要紧：只开了串口/连上 TCP 但对端根本没应答时，不能显示"已连接"，
+        // 按钮也只能是"取消连接"（点击 = 放弃等待），不是"断开连接"。
+        private void UpdateConnectButtonState(bool linkUp, bool? sessionActive = null)
         {
-            BtnConnect.Content = isConnected ? "断开连接" : "开始连接";
+            bool active = sessionActive ?? linkUp;
 
-            // 连接后禁用模式切换，防止运行中修改导致崩溃（两种模式一视同仁）
-            RbSerial.IsEnabled = !isConnected;
-            RbUdp.IsEnabled = !isConnected;
-            ComboBaud.IsEnabled = !isConnected;
+            BtnConnect.Content = active ? "断开连接" : (linkUp ? "取消连接" : "开始连接");
+            BtnConnect.Background = active ? Brushes.OrangeRed : (linkUp ? Brushes.DarkOrange : Brushes.SeaGreen);
 
-            RbProtoNew.IsEnabled = !isConnected;
-            RbProtoLegacy.IsEnabled = !isConnected;
-            RbNewCom.IsEnabled = !isConnected;
-            RbNewTcp.IsEnabled = !isConnected;
-            // 改变按钮颜色（可选）
-            // BtnConnect.Background = isConnected ? Brushes.Tomato : Brushes.LightGreen;
+            // 有链路就锁住模式切换与传输参数，避免"跑着换协议"
+            RbSerial.IsEnabled = !linkUp;
+            RbUdp.IsEnabled = !linkUp;
+            ComboBaud.IsEnabled = !linkUp;
+
+            RbProtoNew.IsEnabled = !linkUp;
+            RbProtoLegacy.IsEnabled = !linkUp;
+            RbNewCom.IsEnabled = !linkUp;
+            RbNewTcp.IsEnabled = !linkUp;
         }
 
         // 1. 处理媒体源切换
@@ -861,7 +867,8 @@ namespace MediaMonitor
             BtnSyncTime.Visibility = isNew ? Visibility.Collapsed : Visibility.Visible;
 
             // 切换后按钮状态按新模式的连接状态重算；新协议的"连接中"由轮询体现
-            UpdateConnectButtonState(CurrentView?.IsConnected == true);
+            var view = CurrentView;
+            UpdateConnectButtonState(view?.IsConnected == true, view?.SessionActive == true);
             UpdateNewStatusUI();
         }
 
@@ -934,22 +941,21 @@ namespace MediaMonitor
                 return;
             }
 
-            TxtNewSession.Text = (!stack.IsConnected && stack.WantConnect)
-                ? "连接中 / 重连中…"
-                : stack.StateText;
-
+            TxtNewSession.Text = stack.StateText;            // 已区分"链路通"与"对端已应答"
             TxtNewCaps.Text = stack.RemoteCapsText;
             TxtNewLatency.Text = stack.LatencyText;
 
-            // 连接状态可能从后台变化（断线/握手完成），按钮文案跟着走
-            bool connected = stack.IsConnected;
-            if ((BtnConnect.Content as string != "断开连接") && connected)
+            // 颜色跟着状态走：绿=对端已应答 / 橙=有链路但还没应答 / 红=对端无应答 / 灰=未连接
+            TxtNewSession.Foreground = stack.SessionActive
+                ? Brushes.Green
+                : stack.HandshakeFailed
+                    ? Brushes.OrangeRed
+                    : stack.LinkUp ? Brushes.DarkOrange : Brushes.Gray;
+
+            // 按钮与单选的启用状态也跟随（只在 New 模式下改，别抢 Legacy 的按钮）
+            if (App.Mode == ProtocolMode.New)
             {
-                UpdateConnectButtonState(true);
-            }
-            else if ((BtnConnect.Content as string == "断开连接") && !connected && (App.Mode == ProtocolMode.New) && !stack.WantConnect)
-            {
-                UpdateConnectButtonState(false);
+                UpdateConnectButtonState(stack.LinkUp, stack.SessionActive);
             }
         }
 

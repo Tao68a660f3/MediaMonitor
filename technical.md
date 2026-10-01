@@ -331,17 +331,45 @@ ResourceSender（Lyrics/AlbumCover 的 REQUEST 与资源 ACK）
 ### 9.6 端到端验证方式（无硬件）
 
 ```powershell
-# 1) 对端：Python mock（协议字节层跑真 C 代码 np_ref.dll，需先 ref_c/tests/build_dll.bat）
-python MediaMonitor_App/A_tools/mock_esp32_new.py --port 9100 --run-seconds 60
+# 0) 一次性：编出 np_ref.dll（对端模拟器的协议层就是它）
+cd <RLCCProject>\Q_Series\Protocol\ref_c\tests ; build_dll.bat
 
-# 2) 本机：New 模式 + TCP + 127.0.0.1:9100，点「开始连接」
+# 1) 对端：先启动模拟器（TCP 服务端，ESP32 角色）
+python MediaMonitor_App/A_tools/mock_esp32_gui.py          # 图形版（开窗即监听）
+#   或 python MediaMonitor_App/A_tools/mock_esp32_new.py --port 9100 --run-seconds 60
+
+# 2) 上位机：New 模式 + TCP + 127.0.0.1:9100 → 点「开始连接」
 #    期望（20s 长连）：对端收到 ~2 帧/秒 TIMELINE、1 帧 MEDIA、歌词资源 CRC32 校验通过、
 #                     延迟 30 样本、断开后对端能立刻重新接受连接
 ```
 
+**顺序不能反**：模拟器是服务端，上位机是客户端 —— 先起模拟器，再点上位机的连接。
+
+### 9.7 连接状态的三段语义（别再只看"链路"）
+
+| 概念 | 字段 | 界面表现 |
+| :--- | :--- | :--- |
+| 链路 | `NewProtocolStack.LinkUp`（TCP 已连 / 串口已开） | `连接中…（等待链路）`；有链路时按钮为「取消连接」 |
+| 会话 | `SessionActive`（收到 `SESSION_START`） | **只有它为真才显示 `已连接 · SESSION ACTIVE`、按钮才是「断开连接」** |
+| 失败 | `HandshakeFailed`（HELLO 重发 3 次无应答） | `未连接（对端无应答）`（红色） |
+
+只把串口打开/TCP 连上就显示"已连接"会骗人 —— 实测过：对端没启动、只是本机有个同名 COM 口或一个只 accept 不回应的 TCP 监听，用户就会以为连上了。所以：
+
+* `IProtocolStackView` 同时暴露 `IsConnected`（链路）与 `SessionActive`（对端已应答），Legacy 没有会话概念 → 两者同值；
+* 按钮文案三态：`开始连接` / `取消连接`（有链路但对端没应答）/ `断开连接`（会话建立）；
+* 握手失败时日志给排查建议（对端没启动 / 串口被占用 / 波特率不一致）。
+
+### 9.8 对端模拟器（`A_tools/mock_esp32_gui.py`）
+
+* **同一个内核**：`mock_esp32_new.py` 里的 `MockServer` 类被 CLI 与 GUI 共用（socket + 真 C 代码），GUI 只负责把收到的帧**解码后画出来**；
+* **线程安全**：C 侧是全局单例，所以**所有 DLL 调用都在 `MockServer` 的后台线程里**；GUI 只做两件事 —— `snapshot()` 读状态快照、`post()` 投命令（手动发 CONTROL / 请求歌词 / 请求封面）；
+* **显示**：会话与统计、`MEDIA`（标题/艺术家/专辑）、`TIMELINE`（进度条 + chunk 时间戳）、`ALBUMCOVER` 预览（RGB565 → PPM → `PhotoImage`；JPEG/PNG 有 PIL 才解码）、`LYRICS` 行（`[mm:ss.mmm] 正文`，翻译行缩进、逐字行标词数）、事件日志；
+* **断线后继续监听**（`serve_forever=True`），方便反复联调；每次新连接都会 `np_dll_init/session_init/res_init/timeline_init`，避免上一次的残留；
+* `--headless --seconds N` 可无窗口跑一遍并打印解码摘要（自动化验证用）。
+
 **实测基线**（`--caps lyrics,cover,jpeg,rgb565 --max-edge 240`）：帧率 2 帧/秒（`cur` 每 ~500ms 递增）、总帧数 ~78/30s、`crc错=0 重同步=0`、歌词资源 39B（占位歌词）CRC 由 C 侧校验通过、延迟 `Base≈0.1ms Avg≈7.5ms`（loopback + mock 150µs 模拟处理）。
 
-### 9.7 回归自测
+### 9.9 回归自测
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |

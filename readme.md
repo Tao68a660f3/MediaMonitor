@@ -164,11 +164,59 @@ python mock_esp32_stm32.py --ip 127.0.0.1 --port 8080    # 同机调试：上位
 | 能力 | 媒体/歌词同步、按键回控、延迟测试 | + 资源下发（歌词池 / 封面 JPEG·PNG·RGB565）、会话握手与重连、对端能力协商 |
 | 时间轴 | 同步包 | `TIMELINE`（500ms 节拍，含 `HOST_TICK_MS`，供硬件端做同步算法） |
 
-* **切换规则**：切模式 = 断开当前链路 → 换配置 → （原本连着就）用新模式重连；连接期间单选被禁用；
+* **切换规则**：切模式 = 断开当前链路 → 换配置 → （原本连着就）用新模式重连；**连接期间模式单选被禁用**（先断开再切）；
 * **协议模式本身不落盘**（启动默认 New）；
 * 规范与实施计划：`RLCCProject/Q_Series/Protocol/protocolDesign_1.1_final.md`、`protocolImplementation.md`；
-* 无硬件调试：对端跑 `MediaMonitor_App/A_tools/mock_esp32_new.py`（**协议字节层是真 C 代码**，来自 `ref_c/`，ctypes 调用），上位机选 New + TCP + `127.0.0.1:9100`；
-* 实现要点、两个反直觉坑（`Tick()` 的通知语义、发包节奏护栏）与实测基线见 [technical.md](technical.md) 第 9 节。
+* 实现要点与实测基线见 [technical.md](technical.md) 第 9 节。
+
+### 连接状态的判定（重要）
+
+| 界面显示 | 含义 |
+| :--- | :--- |
+| `未连接` / 按钮「开始连接」 | 链路没建立 |
+| `连接中…（等待链路）` | TCP 正在连 / 串口正在开（TCP 失败会按 1→2→5→10s 退避重连） |
+| `链路已通，等待对端应答…` | 链路通了但还没收到对端的 `HELLO_ACK`（对端可能刚上电） |
+| **`未连接（对端无应答）`** | **HELLO 重发 3 次仍无回应** —— 串口打开了/TCP 连上了，但对端并不在（对端没启动、串口被别的程序占用、波特率不一致、TX/RX 接反） |
+| `已连接 · SESSION ACTIVE` | 对端已应答且完成握手 —— 这才叫"连上了" |
+
+> 也就是说：**只开串口/只连上 TCP 不算连上**，按钮在"对端无应答"时是「取消连接」而不是「断开连接」。
+
+### 无硬件调试：先启动"对端"
+
+规范里的对端是 ESP32 固件，还没开工；现在用 **Python 模拟器**顶替，而且**协议字节层直接跑 `ref_c/` 编出来的真 C 代码**（ctypes 调 `np_ref.dll`），所以能跟它跑通，基本等于跟真固件跑通了（只差应用层）。
+
+```powershell
+# ① 先编出 DLL（只需一次；改了 ref_c 的 C 代码才需要重编）
+cd <RLCCProject>\Q_Series\Protocol\ref_c\tests
+build_dll.bat                      # 产物：ref_c\build\np_ref.dll
+
+# ② 启动对端模拟器（二选一）
+python <MediaMonitor>\MediaMonitor_App\A_tools\mock_esp32_gui.py     # 图形版（推荐）
+python <MediaMonitor>\MediaMonitor_App\A_tools\mock_esp32_new.py --port 9100   # 命令行版
+
+# ③ 上位机：协议模式 = New，传输 = TCP，对端 IP/端口 = 127.0.0.1:9100 → 点「开始连接」
+```
+
+> ⚠️ 模拟器是 **TCP 服务端**（ESP32 角色），上位机是客户端：**必须先启动模拟器，再点上位机连接**。
+> 模拟器的默认声明：`CAPS=歌词+封面+JPEG+RGB565`、最大封面边长 240、单资源上限 256 KB；
+> 某首歌有歌词/封面时，它会在收到 `MEDIA` 后自动发 `LYRICS REQUEST`，收齐后再发 `ALBUMCOVER REQUEST`。
+
+**图形版界面**（`mock_esp32_gui.py`，tkinter 零依赖；装了 PIL 还能直接显示 JPEG/PNG 封面）：
+
+```
+┌ 监听地址/端口 + 启动/停止 + 当前阶段（监听中 / 握手… / SESSION ACTIVE）
+├ 会话(SID) + 收帧统计(帧/crc错/重同步/tx丢弃) + 延迟应答数/回控数
+├ MEDIA：标题 / 艺术家 / 专辑（从 METADATA 帧解码）
+│ TIMELINE：进度条 + cur/total/HOST_TICK/LOCAL_TICK + 已投递帧数
+├ ALBUMCOVER：封面预览（RGB565 直接解码；已过 C 侧 CRC32 校验）
+├ LYRICS：歌词行（[mm:ss.mmm] 正文；翻译行缩进；逐字行标词数）
+├ 手动按钮：PLAY_PAUSE / NEXT / PREV / 请求歌词 / 请求封面
+└ 事件日志（逐条：握手、资源 BEGIN/END/ABORT、时间轴投递、统计…）
+```
+
+* 打开窗口即自动开始监听；断线后**继续监听**，方便反复联调；
+* 手动按钮是"以 ESP32 身份发帧"（走真 C 代码入队），可用来验证上位机的回控与资源响应；
+* 无显示环境可用 `python mock_esp32_gui.py --headless --seconds 20` 跑无窗口自检。
 
 ---
 
