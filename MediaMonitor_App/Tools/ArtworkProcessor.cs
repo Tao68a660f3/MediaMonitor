@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
 namespace MediaMonitor.Tools
@@ -53,13 +54,70 @@ namespace MediaMonitor.Tools
 
         /// <summary>缩放并重编码为 JPEG（有损，体积小，适合带宽受限的链路）。失败返回 null。</summary>
         public static ArtworkImage? ProcessToJpeg(byte[]? raw, int width, int height, int quality = DefaultQuality)
-            => Process(raw, width, height, () => new JpegBitmapEncoder { QualityLevel = Math.Clamp(quality, 1, 100) });
+            => Encode(Prepare(raw, width, height),
+                      () => new JpegBitmapEncoder { QualityLevel = Math.Clamp(quality, 1, 100) });
 
         /// <summary>缩放并重编码为 PNG（无损，体积大；给将来的 1-bit / 调色板屏留路）。失败返回 null。</summary>
         public static ArtworkImage? ProcessToPng(byte[]? raw, int width, int height)
-            => Process(raw, width, height, () => new PngBitmapEncoder());
+            => Encode(Prepare(raw, width, height), () => new PngBitmapEncoder());
 
-        private static ArtworkImage? Process(byte[]? raw, int width, int height, Func<BitmapEncoder> encoderFactory)
+        /// <summary>
+        /// 缩放并转成**未压缩 RGB565**（规范 §11.1 的 `RAW_RGB565`：2 B/像素、低字节在前）。
+        /// 输出长度为 `width * height * 2`，可直接 blit 到常见 SPI 屏 / LVGL 缓冲。
+        /// </summary>
+        public static ArtworkImage? ProcessToRgb565(byte[]? raw, int width, int height)
+        {
+            BitmapSource? src = Prepare(raw, width, height);
+            if (src == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                var conv = new FormatConvertedBitmap(src, PixelFormats.Bgr565, null, 0);
+                conv.Freeze();
+
+                int stride = conv.PixelWidth * 2;
+                byte[] pixels = new byte[stride * conv.PixelHeight];
+                conv.CopyPixels(pixels, stride, 0);
+
+                return new ArtworkImage(pixels, conv.PixelWidth, conv.PixelHeight);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[封面] 转 RGB565 失败: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>把位图编码成图片字节</summary>
+        private static ArtworkImage? Encode(BitmapSource? source, Func<BitmapEncoder> encoderFactory)
+        {
+            if (source == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                BitmapEncoder encoder = encoderFactory();
+                encoder.Frames.Add(BitmapFrame.Create(source));
+
+                using var outMs = new MemoryStream();
+                encoder.Save(outMs);
+
+                return new ArtworkImage(outMs.ToArray(), source.PixelWidth, source.PixelHeight);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[封面] 重编码失败: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>解码 + 等比填满 + 居中裁剪，得到"严格 width×height"的冻结位图</summary>
+        private static BitmapSource? Prepare(byte[]? raw, int width, int height)
         {
             if (raw == null || raw.Length == 0) return null;
             if (width <= 0 || height <= 0) return null;
@@ -67,7 +125,7 @@ namespace MediaMonitor.Tools
 
             try
             {
-                // 1) 等比填满：两边都 >= 目标，多出来的部分后面居中裁掉。
+                // 1) 等比填满：两边都 >= 目标，多出来的部分下面居中裁掉。
                 //    解码阶段直接把 DecodePixel* 设成"缩放后的尺寸"（两个维度同时给，宽高比与源一致），
                 //    这样只做一次 WIC 缩放，不做二次采样。
                 double scale = Math.Max(width / (double)srcW, height / (double)srcH);
@@ -87,31 +145,23 @@ namespace MediaMonitor.Tools
                 decoded.Freeze();
 
                 // 2) 居中裁剪到严格目标尺寸（缩放取整可能差 1px，做边界钳位，避免越界）
-                BitmapSource source = decoded;
-                if (decoded.PixelWidth != width || decoded.PixelHeight != height)
+                if (decoded.PixelWidth == width && decoded.PixelHeight == height)
                 {
-                    int x = Math.Max(0, (decoded.PixelWidth - width) / 2);
-                    int y = Math.Max(0, (decoded.PixelHeight - height) / 2);
-                    int cw = Math.Min(width, decoded.PixelWidth - x);
-                    int ch = Math.Min(height, decoded.PixelHeight - y);
-
-                    var cropped = new CroppedBitmap(decoded, new Int32Rect(x, y, cw, ch));
-                    cropped.Freeze();
-                    source = cropped;
+                    return decoded;
                 }
 
-                // 3) 重编码
-                BitmapEncoder encoder = encoderFactory();
-                encoder.Frames.Add(BitmapFrame.Create(source));
+                int x = Math.Max(0, (decoded.PixelWidth - width) / 2);
+                int y = Math.Max(0, (decoded.PixelHeight - height) / 2);
+                int cw = Math.Min(width, decoded.PixelWidth - x);
+                int ch = Math.Min(height, decoded.PixelHeight - y);
 
-                using var outMs = new MemoryStream();
-                encoder.Save(outMs);
-
-                return new ArtworkImage(outMs.ToArray(), source.PixelWidth, source.PixelHeight);
+                var cropped = new CroppedBitmap(decoded, new Int32Rect(x, y, cw, ch));
+                cropped.Freeze();
+                return cropped;
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[封面] 缩放/重编码失败: {ex.Message}");
+                Debug.WriteLine($"[封面] 解码/缩放失败: {ex.Message}");
                 return null;
             }
         }

@@ -1,12 +1,19 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using MediaMonitor.Protocol.New.Codec;
 using MediaMonitor.Protocol.New.Service;
 using MediaMonitor.Protocol.New.Transport;
+using MediaMonitor.Services;
+using MediaMonitor.Tools;
 using NewProtocolSelfTest;
 
 /// <summary>
@@ -302,6 +309,20 @@ internal static class Program
 
         Console.WriteLine($"[demo] 连接 {host}:{port} ...");
 
+        /* ---- P4：准备资源数据源（歌词池走真实的 LyricService 解析）---- */
+        string lrcDir = Path.Combine(Path.GetTempPath(), "np_lrc_test");
+        Directory.CreateDirectory(lrcDir);
+        File.WriteAllText(Path.Combine(lrcDir, "测试歌手 - 测试歌曲.lrc"),
+            "[offset:-200]\n[00:00.50]第一行歌词\n[00:03.00]第二行歌词\n[00:06.00]第三行歌词\n",
+            new UTF8Encoding(false));
+
+        var lyrics = new LyricService { LyricFolder = lrcDir };
+        lyrics.LoadAndParse("测试歌曲", "测试歌手");
+        Console.WriteLine($"[demo] 歌词解析：{lyrics.Lines.Count} 行（文件 offset 标签={lyrics.CurrentOffsetMs}ms）");
+
+        byte[] coverJpeg = MakeTestCoverJpeg(256, forceTestPattern: false);
+        Console.WriteLine($"[demo] 合成测试封面：{coverJpeg.Length} 字节");
+
         using var transport = new TcpTransport(host, port);
         using var scheduler = new NewSendScheduler(transport, frameIntervalMs: 5);
         scheduler.Start();
@@ -312,16 +333,39 @@ internal static class Program
         var media = new MediaPublisher(session);
         using var pump = new TimelinePump(session, new FakeTimelineSource(), intervalMs: 500);
 
+        // 资源发送：歌词用整份歌词池，封面按对端请求的尺寸/格式现做
+        var resources = new ResourceSender(session, (type, w, h, fmt, q) =>
+        {
+            if (type == NpType.Lyrics)
+            {
+                byte[] data = LyricResourceBuilder.Build(lyrics, TimeSpan.FromSeconds(100), out int frames);
+                Console.WriteLine($"[demo] 生成歌词资源：{data.Length} 字节 / {frames} 帧（Legacy 帧字节流）");
+                return new NpResourceData(Crc32Ieee.Compute(data), data, 0, 0, 0);
+            }
+
+            NpResourceData? art = ArtworkResourceBuilder.Build(coverJpeg, w, h, fmt, q, out string? err);
+            if (art == null)
+            {
+                Console.WriteLine($"[demo] 封面构造失败：{err}");
+            }
+            else
+            {
+                Console.WriteLine($"[demo] 生成封面资源：{art.Data.Length} 字节 FORMAT=0x{art.Format:X2} {art.Width}×{art.Height}");
+            }
+            return art;
+        }, chunkSize: 1024);
+
         transport.DataReceived += data => parser.Feed(data.Span);
         parser.FrameReceived += f =>
         {
+            resources.OnFrame(f);                        // REQUEST / ACK（必须在会话层之前）
             if (session.OnFrame(f))
             {
-                return;                              // SYSTEM：会话层已处理
+                return;                                  // SYSTEM：会话层已处理
             }
             if (control.OnFrame(f))
             {
-                return;                              // CONTROL：已执行并回 ACK
+                return;                                  // CONTROL：已执行并回 ACK
             }
             Console.WriteLine($"[demo] 业务帧 T=0x{f.Type:X2} C=0x{f.Code:X2} len={f.PayloadLen}");
         };
@@ -367,32 +411,77 @@ internal static class Program
         media.Publish("测试歌曲", "测试歌手", "测试专辑");
         pump.PublishNow();
         pump.Start();
-        Console.WriteLine("[demo] 已推送 MEDIA，并启动 TIMELINE（观察 mock 侧 cur 是否随时间前进）");
+        Console.WriteLine("[demo] 已推送 MEDIA + 启动 TIMELINE；等待对端（mock）拉取歌词与封面...");
 
-        await Task.Delay(9000);
+        await Task.Delay(12000);
 
-        // 切歌：验证"元数据更新 + 时间轴立即补发"
+        // 切歌：元数据更新 + 时间轴立即补发；若还有资源在途则 ABORT（规范 §9.7 / N-13）
+        resources.AbortCurrent("切歌：资源作废");
         media.Publish("第二首歌", "另一个歌手", "另一张专辑");
-        await Task.Delay(2000);
+        await Task.Delay(2500);
 
         pump.Stop();
-        await scheduler.WaitDrainedAsync(1000);
+        await scheduler.WaitDrainedAsync(1500);
 
-        Console.WriteLine($"[demo] 结果: State={session.State} SessionId=0x{session.SessionId:X8}" +
-                          $" helloTx={session.StatHelloTx} helloAckRx={session.StatHelloAckRx} 对端能力=0x{(session.RemoteCaps?.Caps ?? 0):X8}");
+        Console.WriteLine($"[demo] 结果: State={session.State} SessionId=0x{session.SessionId:X8} 对端能力=0x{(session.RemoteCaps?.Caps ?? 0):X8}");
         Console.WriteLine($"[demo] P3 统计: MEDIA={media.StatMediaTx} TIMELINE={pump.StatTimelineTx}(立即={pump.StatImmediateTx})" +
-                          $" CONTROL={control.StatControlRx}(最后=0x{control.LastLegacyCmd:X2}) 发送帧={scheduler.SentFrames}" +
-                          $" 解析: 帧={parser.Stats.FramesOk} crc错={parser.Stats.CrcErrors}");
+                          $" CONTROL={control.StatControlRx}(最后 0x{control.LastLegacyCmd:X2})");
+        Console.WriteLine($"[demo] P4 统计: REQUEST={resources.StatRequests} 传输={resources.StatTransfers} 字节={resources.StatBytes}" +
+                          $" NOT_READY={resources.StatNotReady} REJECTED={resources.StatRejected}" +
+                          $" ABORT={resources.StatAborted} END_ACK失败={resources.StatAckFail}");
+        Console.WriteLine($"[demo] 解析统计: 帧={parser.Stats.FramesOk} crc错={parser.Stats.CrcErrors} 发送帧={scheduler.SentFrames}");
 
         bool ok = session.IsActive &&
                   media.StatMediaTx >= 2 &&          // 首推 + 切歌
-                  pump.StatTimelineTx >= 10 &&       // 9 秒 × 500ms ≈ 18 帧
-                  control.StatControlRx >= 1;        // 收到 mock 的按键回控
+                  pump.StatTimelineTx >= 10 &&       // 15 秒 × 500ms ≈ 30 帧
+                  control.StatControlRx >= 1 &&      // 收到 mock 的按键回控
+                  resources.StatTransfers >= 1;      // 至少传了一份资源（歌词/封面）
 
         Console.WriteLine(ok
-            ? "[demo] === P3 验收通过：MEDIA/TIMELINE 已推送、CONTROL 已收到 ==="
-            : "[demo] === P3 验收未通过 ===");
+            ? "[demo] === P3/P4 验收通过（实时数据 + 资源传输 + 回控）==="
+            : "[demo] === 验收未通过 ===");
         return ok ? 0 : 6;
+    }
+
+    /* ---------------- 合成测试图（不依赖外部素材） ---------------- */
+
+    /// <summary>合成一张封面测试图（渐变 + 文字）；<paramref name="forceTestPattern"/> 时输出 2×2 纯色 PNG</summary>
+    private static byte[] MakeTestCoverJpeg(int size, bool forceTestPattern)
+    {
+        var rtb = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+        var visual = new DrawingVisual();
+
+        using (DrawingContext dc = visual.RenderOpen())
+        {
+            if (forceTestPattern)
+            {
+                // 2×2：红 / 绿 / 蓝 / 白（用于校验 RGB565 字节序）
+                dc.DrawRectangle(Brushes.Red, null, new Rect(0, 0, 1, 1));
+                dc.DrawRectangle(Brushes.Lime, null, new Rect(1, 0, 1, 1));
+                dc.DrawRectangle(Brushes.Blue, null, new Rect(0, 1, 1, 1));
+                dc.DrawRectangle(Brushes.White, null, new Rect(1, 1, 1, 1));
+            }
+            else
+            {
+                dc.DrawRectangle(new LinearGradientBrush(Colors.DarkOrange, Colors.MediumPurple, 45), null,
+                                 new Rect(0, 0, size, size));
+
+                var ft = new FormattedText("TEST", CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                                           new Typeface("Segoe UI"), size * 0.22, Brushes.White, 96);
+                dc.DrawText(ft, new Point((size - ft.Width) / 2, (size - ft.Height) / 2));
+            }
+        }
+
+        rtb.Render(visual);
+
+        BitmapEncoder enc = forceTestPattern
+            ? new PngBitmapEncoder()                       // 纯色校验必须无损
+            : new JpegBitmapEncoder { QualityLevel = 90 };
+        enc.Frames.Add(BitmapFrame.Create(rtb));
+
+        using var ms = new MemoryStream();
+        enc.Save(ms);
+        return ms.ToArray();
     }
 
     /// <summary>演示用的假时间轴源：1 秒走 1 秒，100 秒循环</summary>
@@ -407,6 +496,34 @@ internal static class Program
         }
     }
 
+    /* ---------------- R9：封面 RGB565 出口（字节序 / 尺寸） ---------------- */
+
+    private static void TestRgb565()
+    {
+        Console.WriteLine("R9 封面 RGB565 出口（字节序 / 尺寸）");
+
+        byte[] png = MakeTestCoverJpeg(2, forceTestPattern: true);
+        ArtworkImage? img = ArtworkProcessor.ProcessToRgb565(png, 2, 2);
+
+        Check("R9 输出非 null 且尺寸 2×2", (img != null) && (img.Width == 2) && (img.Height == 2));
+        if (img == null)
+        {
+            return;
+        }
+
+        Check("R9 字节数 = w×h×2 = 8", img.Data.Length == 8);
+
+        string hex = string.Join(" ", img.Data.Select(b => b.ToString("X2")));
+        Console.WriteLine($"        2×2 RGB565 字节: {hex}");
+
+        // 期望（低字节在前、R 在高 5 位）：红 00 F8 / 绿 E0 07 / 蓝 1F 00 / 白 FF FF
+        Check("R9 红 = 00 F8", (img.Data[0] == 0x00) && (img.Data[1] == 0xF8));
+        Check("R9 绿 = E0 07", (img.Data[2] == 0xE0) && (img.Data[3] == 0x07));
+        Check("R9 蓝 = 1F 00", (img.Data[4] == 0x1F) && (img.Data[5] == 0x00));
+        Check("R9 白 = FF FF", (img.Data[6] == 0xFF) && (img.Data[7] == 0xFF));
+    }
+
+    [STAThread]
     private static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
@@ -433,6 +550,8 @@ internal static class Program
         TestResync();
         Console.WriteLine();
         TestSticky();
+        Console.WriteLine();
+        TestRgb565();
 
         Console.WriteLine($"\n=== 通过 {_pass} 项，失败 {_fail} 项 ===");
         return _fail == 0 ? 0 : 1;

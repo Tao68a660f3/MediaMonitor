@@ -42,6 +42,11 @@ CAP_BITS = {"lyrics": 1, "cover": 2, "jpeg": 4, "png": 8, "rgb565": 16}
 
 STATE_NAMES = {0: "IDLE", 1: "HANDSHAKE", 2: "NEGOTIATING", 3: "WAIT_SESSION_START", 4: "ACTIVE"}
 
+RES_EV_NAMES = {0: "NONE", 1: "BEGIN", 2: "PROGRESS", 3: "DONE", 4: "ERROR", 5: "ABORTED"}
+RES_ERR_NAMES = {0: "OK", 1: "NO_BEGIN", 2: "BAD_PAYLOAD", 3: "OVERFLOW", 4: "GAP",
+                 5: "SIZE_MISMATCH", 6: "CRC32"}
+FMT_EXT = {0x00: "bin", 0x01: "jpg", 0x02: "png", 0x10: "rgb565"}
+
 DEFAULT_DLL = os.path.normpath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..", "..", "..", "RLCCProject", "Q_Series", "Protocol", "ref_c", "build", "np_ref.dll"))
@@ -87,6 +92,19 @@ def load_dll(path):
     dll.np_dll_send_request_lyrics.restype = ctypes.c_int
     dll.np_dll_send_request_cover.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.np_dll_send_request_cover.restype = ctypes.c_int
+
+    dll.np_dll_res_init.restype = ctypes.c_int
+    dll.np_dll_res_on_frame.argtypes = [ctypes.POINTER(NpFrameOut)]
+    dll.np_dll_res_on_frame.restype = ctypes.c_int
+    dll.np_dll_res_size.restype = ctypes.c_uint32
+    dll.np_dll_res_format.restype = ctypes.c_int
+    dll.np_dll_res_width.restype = ctypes.c_int
+    dll.np_dll_res_height.restype = ctypes.c_int
+    dll.np_dll_res_copy.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    dll.np_dll_res_copy.restype = ctypes.c_int
+    dll.np_dll_res_stat_err.restype = ctypes.c_uint32
+    dll.np_dll_res_last_err.restype = ctypes.c_int
+    dll.np_dll_res_is_complete.restype = ctypes.c_int
 
     dll.np_dll_session_init.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32, ctypes.c_int]
     dll.np_dll_session_link_up.restype = None
@@ -159,6 +177,49 @@ def decode_timeline(payload):
     return "state=%d cur=%dms total=%dms tick=%d" % (state, cur, total, tick)
 
 
+def count_legacy_lyric_frames(data):
+    """粗数一下资源里含多少个 Legacy 帧（按 AA <cmd> <lenH> <lenL> ... <XOR> 逐个跳过）"""
+    data = bytes(data)
+    i = 0
+    n = 0
+    while i + 5 <= len(data):
+        if data[i] != 0xAA:
+            i += 1
+            continue
+        length = (data[i + 2] << 8) | data[i + 3]
+        total = 4 + length + 1
+        if i + total > len(data):
+            break
+        n += 1
+        i += total
+    return n
+
+
+def dump_resource(dll, rtype, art_dir):
+    """把 C 侧收齐并通过 CRC32 校验的资源落盘，便于肉眼验证"""
+    size = dll.np_dll_res_size()
+    fmt = dll.np_dll_res_format()
+    w = dll.np_dll_res_width()
+    h = dll.np_dll_res_height()
+
+    buf = ctypes.create_string_buffer(max(size, 1))
+    n = dll.np_dll_res_copy(buf, len(buf))
+    data = buf.raw[:n]
+
+    kind = "lyrics" if rtype == 5 else "cover"
+    path = os.path.join(art_dir, "%s.%s" % (kind, FMT_EXT.get(fmt, "bin")))
+    os.makedirs(art_dir, exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+    print("[mock] === 资源收齐：%s  大小=%d  格式=0x%02X  尺寸=%dx%d  （CRC32 由 C 侧校验通过）  -> %s"
+          % (kind, size, fmt, w, h, path))
+
+    if rtype == 5:
+        print("[mock] 歌词资源内含 Legacy 帧 %d 个（0x15 普通行 / 0x14 逐字 / 0x13 翻译）"
+              % count_legacy_lyric_frames(data))
+
+
 def print_frame(f):
     payload = bytes(f.payload[:f.payload_len])
     extra = payload.hex(" ").upper() if payload else "-"
@@ -183,12 +244,15 @@ def parse_args():
     ap.add_argument("--caps", default="lyrics,cover,jpeg,rgb565",
                     help="逗号分隔：lyrics,cover,jpeg,png,rgb565")
     ap.add_argument("--max-edge", type=int, default=240, help="HELLO 里声明能接受的最大封面边长")
-    ap.add_argument("--max-resource", type=int, default=65536, help="能接收的最大资源字节数")
+    ap.add_argument("--max-resource", type=int, default=262144, help="能接收的最大资源字节数（写进 HELLO）")
     ap.add_argument("--tick-ms", type=int, default=10, help="主循环周期")
     ap.add_argument("--exit-after-active", action="store_true", help="会话建立后自动退出")
     ap.add_argument("--control-every", type=float, default=0.0,
                     help="会话建立后每隔 N 秒发一次 CONTROL(PLAY_PAUSE)，用于验证 PC 侧回控")
     ap.add_argument("--run-seconds", type=float, default=0.0, help="运行 N 秒后自动退出（0 = 一直跑）")
+    ap.add_argument("--art-dir", default="art_recv", help="收到的歌词/封面落盘目录")
+    ap.add_argument("--cover-format", type=lambda s: int(s, 0), default=0x10,
+                    help="请求封面时指定的 FORMAT：0x01=JPEG 0x02=PNG 0x10=RGB565（默认）")
     ap.add_argument("--quiet", action="store_true", help="不逐帧打印")
     return ap.parse_args()
 
@@ -232,6 +296,8 @@ def main():
 
     last_state = None
     active = False
+    requested = False
+    cover_requested = False
     last_control = time.monotonic()
     txbuf = ctypes.create_string_buffer(2048)
 
@@ -252,13 +318,35 @@ def main():
                 print("[mock] 连接被重置")
                 break
 
-            # 2) 打印收到的帧
+            # 2) 打印收到的帧 + 资源接收 + 收到 MEDIA 后拉取资源
             while True:
                 f = NpFrameOut()
                 if dll.np_dll_poll(ctypes.byref(f)) != 1:
                     break
                 if not args.quiet:
                     print_frame(f)
+
+                if f.type in (5, 6):
+                    ev = dll.np_dll_res_on_frame(ctypes.byref(f))
+                    if ev == 1:
+                        print("[mock] 资源 BEGIN（type=%d）" % f.type)
+                    elif ev == 3:
+                        dump_resource(dll, f.type, args.art_dir)
+                        # 单资源互斥由 ESP32 侧保证（规范 §9.7）：等歌词收完再拉封面
+                        if (f.type == 5) and (not cover_requested) and active:
+                            if dll.np_dll_send_request_cover(args.max_edge, args.max_edge, args.cover_format, 0):
+                                cover_requested = True
+                                print("[mock] 歌词收齐 → 再发起 ALBUMCOVER REQUEST（封面 %dx%d fmt=0x%02X）"
+                                      % (args.max_edge, args.max_edge, args.cover_format))
+                    elif ev == 4:
+                        print("[mock] 资源接收错误：%s"
+                              % RES_ERR_NAMES.get(dll.np_dll_res_last_err(), "?"))
+                    elif ev == 5:
+                        print("[mock] 资源被 ABORT（对端切歌 / 资源作废）")
+                elif (f.type == 2) and (not requested):
+                    if dll.np_dll_send_request_lyrics():
+                        requested = True
+                        print("[mock] 收到 MEDIA → 发起 LYRICS REQUEST（拿到后再拉封面）")
 
             # 3) 让 C 会话机跑一次（重传 / 超时），取出要发的帧发走
             dll.np_dll_session_tick()

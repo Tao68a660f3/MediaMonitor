@@ -362,7 +362,7 @@ namespace MediaMonitor.Protocol.New.Service
             }
         }
 
-        private void SendRaw(uint sid, uint rid, byte flags, byte type, byte code,
+        private uint SendRaw(uint sid, uint rid, byte flags, byte type, byte code,
                              byte[]? payload, bool needAck)
         {
             uint seq = NextSeq();
@@ -385,7 +385,7 @@ namespace MediaMonitor.Protocol.New.Service
             byte[]? bytes = NpEncoder.EncodeToArray(frame);
             if (bytes == null)
             {
-                return;
+                return 0;
             }
 
             _scheduler.Enqueue(PriorityOf(type), bytes);
@@ -394,7 +394,16 @@ namespace MediaMonitor.Protocol.New.Service
             {
                 StoreSlot(seq, sid, rid, flags, type, code, payload);
             }
+
+            return seq;
         }
+
+        /// <summary>
+        /// 发送资源帧（BEGIN / DATA / END / ABORT，规范 §9）；返回该帧使用的 SEQUENCE
+        /// （资源发送方需要靠它识别"END 被 ACK 了"或"BEGIN 命中缓存"）。
+        /// </summary>
+        public uint SendResourceFrame(byte type, byte code, uint requestId, byte[]? payload, byte flags)
+            => SendRaw(SessionId, requestId, flags, type, code, payload, false);
 
         private void StoreSlot(uint seq, uint sid, uint rid, byte flags, byte type, byte code, byte[] payload)
         {

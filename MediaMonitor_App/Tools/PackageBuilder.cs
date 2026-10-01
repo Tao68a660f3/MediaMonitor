@@ -29,6 +29,14 @@ namespace MediaMonitor.Tools
         // 更新此方法以使用最新的实例
         public static byte[] GetEncodedBytes(string text) => _activeEncoding.GetBytes(text);
 
+        /// <summary>
+        /// 用指定编码编码文本（<paramref name="encoding"/> 为 null 时用全局编码）。
+        /// 供新协议的"歌词资源"批量序列化使用：新协议链路固定 UTF-8，
+        /// 不能依赖 <see cref="UpdateEncoding"/> 的全局静态状态（规范 §10）。
+        /// </summary>
+        public static byte[] GetEncodedBytes(string text, Encoding? encoding)
+            => (encoding ?? _activeEncoding).GetBytes(text);
+
         // 通用打包逻辑
         // 基础打包逻辑：AA [Cmd] [LenH] [LenL] [Payload] [Check]
         public static byte[] BuildPacket(byte cmd, byte[] payload)
@@ -116,31 +124,35 @@ namespace MediaMonitor.Tools
         }
 
         // 0x15: 增强原文包（在 0x12 基础上增加结束时间）
-        public static byte[] BuildEnhancedLyricLine(short absIdx, TimeSpan startTime, TimeSpan endTime, string content)
+        // encoding 为 null 时使用全局编码（Legacy 行为）；新协议的歌词资源传 Encoding.UTF8
+        public static byte[] BuildEnhancedLyricLine(short absIdx, TimeSpan startTime, TimeSpan endTime,
+                                                    string content, Encoding? encoding = null)
         {
             var p = BuildHeader(absIdx, (uint)startTime.TotalMilliseconds);
             p.AddRange(BitConverter.GetBytes((uint)endTime.TotalMilliseconds)); // 结束时间 (4B)
-            p.AddRange(GetEncodedBytes(content));
+            p.AddRange(GetEncodedBytes(content, encoding));
             return BuildPacket(0x15, p.ToArray());
         }
 
         // 0x13: 翻译包
-        public static byte[] BuildTranslationLine(short absIdx, TimeSpan startTime, string translation)
+        public static byte[] BuildTranslationLine(short absIdx, TimeSpan startTime, string translation,
+                                                  Encoding? encoding = null)
         {
             var p = BuildHeader(absIdx, (uint)startTime.TotalMilliseconds);
-            p.AddRange(GetEncodedBytes(translation));
+            p.AddRange(GetEncodedBytes(translation, encoding));
             return BuildPacket(0x13, p.ToArray());
         }
 
         // 0x14: 逐字包
-        public static byte[] BuildWordByWord(short absIdx, TimeSpan startTime, List<WordInfo> words)
+        public static byte[] BuildWordByWord(short absIdx, TimeSpan startTime, List<WordInfo> words,
+                                             Encoding? encoding = null)
         {
             var p = BuildHeader(absIdx, (uint)startTime.TotalMilliseconds);
             p.Add((byte)words.Count); // 词数 (1B)
             foreach (var w in words)
             {
                 ushort offset = (ushort)Math.Max(0, (w.Time - startTime).TotalMilliseconds);
-                byte[] wordBytes = GetEncodedBytes(w.Word);
+                byte[] wordBytes = GetEncodedBytes(w.Word, encoding);
                 p.AddRange(BitConverter.GetBytes(offset)); // 偏移 (2B)
                 p.Add((byte)wordBytes.Length);             // 长度 (1B)
                 p.AddRange(wordBytes);                     // 文本
