@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    New Protocol V1.1 编解码层自测（实施计划 §4.2）
+
+    * 不加入 MediaMonitor.sln，不影响正常构建；
+    * 直接"链接"编解码层的源文件（而不是引用 WinExe 工程），因此不依赖 WPF；
+    * 运行：dotnet run -c Debug
+    * bin/ obj/ 已被仓库根 .gitignore 的 [Bb]in/ [Oo]bj/ 覆盖
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>NewProtocolSelfTest</AssemblyName>
+    <RootNamespace>NewProtocolSelfTest</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Codec\*.cs" LinkBase="Codec" />
+  </ItemGroup>
+
+</Project>

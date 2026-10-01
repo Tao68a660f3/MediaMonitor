@@ -24,11 +24,11 @@ namespace MediaMonitor
         // 全链路延迟测试：全部交互逻辑封装在 UI\LatencyTestController.cs，这里只留调用点
         private LatencyTestController? _latencyTest;
 
-        // ★★ 封面验证开关（临时功能，仅用于确认"抓取 + 调整尺寸"可用）★★
-        // 置 false = 不再弹窗，只保留 SmtcService 里的封面缓存；
-        // 联调完成后本段连同 UI/ArtworkPreviewWindow.* 一起删除即可。
-        // （用 static readonly 而不是 const：const 会让下面的判断被编译器当成常量，产生 CS0162 不可达代码警告）
-        private static readonly bool ShowArtworkPreviewOnUpdate = true;
+        // ★★ 封面验证开关 ★★
+        // 自动弹窗已关闭（2026-01 起改用新界面上的「Show Artwork」按钮按需查看：
+        // 调用 public 方法 ShowArtworkPreview()，见下方）。
+        // 置 true 可恢复"每次封面变化自动弹窗"的调试行为。
+        private static readonly bool ShowArtworkPreviewOnUpdate = false;
         private ArtworkPreviewWindow? _artPreview;
 
         public MainWindow()
@@ -400,18 +400,29 @@ namespace MediaMonitor
         }
 
         /// <summary>
-        /// 封面更新回调（临时验证用）：把压缩到 600×600 的结果弹窗显示，确认 SMTC 抓取与调整尺寸功能可用。
-        ///
-        /// <para>关闭方式：把本类顶部的 <c>ShowArtworkPreviewOnUpdate</c> 置 false（或删掉本方法与订阅）。</para>
-        /// <para>将来新协议下发封面时，数据源就是 <c>App.Smtc.CurrentThumbnail</c>（原始）
-        /// + <c>Tools/ArtworkProcessor</c>（压缩），本回调可直接改成"喂给协议打包"。</para>
+        /// 手动显示封面预览（供新界面的「Show Artwork」按钮调用）：
+        /// 取当前 SMTC 封面原始字节 → 压缩到 600×600 弹窗显示；无封面时会显示"本曲无封面"。
+        /// </summary>
+        public void ShowArtworkPreview() => ShowArtworkWindow(App.Smtc?.CurrentThumbnail);
+
+        /// <summary>
+        /// 封面变化回调：仅在 <c>ShowArtworkPreviewOnUpdate</c> 为 true 时自动弹窗
+        /// （当前默认关闭，改用界面上按需触发 <see cref="ShowArtworkPreview"/>）。
         /// </summary>
         private void OnArtworkUpdated(byte[]? raw)
         {
             if (!ShowArtworkPreviewOnUpdate)
                 return;
 
-            // 回调来自 SMTC 事件的线程池线程，建窗口必须回到 UI 线程；
+            ShowArtworkWindow(raw);
+        }
+
+        /// <summary>
+        /// 弹窗显示封面 —— 自动回调与手动按钮共用的核心实现。
+        /// 回调可能来自 SMTC 事件的线程池线程，建窗口必须回到 UI 线程；
+        /// </summary>
+        private void ShowArtworkWindow(byte[]? raw)
+        {
             // 程序正在退出时 Dispatcher 可能已经关停，直接放弃
             var dispatcher = Application.Current?.Dispatcher;
             if (dispatcher == null || dispatcher.HasShutdownStarted)
