@@ -519,6 +519,33 @@ namespace MediaMonitor.Protocol.New.Service
         public void SendRealtime(byte type, byte code, byte[] payload)
             => SendRaw(SessionId, 0, 0, type, code, payload, false);
 
+        /* ---------------- 延迟测量（规范 §14）---------------- */
+
+        /// <summary>LATENCY_REQUEST：payload = T1（发起方本地 tick，ms）</summary>
+        public void SendLatencyRequest(uint requestId, uint t1Ms)
+        {
+            byte[] pay = new byte[4];
+            NpWriter.WriteU32(pay, t1Ms);
+            SendRaw(SessionId, requestId, 0, NpType.System, NpSysCode.LatencyRequest, pay, false);
+        }
+
+        /// <summary>LATENCY_RESPONSE：payload = T1（原样回传）+ PROC_US（本端处理耗时，微秒）</summary>
+        public void SendLatencyResponse(uint requestId, uint t1Ms, uint procUs)
+        {
+            byte[] pay = new byte[8];
+            NpWriter.WriteU32(pay, t1Ms);
+            NpWriter.WriteU32(pay.AsSpan(4), procUs);
+            SendRaw(SessionId, requestId, NpFlag.Response, NpType.System, NpSysCode.LatencyResponse, pay, false);
+        }
+
+        /// <summary>LATENCY_END：payload = SAMPLE_COUNT（本轮有效样本数）</summary>
+        public void SendLatencyEnd(uint requestId, ushort sampleCount)
+        {
+            byte[] pay = new byte[2];
+            NpWriter.WriteU16(pay, sampleCount);
+            SendRaw(SessionId, requestId, 0, NpType.System, NpSysCode.LatencyEnd, pay, false);
+        }
+
         public void Dispose()
         {
             _clock.Stop();

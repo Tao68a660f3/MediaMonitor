@@ -332,6 +332,7 @@ internal static class Program
             cmd => Console.WriteLine($"[demo] 收到 CONTROL → 执行 Legacy 媒体键 0x{cmd:X2}"));
         var media = new MediaPublisher(session);
         using var pump = new TimelinePump(session, new FakeTimelineSource(), intervalMs: 500);
+        using var latency = new LatencyManager(session) { WindowSize = 30, PingIntervalMs = 100 };
 
         // 资源发送：歌词用整份歌词池，封面按对端请求的尺寸/格式现做
         var resources = new ResourceSender(session, (type, w, h, fmt, q) =>
@@ -363,6 +364,7 @@ internal static class Program
             {
                 return;                                  // SYSTEM：会话层已处理
             }
+            latency.OnFrame(f);                          // LATENCY_REQUEST / RESPONSE / END
             if (control.OnFrame(f))
             {
                 return;                                  // CONTROL：已执行并回 ACK
@@ -423,6 +425,27 @@ internal static class Program
         pump.Stop();
         await scheduler.WaitDrainedAsync(1500);
 
+        // ---- 阶段 3（P5）：延迟测量（PC 发起，mock 作为应答方）----
+        Console.WriteLine("[demo] 开始延迟测量（30 样本 / 100ms 间隔）...");
+        latency.StatsUpdated += s =>
+        {
+            if ((s.SampleCount % 10) == 0)
+            {
+                Console.WriteLine($"        样本 {s.SampleCount}: {s}");
+            }
+        };
+        latency.Start();
+        var swLat = Stopwatch.StartNew();
+        while (latency.IsRunning && swLat.ElapsedMilliseconds < 8000)
+        {
+            await Task.Delay(50);
+        }
+        latency.Stop();
+        await scheduler.WaitDrainedAsync(500);
+        Console.WriteLine($"[demo] P5 统计: {latency.LastStats} 结束原因='{latency.LastEndReason}'");
+        Console.WriteLine($"[demo] P5 计数: REQUEST={latency.StatRequestsSent} RESPONSE={latency.StatResponsesRecv}" +
+                          $" 应答对端={latency.StatResponded} 超时={latency.StatTimeouts} 被抢占={latency.StatPreempted}");
+
         Console.WriteLine($"[demo] 结果: State={session.State} SessionId=0x{session.SessionId:X8} 对端能力=0x{(session.RemoteCaps?.Caps ?? 0):X8}");
         Console.WriteLine($"[demo] P3 统计: MEDIA={media.StatMediaTx} TIMELINE={pump.StatTimelineTx}(立即={pump.StatImmediateTx})" +
                           $" CONTROL={control.StatControlRx}(最后 0x{control.LastLegacyCmd:X2})");
@@ -435,10 +458,11 @@ internal static class Program
                   media.StatMediaTx >= 2 &&          // 首推 + 切歌
                   pump.StatTimelineTx >= 10 &&       // 15 秒 × 500ms ≈ 30 帧
                   control.StatControlRx >= 1 &&      // 收到 mock 的按键回控
-                  resources.StatTransfers >= 1;      // 至少传了一份资源（歌词/封面）
+                  resources.StatTransfers >= 1 &&    // 至少传了一份资源（歌词/封面）
+                  (latency.LastStats?.SampleCount ?? 0) >= 30;   // 延迟测量满窗
 
         Console.WriteLine(ok
-            ? "[demo] === P3/P4 验收通过（实时数据 + 资源传输 + 回控）==="
+            ? "[demo] === P3/P4/P5 验收通过（实时数据 + 资源传输 + 回控 + 延迟测量）==="
             : "[demo] === 验收未通过 ===");
         return ok ? 0 : 6;
     }

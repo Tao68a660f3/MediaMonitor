@@ -30,6 +30,7 @@
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\ResourceSender.cs" LinkBase="Service" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\LyricResourceBuilder.cs" LinkBase="Service" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\ArtworkResourceBuilder.cs" LinkBase="Service" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\LatencyManager.cs" LinkBase="Service" />
     <!-- 业务数据源（纯逻辑，无 WPF 依赖）：歌词解析 + Legacy 帧构造 + 封面重编码 -->
     <Compile Include="..\..\MediaMonitor_App\Services\LyricService.cs" LinkBase="App" />
     <Compile Include="..\..\MediaMonitor_App\Tools\PackageBuilder.cs" LinkBase="App" />

@@ -106,6 +106,19 @@ def load_dll(path):
     dll.np_dll_res_last_err.restype = ctypes.c_int
     dll.np_dll_res_is_complete.restype = ctypes.c_int
 
+    dll.np_dll_timeline_init.restype = ctypes.c_int
+    dll.np_dll_timeline_on_frame.argtypes = [ctypes.POINTER(NpFrameOut)]
+    dll.np_dll_timeline_on_frame.restype = ctypes.c_int
+    dll.np_dll_timeline_delivered.restype = ctypes.c_uint32
+    dll.np_dll_timeline_last_playing.restype = ctypes.c_int
+    dll.np_dll_timeline_last_current_ms.restype = ctypes.c_uint32
+    dll.np_dll_timeline_last_total_ms.restype = ctypes.c_uint32
+    dll.np_dll_timeline_last_host_tick.restype = ctypes.c_uint32
+    dll.np_dll_timeline_last_local_tick.restype = ctypes.c_uint32
+
+    dll.np_dll_latency_respond.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
+    dll.np_dll_latency_respond.restype = ctypes.c_int
+
     dll.np_dll_session_init.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32, ctypes.c_int]
     dll.np_dll_session_link_up.restype = None
     dll.np_dll_session_tick.restype = None
@@ -298,6 +311,8 @@ def main():
     active = False
     requested = False
     cover_requested = False
+    n_delivered = 0
+    n_latency_responded = 0
     last_control = time.monotonic()
     txbuf = ctypes.create_string_buffer(2048)
 
@@ -343,6 +358,25 @@ def main():
                               % RES_ERR_NAMES.get(dll.np_dll_res_last_err(), "?"))
                     elif ev == 5:
                         print("[mock] 资源被 ABORT（对端切歌 / 资源作废）")
+                elif (f.type == 3) and (f.code == 0x01):
+                    # 时间轴：交给 C 的投递层（真机在这里接 Sync_OnPacketAt）
+                    dll.np_dll_timeline_on_frame(ctypes.byref(f))
+                    n_delivered += 1
+                    if (n_delivered % 20) == 0:
+                        print("[mock] 时间轴已投递 %d 帧（最近：playing=%d cur=%dms total=%dms host_tick=%d local_tick=%d）"
+                              % (dll.np_dll_timeline_delivered(),
+                                 dll.np_dll_timeline_last_playing(),
+                                 dll.np_dll_timeline_last_current_ms(),
+                                 dll.np_dll_timeline_last_total_ms(),
+                                 dll.np_dll_timeline_last_host_tick(),
+                                 dll.np_dll_timeline_last_local_tick()))
+                elif (f.type == 1) and (f.code == 0x10):
+                    # 延迟测量请求：原样回传 T1，并带上"本端处理耗时"（微秒）
+                    payload = bytes(f.payload[:f.payload_len])
+                    t1 = _be32(payload, 0) if len(payload) >= 4 else 0
+                    proc_us = 150                       # 模拟 MCU 处理耗时
+                    dll.np_dll_latency_respond(f.request_id, t1, proc_us)
+                    n_latency_responded += 1
                 elif (f.type == 2) and (not requested):
                     if dll.np_dll_send_request_lyrics():
                         requested = True
@@ -392,6 +426,8 @@ def main():
               % (dll.np_dll_stat_frames_rx(), dll.np_dll_stat_crc_errors(),
                  dll.np_dll_stat_resyncs(), dll.np_dll_stat_tx_dropped(),
                  STATE_NAMES.get(dll.np_dll_session_state(), "?")))
+        print("[mock] 时间轴投递给 sink 的帧数=%d  延迟请求应答数=%d"
+              % (dll.np_dll_timeline_delivered(), n_latency_responded))
         conn.close()
         srv.close()
 
