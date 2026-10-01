@@ -23,6 +23,10 @@
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Transport\TcpTransport.cs" LinkBase="Transport" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\NewSendScheduler.cs" LinkBase="Service" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\SessionManager.cs" LinkBase="Service" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\MediaPublisher.cs" LinkBase="Service" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\TimelinePump.cs" LinkBase="Service" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\ControlReceiver.cs" LinkBase="Service" />
+    <!-- 注意：SmtcTimelineSource.cs 不链接（它依赖 WPF 应用里的 SmtcService） -->
   </ItemGroup>
 
 </Project>

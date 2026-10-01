@@ -307,12 +307,26 @@ internal static class Program
         scheduler.Start();
         using var session = new SessionManager(scheduler);
         var parser = new NpStreamParser();
+        var control = new ControlReceiver(session,
+            cmd => Console.WriteLine($"[demo] 收到 CONTROL → 执行 Legacy 媒体键 0x{cmd:X2}"));
+        var media = new MediaPublisher(session);
+        using var pump = new TimelinePump(session, new FakeTimelineSource(), intervalMs: 500);
 
         transport.DataReceived += data => parser.Feed(data.Span);
-        parser.FrameReceived += f => session.OnFrame(f);
+        parser.FrameReceived += f =>
+        {
+            if (session.OnFrame(f))
+            {
+                return;                              // SYSTEM：会话层已处理
+            }
+            if (control.OnFrame(f))
+            {
+                return;                              // CONTROL：已执行并回 ACK
+            }
+            Console.WriteLine($"[demo] 业务帧 T=0x{f.Type:X2} C=0x{f.Code:X2} len={f.PayloadLen}");
+        };
         session.StateChanged += st =>
             Console.WriteLine($"[demo] 状态 -> {st}" + (st == ProtocolState.Active ? $"  SessionId=0x{session.SessionId:X8}" : string.Empty));
-        session.BusinessFrame += f => Console.WriteLine($"[demo] 业务帧 T=0x{f.Type:X2} C=0x{f.Code:X2} len={f.PayloadLen}");
         transport.Disconnected += r => Console.WriteLine($"[demo] 链路断开: {r}");
 
         if (!await transport.ConnectAsync(3000))
@@ -324,6 +338,7 @@ internal static class Program
         Console.WriteLine("[demo] TCP 已连接，发起 HELLO");
         session.LinkUp();
 
+        // ---- 阶段 1：握手 ----
         var sw = Stopwatch.StartNew();
         while (sw.ElapsedMilliseconds < 8000)
         {
@@ -336,15 +351,60 @@ internal static class Program
             }
         }
 
-        bool ok = (session.State == ProtocolState.Active) && (session.SessionId != 0);
+        bool handshakeOk = (session.State == ProtocolState.Active) && (session.SessionId != 0);
+        Console.WriteLine(handshakeOk
+            ? $"[demo] === 握手成功，SessionId=0x{session.SessionId:X8} ==="
+            : "[demo] === 握手失败 ===");
+
+        if (!handshakeOk)
+        {
+            return 5;
+        }
+
+        // ---- 阶段 2（P3）：会话建立后立即推元数据 + 启动时间轴 ----
+        // 顺序很重要：先 PublishNow() 补发首帧，再 Start() 进入常规节拍，
+        // 否则 Start() 的首次触发会与 PublishNow() 撞在一起（重复一帧）。
+        media.Publish("测试歌曲", "测试歌手", "测试专辑");
+        pump.PublishNow();
+        pump.Start();
+        Console.WriteLine("[demo] 已推送 MEDIA，并启动 TIMELINE（观察 mock 侧 cur 是否随时间前进）");
+
+        await Task.Delay(9000);
+
+        // 切歌：验证"元数据更新 + 时间轴立即补发"
+        media.Publish("第二首歌", "另一个歌手", "另一张专辑");
+        await Task.Delay(2000);
+
+        pump.Stop();
+        await scheduler.WaitDrainedAsync(1000);
 
         Console.WriteLine($"[demo] 结果: State={session.State} SessionId=0x{session.SessionId:X8}" +
-                          $" helloTx={session.StatHelloTx} helloRx={session.StatHelloRx} helloAckRx={session.StatHelloAckRx}" +
-                          $" sessStartRx={session.StatSessionStartRx} ackTx={session.StatAckTx}" +
-                          $" sentFrames={scheduler.SentFrames} 对端能力=0x{(session.RemoteCaps?.Caps ?? 0):X8}" +
-                          $" 解析: 帧={parser.Stats.FramesOk} crc错={parser.Stats.CrcErrors} 重同步={parser.Stats.Resyncs}");
-        Console.WriteLine(ok ? "[demo] === 握手成功（PC ↔ 假 ESP32）===" : "[demo] === 握手失败 ===");
-        return ok ? 0 : 5;
+                          $" helloTx={session.StatHelloTx} helloAckRx={session.StatHelloAckRx} 对端能力=0x{(session.RemoteCaps?.Caps ?? 0):X8}");
+        Console.WriteLine($"[demo] P3 统计: MEDIA={media.StatMediaTx} TIMELINE={pump.StatTimelineTx}(立即={pump.StatImmediateTx})" +
+                          $" CONTROL={control.StatControlRx}(最后=0x{control.LastLegacyCmd:X2}) 发送帧={scheduler.SentFrames}" +
+                          $" 解析: 帧={parser.Stats.FramesOk} crc错={parser.Stats.CrcErrors}");
+
+        bool ok = session.IsActive &&
+                  media.StatMediaTx >= 2 &&          // 首推 + 切歌
+                  pump.StatTimelineTx >= 10 &&       // 9 秒 × 500ms ≈ 18 帧
+                  control.StatControlRx >= 1;        // 收到 mock 的按键回控
+
+        Console.WriteLine(ok
+            ? "[demo] === P3 验收通过：MEDIA/TIMELINE 已推送、CONTROL 已收到 ==="
+            : "[demo] === P3 验收未通过 ===");
+        return ok ? 0 : 6;
+    }
+
+    /// <summary>演示用的假时间轴源：1 秒走 1 秒，100 秒循环</summary>
+    private sealed class FakeTimelineSource : ITimelineSource
+    {
+        private readonly Stopwatch _sw = Stopwatch.StartNew();
+
+        public TimelineSnapshot? GetSnapshot()
+        {
+            TimeSpan total = TimeSpan.FromSeconds(100);
+            return new TimelineSnapshot(true, TimeSpan.FromSeconds(_sw.Elapsed.TotalSeconds % 100), total);
+        }
     }
 
     private static int Main(string[] args)

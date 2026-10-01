@@ -36,6 +36,8 @@ SYS_NAMES = {1: "HELLO", 2: "HELLO_ACK", 3: "SESSION_START", 4: "SESSION_END",
              0x12: "LATENCY_END"}
 RES_NAMES = {1: "REQUEST", 2: "BEGIN", 3: "DATA", 4: "END", 5: "ABORT"}
 CTRL_NAMES = {1: "PLAY_PAUSE", 2: "NEXT", 3: "PREVIOUS"}
+MEDIA_NAMES = {1: "METADATA"}
+TIMELINE_NAMES = {1: "STATE"}
 CAP_BITS = {"lyrics": 1, "cover": 2, "jpeg": 4, "png": 8, "rgb565": 16}
 
 STATE_NAMES = {0: "IDLE", 1: "HANDSHAKE", 2: "NEGOTIATING", 3: "WAIT_SESSION_START", 4: "ACTIVE"}
@@ -80,6 +82,11 @@ def load_dll(path):
     dll.np_dll_tx_poll.argtypes = [ctypes.c_void_p, ctypes.c_int]
     dll.np_dll_tx_poll.restype = ctypes.c_int
     dll.np_dll_tx_count.restype = ctypes.c_int
+    dll.np_dll_send_control.argtypes = [ctypes.c_int]
+    dll.np_dll_send_control.restype = ctypes.c_int
+    dll.np_dll_send_request_lyrics.restype = ctypes.c_int
+    dll.np_dll_send_request_cover.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    dll.np_dll_send_request_cover.restype = ctypes.c_int
 
     dll.np_dll_session_init.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32, ctypes.c_int]
     dll.np_dll_session_link_up.restype = None
@@ -103,6 +110,10 @@ def load_dll(path):
 def frame_name(f):
     if f.type == 1:
         return SYS_NAMES.get(f.code, "SYS_0x%02X" % f.code)
+    if f.type == 2:
+        return MEDIA_NAMES.get(f.code, "MEDIA_0x%02X" % f.code)
+    if f.type == 3:
+        return TIMELINE_NAMES.get(f.code, "TL_0x%02X" % f.code)
     if f.type in (5, 6):
         return RES_NAMES.get(f.code, "RES_0x%02X" % f.code)
     if f.type == 4:
@@ -110,10 +121,54 @@ def frame_name(f):
     return "CODE_0x%02X" % f.code
 
 
+def _be16(b, off):
+    return (b[off] << 8) | b[off + 1]
+
+
+def _be32(b, off):
+    return (b[off] << 24) | (b[off + 1] << 16) | (b[off + 2] << 8) | b[off + 3]
+
+
+def _utf8(b, off, length):
+    return bytes(b[off:off + length]).decode("utf-8", "replace")
+
+
+def decode_media(payload):
+    """MEDIA/METADATA（新编码，规范 §6）：u16 BE 长度 + UTF-8 文本 ×3"""
+    if len(payload) < 6:
+        return "(payload 太短)"
+
+    p = 0
+    tlen = _be16(payload, p); p += 2
+    title = _utf8(payload, p, tlen); p += tlen
+    alen = _be16(payload, p); p += 2
+    artist = _utf8(payload, p, alen); p += alen
+    blen = _be16(payload, p); p += 2
+    album = _utf8(payload, p, blen)
+    return "title='%s' artist='%s' album='%s'" % (title, artist, album)
+
+
+def decode_timeline(payload):
+    """TIMELINE/STATE（新编码，规范 §7）：STATE u8 + 3×u32 BE"""
+    if len(payload) < 13:
+        return "(payload 太短)"
+    state = payload[0]
+    cur = _be32(payload, 1)
+    total = _be32(payload, 5)
+    tick = _be32(payload, 9)
+    return "state=%d cur=%dms total=%dms tick=%d" % (state, cur, total, tick)
+
+
 def print_frame(f):
     payload = bytes(f.payload[:f.payload_len])
     extra = payload.hex(" ").upper() if payload else "-"
-    print("[mock] <- %-9s %-14s len=%-4d seq=%-4d sid=0x%08X rid=%-4d  payload=%s"
+
+    if f.type == 2 and f.code == 0x01:
+        extra = decode_media(payload)
+    elif f.type == 3 and f.code == 0x01:
+        extra = decode_timeline(payload)
+
+    print("[mock] <- %-9s %-14s len=%-4d seq=%-4d sid=0x%08X rid=%-4d  %s"
           % (TYPE_NAMES.get(f.type, "?"), frame_name(f), f.payload_len,
              f.sequence, f.session_id, f.request_id, extra))
 
@@ -131,6 +186,9 @@ def parse_args():
     ap.add_argument("--max-resource", type=int, default=65536, help="能接收的最大资源字节数")
     ap.add_argument("--tick-ms", type=int, default=10, help="主循环周期")
     ap.add_argument("--exit-after-active", action="store_true", help="会话建立后自动退出")
+    ap.add_argument("--control-every", type=float, default=0.0,
+                    help="会话建立后每隔 N 秒发一次 CONTROL(PLAY_PAUSE)，用于验证 PC 侧回控")
+    ap.add_argument("--run-seconds", type=float, default=0.0, help="运行 N 秒后自动退出（0 = 一直跑）")
     ap.add_argument("--quiet", action="store_true", help="不逐帧打印")
     return ap.parse_args()
 
@@ -174,6 +232,7 @@ def main():
 
     last_state = None
     active = False
+    last_control = time.monotonic()
     txbuf = ctypes.create_string_buffer(2048)
 
     try:
@@ -222,6 +281,18 @@ def main():
                     if args.exit_after_active:
                         time.sleep(0.3)          # 留点时间把最后的 ACK 发出去
                         break
+
+            # 5) 按键回控（可选）：周期发 CONTROL，验证 PC 侧执行链路
+            if active and (args.control_every > 0.0):
+                if (time.monotonic() - last_control) >= args.control_every:
+                    last_control = time.monotonic()
+                    queued = dll.np_dll_send_control(1)      # 1 = PLAY_PAUSE
+                    print("[mock] -> CONTROL PLAY_PAUSE（入队=%d）" % queued)
+
+            # 6) 运行时长兜底（便于脚本化验证）
+            if (args.run_seconds > 0.0) and ((time.monotonic() - t0) >= args.run_seconds):
+                print("[mock] 到达 --run-seconds，退出")
+                break
 
             if dll.np_dll_session_handshake_failed():
                 print("[mock] 握手失败（HELLO 重试用尽）")

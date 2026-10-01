@@ -77,6 +77,18 @@ namespace MediaMonitor.Protocol.New.Codec
         public const byte Abort = 0x05;
     }
 
+    /// <summary>MEDIA CODE（§6）</summary>
+    public static class NpMediaCode
+    {
+        public const byte Metadata = 0x01;
+    }
+
+    /// <summary>TIMELINE CODE（§7）</summary>
+    public static class NpTimelineCode
+    {
+        public const byte State = 0x01;
+    }
+
     /// <summary>CONTROL CODE（§8）</summary>
     public static class NpCtrlCode
     {
