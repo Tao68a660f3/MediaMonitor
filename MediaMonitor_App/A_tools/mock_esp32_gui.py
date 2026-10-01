@@ -415,7 +415,7 @@ def parse_args():
     ap.add_argument("--ip", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9100)
     ap.add_argument("--dll", default=core.DEFAULT_DLL)
-    ap.add_argument("--caps", default="lyrics,cover,jpeg,rgb565")
+    ap.add_argument("--caps", default="lyrics,cover,jpeg,png,rgb565")
     ap.add_argument("--max-edge", type=int, default=240)
     ap.add_argument("--max-resource", type=int, default=262144)
     ap.add_argument("--tick-ms", type=int, default=10)

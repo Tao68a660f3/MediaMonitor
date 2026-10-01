@@ -11,7 +11,7 @@ mock_esp32_new.py —— New Protocol V1.1 的 ESP32 模拟器（TCP Server）
 
 用法：
     python mock_esp32_new.py --port 9100
-    python mock_esp32_new.py --port 9100 --max-edge 240 --caps lyrics,cover,jpeg,rgb565
+    python mock_esp32_new.py --port 9100 --max-edge 240 --caps lyrics,cover,jpeg,png,rgb565
     python mock_esp32_new.py --port 9100 --exit-after-active   # 会话建立后自动退出（脚本化验证用）
     python mock_esp32_new.py --dll <别的 np_ref.dll 路径>
 
@@ -349,7 +349,7 @@ class MockServer:
       * 每次新连接都会 `np_dll_init / session_init / res_init / timeline_init`，避免上一次的残留状态。
     """
 
-    def __init__(self, dll, ip="127.0.0.1", port=9100, caps=0x17, max_edge=240,
+    def __init__(self, dll, ip="127.0.0.1", port=9100, caps=0x1F, max_edge=240,
                  max_resource=262144, tick_ms=10, art_dir="art_recv", cover_format=0x10,
                  control_every=0.0, exit_after_active=False, run_seconds=0.0,
                  quiet=False, cli=False, serve_forever=False, on_event=None):
@@ -749,8 +749,8 @@ def parse_args():
     ap.add_argument("--ip", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9100)
     ap.add_argument("--dll", default=DEFAULT_DLL)
-    ap.add_argument("--caps", default="lyrics,cover,jpeg,rgb565",
-                    help="逗号分隔：lyrics,cover,jpeg,png,rgb565")
+    ap.add_argument("--caps", default="lyrics,cover,jpeg,png,rgb565",
+                    help="逗号分隔：lyrics,cover,jpeg,png,rgb565（默认全给：模拟器这三种封面格式都收得下）")
     ap.add_argument("--max-edge", type=int, default=240, help="HELLO 里声明能接受的最大封面边长")
     ap.add_argument("--max-resource", type=int, default=262144, help="能接收的最大资源字节数（写进 HELLO）")
     ap.add_argument("--tick-ms", type=int, default=10, help="主循环周期")

@@ -368,7 +368,7 @@ python MediaMonitor_App/A_tools/mock_esp32_gui.py          # 图形版（开窗�
 * **断线后继续监听**（`serve_forever=True`），方便反复联调；每次新连接都会 `np_dll_init/session_init/res_init/timeline_init`，避免上一次的残留；
 * `--headless --seconds N` 可无窗口跑一遍并打印解码摘要（自动化验证用）；`--trace` 把事件同时打到控制台，便于留日志。
 
-**实测基线**（`--caps lyrics,cover,jpeg,rgb565 --max-edge 240`）：帧率 2 帧/秒（`cur` 每 ~500ms 递增）、总帧数 ~78/30s、`crc错=0 重同步=0`、歌词资源 39B（占位歌词）CRC 由 C 侧校验通过、延迟 `Base≈0.1ms Avg≈7.5ms`（loopback + mock 150µs 模拟处理）。
+**实测基线**（`--caps lyrics,cover,jpeg,png,rgb565 --max-edge 240`，封面默认请求 JPEG）：帧率 2 帧/秒（`cur` 每 ~500ms 递增）、总帧数 ~78/30s、`crc错=0 重同步=0`、240×240 封面 JPEG 约 3.5 KB（RGB565 同尺寸是 115 200 B）、延迟 `Base≈0.1ms Avg≈7.5ms`（loopback + mock 150µs 模拟处理）。
 
 ### 9.9 回归自测
 

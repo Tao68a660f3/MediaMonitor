@@ -198,7 +198,7 @@ python <MediaMonitor>\MediaMonitor_App\A_tools\mock_esp32_new.py --port 9100   #
 ```
 
 > ⚠️ 模拟器是 **TCP 服务端**（ESP32 角色），上位机是客户端：**必须先启动模拟器，再点上位机连接**。
-> 模拟器的默认声明：`CAPS=歌词+封面+JPEG+RGB565`、最大封面边长 240、单资源上限 256 KB；
+> 模拟器的默认声明：`CAPS=歌词+封面+JPEG+PNG+RGB565`（`0x1F`，三种封面格式都收得下）、最大封面边长 240、单资源上限 256 KB；
 > **请求封面默认用 JPEG**（240×240 大约十几 KB，RGB565 则是固定的 115200 B —— 省带宽但真机要解码器，GUI 上可随时下拉切换格式）；
 > 某首歌有歌词/封面时，它会在收到 `MEDIA` 后自动发 `LYRICS REQUEST`，收齐后再发 `ALBUMCOVER REQUEST`。
 
