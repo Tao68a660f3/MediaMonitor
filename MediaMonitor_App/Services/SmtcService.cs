@@ -1,8 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.Media.Control;
+using Windows.Storage.Streams;
 
 namespace MediaMonitor.Services
 {
@@ -27,6 +30,15 @@ namespace MediaMonitor.Services
         public string? CurrentArtist { get; private set; }
         public string? CurrentAlbum { get; private set; }
 
+        /// <summary>
+        /// 当前曲目的封面「原始字节」（SMTC 直出，未做任何缩放/重编码）；null = 无封面或当前无会话。
+        ///
+        /// <para>本类只负责<b>抓取 + 在内存里存着</b>：要压缩到指定分辨率请用 <c>Tools/ArtworkProcessor</c>，
+        /// 将来新协议下发也直接从这里取，不必再动抓取层。</para>
+        /// <para>注意：当前的 0xAA/0xAB 协议属于 legacy，<b>不会</b>用到这个字段。</para>
+        /// </summary>
+        public byte[]? CurrentThumbnail { get; private set; }
+
         private GlobalSystemMediaTransportControlsSessionManager? _manager;
         private GlobalSystemMediaTransportControlsSession? _currentSession;
         private GlobalSystemMediaTransportControlsSessionTimelineProperties? _lastTimeline;
@@ -47,8 +59,23 @@ namespace MediaMonitor.Services
         // 只有"最后一次触发的事件"序号最新才允许生效，旧事件的延迟完成直接丢弃。
         private long _mediaUpdateSeq = 0;
 
+        // 封面内容摘要（SHA256 十六进制）：SMTC 在同一首歌上会反复发 MediaPropertiesChanged，
+        // 用它去重，避免重复解码、重复通知；切会话时连同缓存一起清掉，保证新会话首帧一定生效。
+        private string? _thumbHash;
+
         public event Action<GlobalSystemMediaTransportControlsSessionPlaybackStatus>? PlaybackChanged;
         public Action<GlobalSystemMediaTransportControlsSessionMediaProperties>? OnMediaUpdated;
+
+        /// <summary>
+        /// 当前曲目的封面发生变化：参数 null 表示「本曲没有封面」。
+        ///
+        /// <para>只在 <see cref="Session_MediaPropertiesChanged"/> 成功读到媒体属性后触发；
+        /// 会话消失（<see cref="DetachCurrentSession"/>）<b>不走这里</b> —— 上层由 <see cref="MediaCleared"/>
+        /// 同步清掉自己的封面缓存，以保持"会话消失不下发任何清场数据"的既有约定。</para>
+        /// <para>同一首歌反复触发 MediaPropertiesChanged 时内容摘要不变，因此不会重复触发。</para>
+        /// </summary>
+        public Action<byte[]?>? OnThumbnailUpdated;
+
         public event Action? SessionsListChanged;
 
         /// <summary>
@@ -116,6 +143,10 @@ namespace MediaMonitor.Services
             CurrentTitle = null;
             CurrentArtist = null;
             CurrentAlbum = null;
+
+            // 封面缓存同理（不触发 OnThumbnailUpdated：会话消失按既有约定不下发、不提示）
+            CurrentThumbnail = null;
+            _thumbHash = null;
 
             if (notify && hadSession)
                 MediaCleared?.Invoke();
@@ -240,6 +271,10 @@ namespace MediaMonitor.Services
                     CurrentArtist = props.Artist; // 赋值
                     CurrentAlbum = props.AlbumTitle;
                     OnMediaUpdated?.Invoke(props);
+
+                    // 封面走独立异步支线：不阻塞元数据/歌词路径；
+                    // 内部自带 try/catch 与 sender/seq 校验，不会产生未观察异常、也不会让旧封面盖新封面。
+                    _ = UpdateThumbnailAsync(sender, props.Thumbnail, seq);
                 }
             }
             catch (Exception ex)
@@ -247,6 +282,58 @@ namespace MediaMonitor.Services
                 // 捕获 COMException (0x80030070) 等，保持程序不崩溃
                 System.Diagnostics.Debug.WriteLine($"SMTC 属性获取失败: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// 读取 SMTC 封面原始字节并缓存到 <see cref="CurrentThumbnail"/>（不做缩放/重编码，压缩交给 Tools/ArtworkProcessor）。
+        ///
+        /// <para>三点防护与既有元数据路径完全同构：</para>
+        /// <list type="bullet">
+        /// <item>整段 try/catch：会话消亡（播放器退出/切歌瞬间）OpenReadAsync 会抛 COMException(0x80030070)；</item>
+        /// <item>await 完成后再校验 sender + seq：切歌/切会话瞬间系统会连发多个事件，
+        /// 且完成顺序不保证与触发顺序一致，旧事件的延迟完成必须丢弃；</item>
+        /// <item>内容摘要去重：同一首歌反复触发 MediaPropertiesChanged（Chrome 尤甚）时不重复处理、不重复通知。</item>
+        /// </list>
+        /// </summary>
+        private async Task UpdateThumbnailAsync(
+            GlobalSystemMediaTransportControlsSession sender,
+            IRandomAccessStreamReference? reference,
+            long seq)
+        {
+            byte[]? raw = null;
+
+            try
+            {
+                if (reference != null)
+                {
+                    using IRandomAccessStreamWithContentType stream = await reference.OpenReadAsync();
+                    if (stream != null && stream.Size > 0)
+                    {
+                        // AsStreamForRead 来自 System.IO.WindowsRuntimeStreamExtensions（Windows SDK 投影自带，无需额外 NuGet 包）
+                        using Stream net = stream.AsStreamForRead();
+                        using var ms = new MemoryStream();
+                        await net.CopyToAsync(ms);
+                        raw = ms.ToArray();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // 部分播放器（Chrome 网页封面、某些 SMTC 提供方）拿不到缩略图 —— 按"无封面"降级即可
+                System.Diagnostics.Debug.WriteLine($"SMTC 封面读取失败: {ex.Message}");
+            }
+
+            // 过期结果：会话已切换，或已有更新的属性事件发出 → 直接丢弃
+            if (sender != _currentSession || seq != Volatile.Read(ref _mediaUpdateSeq))
+                return;
+
+            string? hash = raw == null ? null : Convert.ToHexString(SHA256.HashData(raw));
+            if (hash == _thumbHash)
+                return;   // 内容没变（同一首歌的重复事件）：不重复通知
+
+            _thumbHash = hash;
+            CurrentThumbnail = raw;
+            OnThumbnailUpdated?.Invoke(raw);
         }
 
         /// <summary>

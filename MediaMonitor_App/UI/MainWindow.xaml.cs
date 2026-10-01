@@ -24,6 +24,13 @@ namespace MediaMonitor
         // 全链路延迟测试：全部交互逻辑封装在 UI\LatencyTestController.cs，这里只留调用点
         private LatencyTestController? _latencyTest;
 
+        // ★★ 封面验证开关（临时功能，仅用于确认"抓取 + 调整尺寸"可用）★★
+        // 置 false = 不再弹窗，只保留 SmtcService 里的封面缓存；
+        // 联调完成后本段连同 UI/ArtworkPreviewWindow.* 一起删除即可。
+        // （用 static readonly 而不是 const：const 会让下面的判断被编译器当成常量，产生 CS0162 不可达代码警告）
+        private static readonly bool ShowArtworkPreviewOnUpdate = true;
+        private ArtworkPreviewWindow? _artPreview;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -60,6 +67,9 @@ namespace MediaMonitor
                 // 记得我们刚才给 RefreshSessionList 加了 Dispatcher.Invoke 吗？
                 App.Smtc.SessionsListChanged += RefreshSessionList;
                 RefreshSessionList();
+
+                // 封面更新验证（临时）：抓到封面后弹窗看一眼压缩结果，见 OnArtworkUpdated
+                App.Smtc.OnThumbnailUpdated += OnArtworkUpdated;
             }
 
             // 订阅歌词变化信号
@@ -120,6 +130,9 @@ namespace MediaMonitor
 
             if (!_isRealExit)
             {
+                // 封面验证窗口是 Topmost 的，主窗口隐藏到托盘时必须一起关掉，否则会一直浮在最上层
+                _artPreview?.Close();
+
                 // 如果不是点击了托盘里的“退出”，就取消关闭，改为隐藏
                 e.Cancel = true;
                 this.Hide();
@@ -320,7 +333,7 @@ namespace MediaMonitor
             // 更新播放信息
             TxtTitle.Text = App.Smtc.CurrentTitle ?? "未在播放";
             TxtArtist.Text = App.Smtc.CurrentArtist ?? "未知艺术家";
-            TxtAlbum.Text = App.Smtc.CurrentAlbum ?? "未知album";
+            TxtAlbum.Text = App.Smtc.CurrentAlbum ?? "未知唱片集";
 
             // 更新进度条
             var prog = App.Smtc.GetCurrentProgress();
@@ -383,6 +396,42 @@ namespace MediaMonitor
 
                 // 4. (可选) 如果你想在 UI 上标记当前是第几行，可以顺便用 index 坐点什么
                 // Debug.WriteLine($"Current Line Index: {index}");
+            });
+        }
+
+        /// <summary>
+        /// 封面更新回调（临时验证用）：把压缩到 600×600 的结果弹窗显示，确认 SMTC 抓取与调整尺寸功能可用。
+        ///
+        /// <para>关闭方式：把本类顶部的 <c>ShowArtworkPreviewOnUpdate</c> 置 false（或删掉本方法与订阅）。</para>
+        /// <para>将来新协议下发封面时，数据源就是 <c>App.Smtc.CurrentThumbnail</c>（原始）
+        /// + <c>Tools/ArtworkProcessor</c>（压缩），本回调可直接改成"喂给协议打包"。</para>
+        /// </summary>
+        private void OnArtworkUpdated(byte[]? raw)
+        {
+            if (!ShowArtworkPreviewOnUpdate)
+                return;
+
+            // 回调来自 SMTC 事件的线程池线程，建窗口必须回到 UI 线程；
+            // 程序正在退出时 Dispatcher 可能已经关停，直接放弃
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.HasShutdownStarted)
+                return;
+
+            dispatcher.BeginInvoke(() =>
+            {
+                // 单实例：快速切歌时先关掉上一个，避免窗口堆积
+                _artPreview?.Close();
+
+                var win = new ArtworkPreviewWindow(raw) { Owner = this };
+                // 用户手动点 X 关掉后把引用置空，否则下一次切歌会去 Close() 一个已关闭的窗口
+                win.Closed += (_, __) =>
+                {
+                    if (ReferenceEquals(_artPreview, win))
+                        _artPreview = null;
+                };
+
+                _artPreview = win;
+                win.Show();   // 非模态：不阻塞后台帧循环，也不抢播放器焦点
             });
         }
 

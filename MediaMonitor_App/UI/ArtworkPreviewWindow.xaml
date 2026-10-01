@@ -1,0 +1,31 @@
+<Window x:Class="MediaMonitor.ArtworkPreviewWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="封面压缩验证 — 600×600"
+    Width="640" Height="730"
+    MinWidth="320" MinHeight="380"
+    WindowStartupLocation="CenterOwner"
+    ShowActivated="False"
+    Topmost="True"
+    Background="#202020">
+
+    <!-- 调试用窗口：只显示"压缩到 600×600"的结果，用于验证封面抓取与调整尺寸功能。
+         联调完成后可整体删除本文件（入口开关见 MainWindow.ShowArtworkPreviewOnUpdate）。 -->
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="#111111" CornerRadius="4" Padding="4">
+            <Image x:Name="ImgPreview" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>
+        </Border>
+
+        <StackPanel Grid.Row="1" Margin="0,10,0,0">
+            <TextBlock x:Name="TxtArtworkInfo" Foreground="#CCCCCC" FontFamily="Consolas"
+                       FontSize="12" TextWrapping="Wrap" Text="(等待封面...)"/>
+            <TextBlock Text="仅用于验证封面抓取与压缩(调整尺寸)；开关见 MainWindow.ShowArtworkPreviewOnUpdate"
+                       Foreground="#777777" FontSize="11" Margin="0,6,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+    </Grid>
+</Window>

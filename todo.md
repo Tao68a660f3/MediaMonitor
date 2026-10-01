@@ -51,6 +51,12 @@
 - [ ] **文档完善**：在 README 中推荐 MusicPlayer2 和 foobar2000，指引 SMTC 设置。
 - [ ] **逐步支持 webbeef（foobar2000 和 deadbeef 插件）**：如果选择了使用此媒体来源，除非播放器被关闭或者手动切换了媒体来源，否则不应当自动改变媒体来源。
 
+## 🖼️ 封面支持（面向新协议；与 legacy 的 0xAA/0xAB 无关）
+- [x] **抓取与缓存**：`SmtcService.CurrentThumbnail` / `OnThumbnailUpdated`（SHA256 内容去重 + 切歌/切会话时丢弃过期结果）。
+- [x] **压缩到指定分辨率**：`Tools/ArtworkProcessor.ProcessToJpeg/ProcessToPng`（等比填满 + 居中裁剪，输出尺寸严格等于目标，不引入新依赖）。
+- [x] **验证手段**：封面更新时弹窗显示 600×600 压缩结果（`UI/ArtworkPreviewWindow`，开关 `MainWindow.ShowArtworkPreviewOnUpdate`，联调完成后整体删除）。
+- [ ] **下发**：等新协议定稿后接线（分片、清场帧、重连补发等均未实现；当前 legacy 协议不承载封面）。
+
 ---
 **当前状态：**
 - [x] 串口缓冲区阻塞死锁已解决 (不再导致 UI 挂起)
