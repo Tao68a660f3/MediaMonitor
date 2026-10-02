@@ -10,12 +10,17 @@ mock_esp32_gui.py —— New Protocol V1.1 的 **ESP32 模拟器（图形版）*
     * TIMELINE：播放状态 + 进度条 + cur/total/host_tick/local_tick（+ 收帧计数）
     * LYRICS：歌词行（`[mm:ss.mmm] 正文`，翻译行带缩进，逐字行标出词数）
     * ALBUMCOVER：封面预览（RGB565 直接解码；JPEG/PNG 需要 PIL，没有就只显示信息）
-    * 手动按钮：PLAY_PAUSE / NEXT / PREV / 请求歌词 / 请求封面
+    * 手动按钮：PLAY_PAUSE / NEXT / PREV / 请求歌词 / 请求封面 / 测延迟（本端发起一轮延迟测量）
+
+窗口布局（左列自上而下）：MEDIA → LYRICS → TIMELINE，右列 ALBUMCOVER，底部事件日志。
 
 用法：
-    python mock_esp32_gui.py                            # 默认 127.0.0.1:9100
+    python mock_esp32_gui.py                            # 默认 TCP 127.0.0.1:9100
     python mock_esp32_gui.py --port 9200
+    python mock_esp32_gui.py --transport com --com COM23 --baud 115200   # 串口（上位机传输=COM）
     python mock_esp32_gui.py --headless --seconds 20     # 无窗口自检（脚本化验证用）
+
+窗口里也能直接切「传输」：TCP（填 IP/端口）或 COM（填串口号/波特率，用 com0com 之类的虚拟串口对即可）。
 
 依赖：Python 标准库（tkinter 随 Python 安装；PIL 可选）。
 """
@@ -66,8 +71,8 @@ class MockGui:
         self._log_lines = 0
 
         root.title("对端模拟器 · ESP32 / New Protocol V1.1")
-        root.geometry("1180x820")
-        root.minsize(980, 700)
+        root.geometry("1200x900")
+        root.minsize(980, 760)
 
         self._build_widgets()
         root.after(200, self._tick)
@@ -83,12 +88,31 @@ class MockGui:
         top = ttk.Frame(self.root)
         top.grid(row=0, column=0, sticky="ew", **pad)
 
-        ttk.Label(top, text="监听地址:", font=FONT).pack(side="left")
+        # 传输方式：TCP（上位机填「传输=TCP」+ IP/端口）或 COM（上位机填「传输=COM」+ 配对的那一端）
+        ttk.Label(top, text="传输:", font=FONT).pack(side="left")
+        self.var_transport = tk.StringVar(value="TCP")
+        cbo_tr = ttk.Combobox(top, textvariable=self.var_transport, width=5, state="readonly",
+                              values=["TCP", "COM"], font=FONT)
+        cbo_tr.pack(side="left", padx=4)
+        cbo_tr.bind("<<ComboboxSelected>>", self.on_transport_changed)
+
+        ttk.Label(top, text="地址:", font=FONT).pack(side="left")
         self.var_ip = tk.StringVar(value=self.args.ip)
-        ttk.Entry(top, textvariable=self.var_ip, width=12, font=FONT).pack(side="left", padx=4)
+        self.ent_ip = ttk.Entry(top, textvariable=self.var_ip, width=11, font=FONT)
+        self.ent_ip.pack(side="left", padx=4)
         ttk.Label(top, text="端口:", font=FONT).pack(side="left")
         self.var_port = tk.StringVar(value=str(self.args.port))
-        ttk.Entry(top, textvariable=self.var_port, width=6, font=FONT).pack(side="left", padx=4)
+        self.ent_port = ttk.Entry(top, textvariable=self.var_port, width=6, font=FONT)
+        self.ent_port.pack(side="left", padx=4)
+
+        ttk.Label(top, text="串口:", font=FONT).pack(side="left", padx=(8, 0))
+        self.var_com = tk.StringVar(value=self.args.com)
+        self.ent_com = ttk.Entry(top, textvariable=self.var_com, width=7, font=FONT)
+        self.ent_com.pack(side="left", padx=4)
+        ttk.Label(top, text="波特率:", font=FONT).pack(side="left")
+        self.var_baud = tk.StringVar(value=str(self.args.baud))
+        self.ent_baud = ttk.Entry(top, textvariable=self.var_baud, width=7, font=FONT)
+        self.ent_baud.pack(side="left", padx=4)
 
         self.btn_start = ttk.Button(top, text="启动服务端", command=self.on_start)
         self.btn_start.pack(side="left", padx=6)
@@ -96,16 +120,9 @@ class MockGui:
         self.btn_stop.pack(side="left")
 
         self.lbl_phase = ttk.Label(top, text="未启动", font=FONT_BOLD, foreground="#555555")
-        self.lbl_phase.pack(side="left", padx=16)
+        self.lbl_phase.pack(side="left", padx=12)
 
-        ttk.Label(top, text="请求封面格式:", font=FONT).pack(side="left", padx=(10, 2))
-        self.var_fmt = tk.StringVar(value=FMT_NAMES.get(self.args.cover_format, "JPEG"))
-        cbo = ttk.Combobox(top, textvariable=self.var_fmt, width=7, state="readonly",
-                           values=list(FMT_CODES.keys()), font=FONT)
-        cbo.pack(side="left")
-        cbo.bind("<<ComboboxSelected>>", self.on_format_changed)
-        ttk.Label(top, text="（JPEG 比 RGB565 小一个数量级，但 ESP32 要解码器）",
-                  font=FONT, foreground="#888888").pack(side="left", padx=6)
+        self._apply_transport_state()        # 按当前传输方式把不适用的输入框灰掉
 
         # --- 会话与统计 ---
         info = ttk.LabelFrame(self.root, text=" 会话与统计 ")
@@ -119,6 +136,12 @@ class MockGui:
         self.lbl_stats.grid(row=0, column=2, sticky="w", padx=8)
         self.lbl_extra = ttk.Label(info, text="延迟应答=0  回控发出=0", font=FONT_MONO)
         self.lbl_extra.grid(row=0, column=3, sticky="w", padx=8)
+
+        # 第二行：资源请求状态机 + 本端自测延迟（"点按钮没反应"时，答案就在这两行里）
+        self.lbl_res = ttk.Label(info, text="资源: -", font=FONT_MONO, foreground="#444444")
+        self.lbl_res.grid(row=1, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
+        self.lbl_lat = ttk.Label(info, text="延迟: 未测过", font=FONT_MONO, foreground="#444444")
+        self.lbl_lat.grid(row=1, column=2, columnspan=2, sticky="w", padx=8, pady=(0, 4))
 
         # --- 媒体 / 时间轴 / 封面 ---
         mid = ttk.Frame(self.root)
@@ -142,6 +165,12 @@ class MockGui:
                                    wraplength=560, justify="left")
         self.lbl_album.pack(anchor="w", padx=10, pady=(0, 8))
 
+        # --- 歌词（放在 MEDIA 正下方：左边一列 MEDIA → LYRICS → TIMELINE）---
+        lyr = ttk.LabelFrame(left, text=" LYRICS（歌词资源 → Legacy 帧 → 行） ")
+        lyr.pack(fill="both", expand=True, pady=(6, 0))
+        self.txt_lyrics = scrolledtext.ScrolledText(lyr, height=10, font=FONT_MONO, wrap="none")
+        self.txt_lyrics.pack(fill="both", expand=True, padx=8, pady=8)
+
         tl = ttk.LabelFrame(left, text=" TIMELINE（解码自 TIMELINE 帧） ")
         tl.pack(fill="x", pady=(6, 0))
         self.pb = ttk.Progressbar(tl, orient="horizontal", length=520, mode="determinate")
@@ -164,27 +193,31 @@ class MockGui:
 
         self.root.columnconfigure(0, weight=1)
 
-        # --- 歌词 ---
-        lyr = ttk.LabelFrame(self.root, text=" LYRICS（歌词资源 → Legacy 帧 → 行） ")
-        lyr.grid(row=3, column=0, sticky="nsew", padx=8)
-        self.root.rowconfigure(3, weight=2)
-        self.txt_lyrics = scrolledtext.ScrolledText(lyr, height=9, font=FONT_MONO, wrap="none")
-        self.txt_lyrics.pack(fill="both", expand=True, padx=8, pady=8)
-
         # --- 手动按钮 ---
         ctl = ttk.Frame(self.root)
-        ctl.grid(row=4, column=0, sticky="ew", padx=8, pady=4)
+        ctl.grid(row=3, column=0, sticky="ew", padx=8, pady=4)
         ttk.Label(ctl, text="手动（都走真 C 代码入队）:", font=FONT).pack(side="left")
         for text, code in (("PLAY_PAUSE", 1), ("NEXT", 2), ("PREV", 3)):
             ttk.Button(ctl, text=text, command=lambda c=code: self.on_control(c)).pack(side="left", padx=4)
         ttk.Button(ctl, text="请求歌词", command=lambda: self.on_cmd("req_lyrics")).pack(side="left", padx=12)
         ttk.Button(ctl, text="请求封面", command=lambda: self.on_cmd("req_cover")).pack(side="left", padx=4)
 
-        # --- 事件日志 ---
+        # 封面请求格式（只影响下一次 ALBUMCOVER REQUEST）：跟"请求封面"放一起更顺手
+        ttk.Label(ctl, text="格式:", font=FONT).pack(side="left", padx=(10, 2))
+        self.var_fmt = tk.StringVar(value=FMT_NAMES.get(self.args.cover_format, "JPEG"))
+        cbo_fmt = ttk.Combobox(ctl, textvariable=self.var_fmt, width=7, state="readonly",
+                               values=list(FMT_CODES.keys()), font=FONT)
+        cbo_fmt.pack(side="left")
+        cbo_fmt.bind("<<ComboboxSelected>>", self.on_format_changed)
+
+        ttk.Button(ctl, text="测延迟", command=self.on_latency).pack(side="left", padx=(16, 4))
+        ttk.Label(ctl, text="（本端发起 30 样本）", font=FONT, foreground="#888888").pack(side="left")
+
+        # --- 事件日志（放大：排查"点了没反应"主要看这里）---
         logf = ttk.LabelFrame(self.root, text=" 事件日志 ")
-        logf.grid(row=5, column=0, sticky="nsew", padx=8, pady=(0, 8))
-        self.root.rowconfigure(5, weight=2)
-        self.txt_log = scrolledtext.ScrolledText(logf, height=8, font=FONT_MONO, background="#1E1E1E",
+        logf.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.root.rowconfigure(4, weight=4)
+        self.txt_log = scrolledtext.ScrolledText(logf, height=14, font=FONT_MONO, background="#1E1E1E",
                                                  foreground="#CCCCCC", insertbackground="#CCCCCC")
         self.txt_log.pack(fill="both", expand=True, padx=8, pady=8)
 
@@ -192,6 +225,20 @@ class MockGui:
 
     def _fmt_code(self):
         return FMT_CODES.get(self.var_fmt.get(), 0x01)
+
+    def _apply_transport_state(self):
+        """按当前传输方式把不适用的输入框灰掉（构造期只调这个，不写日志）"""
+        is_com = (self.var_transport.get().upper() == "COM")
+        for w in (self.ent_ip, self.ent_port):
+            w.config(state="disabled" if is_com else "normal")
+        for w in (self.ent_com, self.ent_baud):
+            w.config(state="normal" if is_com else "disabled")
+
+    def on_transport_changed(self, _evt=None):
+        """TCP / COM 切换（真正生效在下次「启动服务端」）"""
+        self._apply_transport_state()
+        if self.server is None:
+            self._append_log("传输 → %s（上位机的「传输」要选成一样的）" % self.var_transport.get())
 
     def on_format_changed(self, _evt=None):
         """改封面请求格式：只影响下一次 ALBUMCOVER REQUEST，立刻生效（不用重启服务端）"""
@@ -201,10 +248,15 @@ class MockGui:
         self._append_log("封面请求格式 → %s（0x%02X）" % (self.var_fmt.get(), fmt))
 
     def on_start(self):
+        transport = self.var_transport.get().lower()
         try:
             port = int(self.var_port.get())
+            baud = int(self.var_baud.get())
         except ValueError:
-            self._append_log("端口不合法")
+            self._append_log("端口 / 波特率不合法")
+            return
+        if (baud <= 0) or (transport == "com" and not self.var_com.get().strip()):
+            self._append_log("串口号 / 波特率不合法")
             return
 
         self.server = core.MockServer(
@@ -217,6 +269,11 @@ class MockGui:
             tick_ms=self.args.tick_ms,
             art_dir=self.args.art_dir,
             cover_format=self._fmt_code(),
+            transport=transport,
+            com_port=self.var_com.get().strip(),
+            baud=baud,
+            latency_samples=self.args.latency_samples,
+            latency_interval_ms=self.args.latency_interval_ms,
             quiet=True,                      # GUI 里不逐帧刷控制台
             cli=self.args.trace,             # --trace 时把事件同时打到控制台（留日志用）
             serve_forever=True)              # 断线后继续监听，方便反复联调
@@ -224,8 +281,14 @@ class MockGui:
 
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self._append_log("已启动服务端（内核 np_ref.dll —— 与真固件同一份 C 代码）；"
-                         "封面请求格式 = %s" % self.var_fmt.get())
+        if transport == "com":
+            self._append_log("已启动服务端（串口 %s@%d，内核 np_ref.dll）；"
+                             "上位机请把「传输」设为 COM，端口填配对的那一端"
+                             % (self.var_com.get().strip(), baud))
+        else:
+            self._append_log("已启动服务端（TCP %s:%d，内核 np_ref.dll —— 与真固件同一份 C 代码）；"
+                             "封面请求格式 = %s"
+                             % (self.var_ip.get().strip() or "127.0.0.1", port, self.var_fmt.get()))
 
     def on_stop(self):
         if self.server is not None:
@@ -234,17 +297,42 @@ class MockGui:
         self.btn_stop.config(state="disabled")
         self._append_log("已停止服务端")
 
+    def _session_active(self):
+        """(是否 SESSION ACTIVE, 状态名)；GUI 里凡是"点了没反应"都要在这里给一句明确的话"""
+        if self.server is None:
+            return False, "未启动"
+        st = self.server.snapshot()
+        return (st["session_state"] == 4), st["session_name"]
+
     def on_control(self, code):
         if self.server is None:
             self._append_log("服务端未启动")
             return
+        active, name = self._session_active()
+        if not active:
+            self._append_log("⚠ 会话还没建立（当前 %s）→ 命令先排队，SESSION ACTIVE 后执行；"
+                             "超过 3 秒作废" % name)
         self.server.post("control", code)
 
     def on_cmd(self, cmd):
         if self.server is None:
             self._append_log("服务端未启动")
             return
+        active, name = self._session_active()
+        if not active:
+            self._append_log("⚠ 会话还没建立（当前 %s）→ 请求先排队，SESSION ACTIVE 后发送；"
+                             "超过 3 秒作废" % name)
         self.server.post(cmd)
+
+    def on_latency(self, samples=30):
+        """本端发起一轮延迟测量（规范 §14：两端都能发起；同一时刻系统里只有一轮）"""
+        if self.server is None:
+            self._append_log("服务端未启动")
+            return
+        active, name = self._session_active()
+        if not active:
+            self._append_log("⚠ 延迟测量需要 SESSION ACTIVE（当前 %s）—— 等连上再点" % name)
+        self.server.post("latency", samples)
 
     # ------------------------------------------------------------------ 刷新
 
@@ -275,13 +363,34 @@ class MockGui:
         self._upd(self.lbl_sid, st["session_id"],
                   text="SESSION_ID: 0x%08X" % st["session_id"])
         self._upd(self.lbl_stats,
-                  (st["frames_rx"], st["crc_errors"], st["resyncs"], st["tx_dropped"]),
-                  text="帧=%d  crc错=%d  重同步=%d  tx丢弃=%d"
-                       % (st["frames_rx"], st["crc_errors"], st["resyncs"], st["tx_dropped"]))
+                  (st["frames_rx"], st["crc_errors"], st["resyncs"], st["tx_dropped"], st["ack_sent"]),
+                  text="帧=%d  crc错=%d  重同步=%d  tx丢弃=%d  ACK发出=%d"
+                       % (st["frames_rx"], st["crc_errors"], st["resyncs"], st["tx_dropped"],
+                          st["ack_sent"]))
         self._upd(self.lbl_extra,
                   (st["latency_responded"], st["control_sent"], st["peer"]),
                   text="延迟应答=%d  回控发出=%d  对端=%s"
                        % (st["latency_responded"], st["control_sent"], st["peer"] or "-"))
+
+        # 资源请求状态机 + 本端自测延迟（"点了没反应"的答案就在这两行）
+        res = st.get("resource") or {}
+        res_text = "资源: 在途=%s  排队=%s  完成=%s  上次ACK=%s" % (
+            res.get("inflight") or "-",
+            ",".join(res.get("queue") or []) or "-",
+            "  ".join("%s:%s" % (k, v) for k, v in sorted((res.get("done") or {}).items())) or "-",
+            res.get("last_ack") or "-")
+        self._upd(self.lbl_res, res_text, text=res_text)
+
+        lat = st.get("latency")
+        if lat:
+            stats = lat.get("stats")
+            lat_text = "延迟(本端发起): %s（收 %d / 发 %d%s）" % (
+                core.format_lat(stats) if stats else "无样本",
+                lat.get("recv", 0), lat.get("sent", 0),
+                "" if lat.get("running") else "，" + (lat.get("note") or "已结束"))
+        else:
+            lat_text = "延迟(本端发起): 未测过（点「测延迟」；对端发起时本端只应答，见左侧计数）"
+        self._upd(self.lbl_lat, lat_text, text=lat_text)
 
         # 媒体
         media = st["media"]
@@ -399,6 +508,9 @@ class MockGui:
         self.canvas.create_image(245, 235, image=photo)
 
     def _append_log(self, text):
+        if getattr(self, "txt_log", None) is None:      # 构造期（日志控件还没建好）→ 只打控制台
+            print("[gui] %s" % text, flush=True)
+            return
         self.txt_log.insert("end", text + "\n")
         if getattr(self.args, "trace", False):
             print("[gui] %s" % text, flush=True)      # --trace：GUI 侧消息也进控制台日志
@@ -412,8 +524,13 @@ class MockGui:
 
 def parse_args():
     ap = argparse.ArgumentParser(description="New Protocol V1.1 ESP32 模拟器（图形版，内核 = 真 C 代码）")
+    ap.add_argument("--transport", choices=("tcp", "com"), default="tcp",
+                    help="链路：tcp（默认）或 com（串口；配合 --com/--baud）")
     ap.add_argument("--ip", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9100)
+    ap.add_argument("--com", default="COM23",
+                    help="串口号（默认 COM23；要与上位机的 COM 端口**配对**）")
+    ap.add_argument("--baud", type=int, default=115200, help="串口波特率（与上位机 config.new.json 一致）")
     ap.add_argument("--dll", default=core.DEFAULT_DLL)
     ap.add_argument("--caps", default="lyrics,cover,jpeg,png,rgb565")
     ap.add_argument("--max-edge", type=int, default=240)
@@ -425,6 +542,10 @@ def parse_args():
                          "0x02=PNG 0x10=RGB565")
     ap.add_argument("--trace", action="store_true",
                     help="把事件同时打印到控制台（GUI 出问题时留日志用）")
+    ap.add_argument("--latency-samples", type=int, default=0,
+                    help="会话建立后自动主动测一轮延迟（本端发起、对端应答）；0 = 只在你点「测延迟」时测")
+    ap.add_argument("--latency-interval-ms", type=int, default=100,
+                    help="延迟测量两次 LATENCY_REQUEST 的间隔（默认 100ms）")
     ap.add_argument("--headless", action="store_true", help="不开窗口，只跑服务端（脚本化验证用）")
     ap.add_argument("--seconds", type=float, default=0.0, help="headless 模式跑 N 秒后打印摘要并退出")
     return ap.parse_args()
@@ -435,6 +556,9 @@ def headless_run(dll, args, caps):
                              max_edge=args.max_edge, max_resource=args.max_resource,
                              tick_ms=args.tick_ms, art_dir=args.art_dir,
                              cover_format=args.cover_format,
+                             latency_samples=args.latency_samples,
+                             latency_interval_ms=args.latency_interval_ms,
+                             transport=args.transport, com_port=args.com, baud=args.baud,
                              quiet=True, cli=True, serve_forever=True)
     server.start()
 
@@ -468,6 +592,19 @@ def headless_run(dll, args, caps):
         c = st["cover"]
         print("[gui] COVER：格式=0x%02X  %dx%d  %d 字节 → %s"
               % (c["format"], c["w"], c["h"], c["size"], c["path"]))
+
+    res = st.get("resource") or {}
+    print("[gui] 资源请求：在途=%s 排队=%s 完成=%s 上次ACK=%s"
+          % (res.get("inflight") or "-", ",".join(res.get("queue") or []) or "-",
+             "  ".join("%s:%s" % (k, v) for k, v in sorted((res.get("done") or {}).items())) or "-",
+             res.get("last_ack") or "-"))
+
+    lat = st.get("latency")
+    if lat:
+        print("[gui] 延迟（本端发起）：%s（收 %d / 发 %d，%s）"
+              % (core.format_lat(lat.get("stats")), lat.get("recv", 0), lat.get("sent", 0),
+                 lat.get("note") or "进行中"))
+    print("[gui] 对端发起延迟测量的应答次数：%d" % st["latency_responded"])
 
     server.stop()
     return 0

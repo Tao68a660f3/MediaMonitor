@@ -361,22 +361,41 @@ python MediaMonitor_App/A_tools/mock_esp32_gui.py          # 图形版（开窗�
 
 ### 9.8 对端模拟器（`A_tools/mock_esp32_gui.py`）
 
-* **同一个内核**：`mock_esp32_new.py` 里的 `MockServer` 类被 CLI 与 GUI 共用（socket + 真 C 代码），GUI 只负责把收到的帧**解码后画出来**；
-* **线程安全**：C 侧是全局单例，所以**所有 DLL 调用都在 `MockServer` 的后台线程里**；GUI 只做两件事 —— `snapshot()` 读状态快照、`post()` 投命令（手动发 CONTROL / 请求歌词 / 请求封面）；
-* **显示**：会话与统计、`MEDIA`（标题/艺术家/专辑）、`TIMELINE`（进度条 + chunk 时间戳）、`ALBUMCOVER` 预览（**默认请求 JPEG**，有 PIL 即解码；RGB565 走 PPM 直接渲染）、`LYRICS` 行（`[mm:ss.mmm] 正文`，翻译行缩进、逐字行标词数）、事件日志；顶栏可随时切换请求格式（JPEG / PNG / RGB565，只影响下一次 REQUEST）；
+* **同一个内核**：`mock_esp32_new.py` 里的 `MockServer` 类被 CLI 与 GUI 共用（链路 + 真 C 代码），GUI 只负责把收到的帧**解码后画出来**；
+* **线程安全**：C 侧是全局单例，所以**所有 DLL 调用都在 `MockServer` 的后台线程里**；GUI 只做两件事 —— `snapshot()` 读状态快照、`post()` 投命令（手动发 CONTROL / 请求歌词 / 请求封面 / 测延迟）；
+* **两种链路**：默认 TCP 服务端（`--ip/--port`）；`--transport com --com COM23 --baud 115200` 走串口（GUI 顶栏可直接下拉切换）。
+  串口是**点对点**：`open` 成功不代表上位机在，所以 COM 下 mock 会**先等上位机第一个字节**再开始握手
+  —— 否则上位机晚几秒打开串口时，mock 的 HELLO 重发（500ms×3）早已用尽，直接判"握手失败"退出（实测踩过）；
+* **显示**：会话与统计、`MEDIA`（标题/艺术家/专辑）、`LYRICS`（紧跟 MEDIA 下方）、`TIMELINE`（进度条 + chunk 时间戳）、`ALBUMCOVER` 预览（**默认请求 JPEG**，有 PIL 即解码；RGB565 走 PPM 直接渲染）、**资源请求状态行**（在途/排队/完成/上次 ACK）、**延迟统计行**、事件日志（可回溯"点了没反应"）；按钮行里可随时切换请求格式（JPEG / PNG / RGB565，只影响下一次 REQUEST）；
 * **刷新策略**：所有控件都走"值变了才 `configure`"（`_upd` 辅助函数），歌词/封面只在**资源更新时**整体重画 —— 早期版本每 200ms 重画歌词区，导致用户选不中、滚不动（实测踩过）；
 * **断线后继续监听**（`serve_forever=True`），方便反复联调；每次新连接都会 `np_dll_init/session_init/res_init/timeline_init`，避免上一次的残留；
 * `--headless --seconds N` 可无窗口跑一遍并打印解码摘要（自动化验证用）；`--trace` 把事件同时打到控制台，便于留日志。
 
-**实测基线**（`--caps lyrics,cover,jpeg,png,rgb565 --max-edge 240`，封面默认请求 JPEG）：帧率 2 帧/秒（`cur` 每 ~500ms 递增）、总帧数 ~78/30s、`crc错=0 重同步=0`、240×240 封面 JPEG 约 3.5 KB（RGB565 同尺寸是 115 200 B）、延迟 `Base≈0.1ms Avg≈7.5ms`（loopback + mock 150µs 模拟处理）。
+**合规行为**（规范里对 ESP32 的硬要求，mock 不照做就会"看起来连上了但数据不对"）：
+
+| 规范 | 行为 | 曾经踩过的坑 |
+| :--- | :--- | :--- |
+| §2.5 | **每次会话换新的 `SESSION_ID`**：C 侧用 `(now_ms 高 16 位 \| id_counter)` 生成，而 mock 每次连接都会 `np_dll_init`（`id_counter` 归零）→ 于是把宿主 tick 打包成 `(第几次连接 << 16) \| 连接内毫秒`，sid 变成 `0x0001xxxx / 0x0002xxxx…` 一眼可读 | 之前每次重连都是 `0x00000001`，两轮日志没法区分 |
+| §9.5 | 资源 `END` 经 C 侧 CRC32 校验通过 → **必须回 `ACK(OK)`**（失败 → `ACK(ERROR)` + `ERROR(RESOURCE_FAIL)`） | 漏了这条 ACK，上位机的 `_current` 传输一直挂着，下一个 REQUEST 到来时它先 `ABORT` 旧资源 → 又被 mock 当成"资源没了"重发 → **REQUEST/ABORT 风暴**（实测 REQUEST=189、ABORT=188） |
+| §9.6 | 被 `ABORT` / 校验失败 → 用**新的 REQUEST_ID** 重新 REQUEST，但**只针对"当前在途那一份"**（旧 rid 的 ABORT 只记一笔） | 不判断 rid 就会跟着对端的 `ABORT` 无脑重发，形成互相触发的风暴 |
+| §9.7 | 接收方自己把两种资源**串行化**：队列非空且在途为空才发下一个（歌词 → 封面） | 之前封面只在"歌词收齐"后才请求，歌词一失败封面就永远不请求 |
+| §9.8 | 收到 `ACK(NOT_READY)` → `200ms` 后用**新 REQUEST_ID** 重发（上限 10 次）；`BUSY` 稍后重试；其余状态记录并放弃 | 之前完全不处理 NOT_READY（封面还在 SMTC 异步读取时上位机就回它），表现为"点了请求封面没反应" |
+| §14 | 延迟测量**双向**：既能应答（`0x10` → `0x11`），也能自己发起整轮（`0x10`×N → 收 `0x11` 算 RTT/单向 → `0x12` 收尾），统计口径与上位机 `NpLatencyStats` 一致（Base=最小、Avg、Jitter=相对 Base 的平均绝对偏差） | 之前只会应答，无法验证 §15 的"ESP32 优先"仲裁路径 |
+| §15 | 本端自测期间收到对端 `LATENCY_REQUEST` 照常应答（ESP32 优先，不需要让出） | — |
+
+另外：GUI 里未建立会话时点按钮会**立刻在事件日志里给出提示**（命令先排队、3 秒内没连上就作废），不再"石沉大海"。
+
+**实测基线**（`--caps lyrics,cover,jpeg,png,rgb565 --max-edge 240`，封面默认请求 JPEG）：帧率 2 帧/秒（`cur` 每 ~500ms 递增）、总帧数 ~78/30s、`crc错=0 重同步=0`、240×240 封面 JPEG 约 3.5 KB（RGB565 同尺寸是 115 200 B）、延迟 `Base≈0.1ms Avg≈7.5ms`（loopback + mock 150µs 模拟处理）；mock 自己发起的那一轮 `Base≈7.5ms Avg≈8.3ms Jitter≈0.8ms`（30 样本，loopback）。
+TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）；串口（COM22↔COM23，115200）：同一套验收同样通过，单向延迟 `Avg≈2.4ms`。
 
 ### 9.9 回归自测
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
 | C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错**（85 项） |
-| C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 117 项（含资源接收 R8、时间轴投递 R9/R10） |
-| 端到端 | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + mock | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
+| C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **128 项**（含资源接收 R8、时间轴投递 R9/R10、**延迟发起端 R10b**） |
+| 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
+| 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |
 | 真 SMTC 探针 | `NewProtocolSelfTest.exe --tcp-smtc 127.0.0.1:9100 20` | 用真实播放器数据量"发包节奏"，验证抖动护栏 |
 
 

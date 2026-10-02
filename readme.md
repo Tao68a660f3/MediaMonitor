@@ -193,30 +193,35 @@ build_dll.bat                      # 产物：ref_c\build\np_ref.dll
 # ② 启动对端模拟器（二选一）
 python <MediaMonitor>\MediaMonitor_App\A_tools\mock_esp32_gui.py     # 图形版（推荐）
 python <MediaMonitor>\MediaMonitor_App\A_tools\mock_esp32_new.py --port 9100   # 命令行版
+python <MediaMonitor>\MediaMonitor_App\A_tools\mock_esp32_new.py --transport com --com COM23 --baud 115200  # 也可走串口
 
-# ③ 上位机：协议模式 = New，传输 = TCP，对端 IP/端口 = 127.0.0.1:9100 → 点「开始连接」
+# ③ 上位机：协议模式 = New，传输 = TCP（对端 IP/端口 = 127.0.0.1:9100）或 COM（端口 = 与 mock 配对的那一端，如 COM22）
 ```
 
 > ⚠️ 模拟器是 **TCP 服务端**（ESP32 角色），上位机是客户端：**必须先启动模拟器，再点上位机连接**。
+> 走串口时没有"谁先谁后"的问题（点对点），但 **端口要配对**：上位机 `COM22` ↔ mock `COM23`（com0com 之类的虚拟串口对即可）。
 > 模拟器的默认声明：`CAPS=歌词+封面+JPEG+PNG+RGB565`（`0x1F`，三种封面格式都收得下）、最大封面边长 240、单资源上限 256 KB；
 > **请求封面默认用 JPEG**（240×240 大约十几 KB，RGB565 则是固定的 115200 B —— 省带宽但真机要解码器，GUI 上可随时下拉切换格式）；
-> 某首歌有歌词/封面时，它会在收到 `MEDIA` 后自动发 `LYRICS REQUEST`，收齐后再发 `ALBUMCOVER REQUEST`。
+> 收到 `MEDIA`（新曲目）后它会**自动按 §9.7 串行化拉取**：先 `LYRICS REQUEST`，收齐后再 `ALBUMCOVER REQUEST`；
+> 对端回 `ACK(NOT_READY)` 时按 §9.8 在 `200ms` 后用**新 REQUEST_ID** 重试（上限 10 次），失败原因都写进事件日志。
 
 **图形版界面**（`mock_esp32_gui.py`，tkinter 零依赖；装了 PIL 还能直接显示 JPEG/PNG 封面）：
 
 ```
-┌ 监听地址/端口 + 启动/停止 + 当前阶段（监听中 / 握手… / SESSION ACTIVE）
-├ 会话(SID) + 收帧统计(帧/crc错/重同步/tx丢弃) + 延迟应答数/回控数
+┌ 传输(TCP/COM) + 地址/端口 或 串口号/波特率 + 启动/停止 + 当前阶段（监听中 / 握手… / SESSION ACTIVE）
+├ 会话(SID) + 收帧统计(帧/crc错/重同步/tx丢弃/ACK发出) + 延迟应答数/回控数
+│ 资源请求状态（在途/排队/完成/上次 ACK） + 延迟统计（本端发起的 Base/Avg/Jitter/样本）
 ├ MEDIA：标题 / 艺术家 / 专辑（从 METADATA 帧解码）
+│ LYRICS：歌词行（[mm:ss.mmm] 正文；翻译行缩进；逐字行标词数）      ← 紧跟 MEDIA 下方
 │ TIMELINE：进度条 + cur/total/HOST_TICK/LOCAL_TICK + 已投递帧数
 ├ ALBUMCOVER：封面预览（RGB565 直接解码；已过 C 侧 CRC32 校验）
-├ LYRICS：歌词行（[mm:ss.mmm] 正文；翻译行缩进；逐字行标词数）
-├ 手动按钮：PLAY_PAUSE / NEXT / PREV / 请求歌词 / 请求封面
-└ 事件日志（逐条：握手、资源 BEGIN/END/ABORT、时间轴投递、统计…）
+├ 手动按钮：PLAY_PAUSE / NEXT / PREV / 请求歌词 / 请求封面 / 封面格式(JPEG/PNG/RGB565) / 测延迟（本端发起一轮延迟测量）
+└ 事件日志（逐条：握手、资源 REQUEST/ACK/BEGIN/END/ABORT、时间轴投递、统计…）
 ```
 
 * 打开窗口即自动开始监听；断线后**继续监听**，方便反复联调；
-* 手动按钮是"以 ESP32 身份发帧"（走真 C 代码入队），可用来验证上位机的回控与资源响应；
+* 手动按钮是"以 ESP32 身份发帧"（走真 C 代码入队），可用来验证上位机的回控、资源响应与**反向延迟测量**；
+* 没连上就点按钮不会"没反应"：事件日志会立刻提示"会话未建立 → 命令先排队，3 秒内没连上就作废"；
 * 无显示环境可用 `python mock_esp32_gui.py --headless --seconds 20` 跑无窗口自检。
 
 ---

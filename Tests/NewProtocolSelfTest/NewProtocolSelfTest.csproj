@@ -19,9 +19,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="System.IO.Ports" Version="10.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Codec\*.cs" LinkBase="Codec" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Transport\INewTransport.cs" LinkBase="Transport" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Transport\TcpTransport.cs" LinkBase="Transport" />
+    <!-- COM 端到端模式用：自测工具自带的极简串口传输（见 SerialTransport.cs） -->
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\NewSendScheduler.cs" LinkBase="Service" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\SessionManager.cs" LinkBase="Service" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\MediaPublisher.cs" LinkBase="Service" />

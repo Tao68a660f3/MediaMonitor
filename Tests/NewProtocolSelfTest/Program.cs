@@ -302,6 +302,7 @@ internal static class Program
 
     /* ---------------- 端到端握手（PC ↔ Python mock，对端跑真 C 代码） ---------------- */
 
+    /// <summary>TCP 端到端：dotnet run -- --tcp 127.0.0.1:9100</summary>
     private static async Task<int> TcpHandshakeDemo(string hostPort)
     {
         string[] parts = hostPort.Split(':');
@@ -310,6 +311,33 @@ internal static class Program
 
         Console.WriteLine($"[demo] 连接 {host}:{port} ...");
 
+        using var tcp = new TcpTransport(host, port);
+        return await HandshakeDemo($"TCP {host}:{port}", tcp, () => tcp.ConnectAsync(3000));
+    }
+
+    /// <summary>
+    /// COM 端到端：dotnet run -- --com COM22 [115200]
+    /// （mock 开在**配对的那一端**，例如 com0com 的 COM22↔COM23：上位机 COM22、mock COM23）
+    /// </summary>
+    private static async Task<int> ComHandshakeDemo(string portName, int baud)
+    {
+        Console.WriteLine($"[demo] 打开串口 {portName} @ {baud} ...（mock 请用配对的那一端）");
+
+        using var com = new SerialTransport();
+        return await HandshakeDemo($"COM {portName}@{baud}", com, () =>
+        {
+            bool ok = com.Connect(portName, baud, out string? err);
+            if (!ok)
+            {
+                Console.WriteLine($"[demo] 打开串口失败：{err}");
+            }
+            return Task.FromResult(ok);
+        });
+    }
+
+    /// <summary>传输无关的 P3/P4/P5 端到端验收（TCP 与 COM 共用同一份逻辑）</summary>
+    private static async Task<int> HandshakeDemo(string label, INewTransport transport, Func<Task<bool>> connect)
+    {
         /* ---- P4：准备资源数据源（歌词池走真实的 LyricService 解析）---- */
         string lrcDir = Path.Combine(Path.GetTempPath(), "np_lrc_test");
         Directory.CreateDirectory(lrcDir);
@@ -324,7 +352,6 @@ internal static class Program
         byte[] coverJpeg = MakeTestCoverJpeg(256, forceTestPattern: false);
         Console.WriteLine($"[demo] 合成测试封面：{coverJpeg.Length} 字节");
 
-        using var transport = new TcpTransport(host, port);
         using var scheduler = new NewSendScheduler(transport, frameIntervalMs: 5);
         scheduler.Start();
         using var session = new SessionManager(scheduler);
@@ -376,13 +403,13 @@ internal static class Program
             Console.WriteLine($"[demo] 状态 -> {st}" + (st == ProtocolState.Active ? $"  SessionId=0x{session.SessionId:X8}" : string.Empty));
         transport.Disconnected += r => Console.WriteLine($"[demo] 链路断开: {r}");
 
-        if (!await transport.ConnectAsync(3000))
+        if (!await connect())
         {
-            Console.WriteLine("[demo] TCP 连接失败（mock 没在跑？）");
+            Console.WriteLine($"[demo] {label} 连接失败（mock 没在跑？）");
             return 4;
         }
 
-        Console.WriteLine("[demo] TCP 已连接，发起 HELLO");
+        Console.WriteLine($"[demo] {label} 已连接，发起 HELLO");
         session.LinkUp();
 
         // ---- 阶段 1：握手 ----
@@ -769,6 +796,14 @@ internal static class Program
         if ((args.Length >= 2) && (args[0] == "--tcp"))
         {
             return TcpHandshakeDemo(args[1]).GetAwaiter().GetResult();
+        }
+
+        // COM 端到端：dotnet run -- --com COM22 115200
+        // （mock 用配对的那一端：python mock_esp32_new.py --transport com --com COM23 --baud 115200）
+        if ((args.Length >= 2) && (args[0] == "--com"))
+        {
+            int baud = (args.Length >= 3) ? int.Parse(args[2]) : 115200;
+            return ComHandshakeDemo(args[1], baud).GetAwaiter().GetResult();
         }
 
         // SMTC 真源探针：dotnet run -- --tcp-smtc 127.0.0.1:9100 20
