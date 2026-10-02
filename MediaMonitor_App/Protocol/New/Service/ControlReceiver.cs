@@ -54,7 +54,7 @@ namespace MediaMonitor.Protocol.New.Service
             LastLegacyCmd = legacy;
             _executeLegacy(legacy);
 
-            if ((f.Flags & NpFlag.AckRequired) != 0)
+            if (f.NeedsAck)
             {
                 _session.SendAck(f.Sequence, f.RequestId, (byte)NpAckStatus.Ok);
             }

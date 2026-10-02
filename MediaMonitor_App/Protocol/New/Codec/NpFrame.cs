@@ -23,6 +23,14 @@ namespace MediaMonitor.Protocol.New.Codec
         public bool HasFlag(byte flag) => (Flags & flag) != 0;
         public bool IsSystem(byte code) => Type == NpType.System && Code == code;
 
+        /// <summary>
+        /// 本帧是否要求对端回 ACK（规范 §3 / §5.6 约定表，V1.1-21）：**唯一判据是 `FLAGS.ACK_REQUIRED`**。
+        ///
+        /// 收到 `NeedsAck == true` 的帧就必须回 `ACK`；`STATUS` 由处理结果决定
+        /// （例：资源 `END` 要等 CRC32 校验完才知道回 `OK` 还是 `ERROR`）。
+        /// </summary>
+        public bool NeedsAck => HasFlag(NpFlag.AckRequired);
+
         public override string ToString()
             => $"T=0x{Type:X2} C=0x{Code:X2} len={PayloadLen} seq={Sequence} sid=0x{SessionId:X8} rid={RequestId}";
     }

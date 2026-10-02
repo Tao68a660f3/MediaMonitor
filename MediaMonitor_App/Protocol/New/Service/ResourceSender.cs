@@ -226,6 +226,8 @@ namespace MediaMonitor.Protocol.New.Service
         }
 
         private uint SendEnd(Transfer t)
-            => _session.SendResourceFrame(t.Type, NpResCode.End, t.RequestId, null, 0);
+            // §5.6 约定表（V1.1-21）：资源 END 必须置 ACK_REQUIRED=1 —— 接收方校验通过后才回 ACK(OK)；
+            // 注意与 needAck（原帧重传槽）无关：资源帧不做原帧重传，丢了由上层用新 REQUEST_ID 重来。
+            => _session.SendResourceFrame(t.Type, NpResCode.End, t.RequestId, null, NpFlag.AckRequired);
     }
 }

@@ -786,6 +786,97 @@ internal static class Program
         return (rate < 6.0) ? 0 : 5;
     }
 
+    /* ---------------- R12：ACK 位驱动（规范 §3 / §5.6 约定表，V1.1-21） ---------------- */
+
+    /// <summary>
+    /// §5.6（V1.1-21）把"要不要回 ACK"收敛成**只看 `FLAGS.ACK_REQUIRED` 位**：
+    /// `SESSION_START` / `CONTROL` / 资源 `REQUEST` / 资源 `END` 置位；
+    /// `ACK` / `ERROR` / 实时帧 / 资源 `BEGIN` / 资源 `DATA` 不置位。
+    /// 这里走一遍**真实发送路径**（SessionManager + ResourceSender + RecordingTransport），逐帧验位。
+    /// </summary>
+    private static void TestAckFlags()
+    {
+        Console.WriteLine("R12 ACK 位驱动（SESSION_START/CONTROL/REQUEST/END 置位；ACK/实时帧/BEGIN/DATA 不置位）");
+
+        // (a) NpFrame.NeedsAck 只看位
+        Check("R12 NeedsAck(FLAGS=ACK_REQUIRED) = true", new NpFrame { Flags = NpFlag.AckRequired }.NeedsAck);
+        Check("R12 NeedsAck(FLAGS=FRAGMENT) = false", !new NpFrame { Flags = NpFlag.Fragment }.NeedsAck);
+
+        // (b) 附录 A.3 向量：SESSION_START 置位（CRC 已重算为 FF 83）
+        NpVector ss = Vectors.All.First(v => v.Name == "SESSION_START");
+        Check("R12 附录 A.3 SESSION_START 向量 FLAGS=0x01（ACK_REQUIRED）",
+              (ss.Flags == NpFlag.AckRequired) && (ss.Bytes[4] == NpFlag.AckRequired));
+
+        // (c) 真实发送路径：REQUEST → ACK / BEGIN / DATA / END 的 FLAGS
+        var transport = new RecordingTransport();
+        using var scheduler = new NewSendScheduler(transport, frameIntervalMs: 5);
+        scheduler.Start();
+        using var session = new SessionManager(scheduler);
+
+        byte[] lyrics = Encoding.UTF8.GetBytes("[00:00.00]第一行\n[00:01.00]第二行\n");
+        var resources = new ResourceSender(session, (type, w, h, fmt, q) =>
+            new NpResourceData(Crc32Ieee.Compute(lyrics), lyrics, 0, 0, 0), chunkSize: 64);
+
+        resources.OnFrame(new NpFrame
+        {
+            Version = NpConstants.Version11,
+            Flags = NpFlag.AckRequired,
+            Type = NpType.Lyrics,
+            Code = NpResCode.Request,
+            HeaderLen = NpConstants.HeaderLenFixed,
+            PayloadLen = 0,
+            Sequence = 1,
+            SessionId = 0x0000002A,
+            RequestId = 7,
+            Payload = ReadOnlyMemory<byte>.Empty
+        });
+        scheduler.WaitDrainedAsync(500).GetAwaiter().GetResult();
+
+        List<NpFrame> frames = DecodeAll(transport);
+        Check("R12 收到 REQUEST → 回了 ACK(RESPONSE、不带 ACK_REQUIRED)",
+              HasAnd(frames, f => f.Type == NpType.System && f.Code == NpSysCode.Ack,
+                     f => (f.Flags == NpFlag.Response) && !f.NeedsAck));
+        Check("R12 BEGIN 不置 ACK_REQUIRED",
+              HasAnd(frames, f => f.Code == NpResCode.Begin, f => !f.NeedsAck));
+        Check("R12 DATA 只有 FRAGMENT（§9.4 不逐片 ACK）",
+              HasAnd(frames, f => f.Code == NpResCode.Data,
+                     f => f.HasFlag(NpFlag.Fragment) && !f.NeedsAck));
+        Check("R12 END 置 ACK_REQUIRED=1（§5.6 约定表：接收方必须回 ACK）",
+              HasAnd(frames, f => f.Code == NpResCode.End, f => f.NeedsAck));
+
+        // (d) CONTROL 置位、实时帧与延迟帧不置位
+        session.SendControl(NpCtrlCode.PlayPause, out _);
+        session.SendRealtime(NpType.Media, NpMediaCode.Metadata, Array.Empty<byte>());
+        session.SendLatencyRequest(11, 1234);
+        scheduler.WaitDrainedAsync(500).GetAwaiter().GetResult();
+
+        List<NpFrame> frames2 = DecodeAll(transport);
+        Check("R12 CONTROL 置 ACK_REQUIRED（§8）",
+              HasAnd(frames2, f => f.Type == NpType.Control, f => f.NeedsAck));
+        Check("R12 MEDIA 实时帧不置 ACK_REQUIRED（§6）",
+              HasAnd(frames2, f => f.Type == NpType.Media, f => !f.NeedsAck));
+        Check("R12 LATENCY_REQUEST 不置 ACK_REQUIRED（§14：响应即回答）",
+              HasAnd(frames2, f => f.IsSystem(NpSysCode.LatencyRequest), f => !f.NeedsAck));
+    }
+
+    /// <summary>把 RecordingTransport 攒下的字节全部解析成帧</summary>
+    private static List<NpFrame> DecodeAll(RecordingTransport transport)
+    {
+        var frames = new List<NpFrame>();
+        var parser = new NpStreamParser();
+        parser.FrameReceived += f => frames.Add(f);
+
+        foreach (byte[] bytes in transport.Sent)
+        {
+            parser.Feed(bytes);
+        }
+        return frames;
+    }
+
+    /// <summary>"存在满足 pred 的帧，且它满足 check"（存在性用 Any 保护，避免 FirstOrDefault 的默认值误判）</summary>
+    private static bool HasAnd(List<NpFrame> frames, Func<NpFrame, bool> pred, Func<NpFrame, bool> check)
+        => frames.Any(pred) && check(frames.First(pred));
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -835,6 +926,8 @@ internal static class Program
         TestOffsetSource();
         Console.WriteLine();
         TestConfig();
+        Console.WriteLine();
+        TestAckFlags();
 
         Console.WriteLine($"\n=== 通过 {_pass} 项，失败 {_fail} 项 ===");
         return _fail == 0 ? 0 : 1;

@@ -376,7 +376,8 @@ python MediaMonitor_App/A_tools/mock_esp32_gui.py          # 图形版（开窗�
 | 规范 | 行为 | 曾经踩过的坑 |
 | :--- | :--- | :--- |
 | §2.5 | **每次会话换新的 `SESSION_ID`**：C 侧用 `(now_ms 高 16 位 \| id_counter)` 生成，而 mock 每次连接都会 `np_dll_init`（`id_counter` 归零）→ 于是把宿主 tick 打包成 `(第几次连接 << 16) \| 连接内毫秒`，sid 变成 `0x0001xxxx / 0x0002xxxx…` 一眼可读 | 之前每次重连都是 `0x00000001`，两轮日志没法区分 |
-| §9.5 | 资源 `END` 经 C 侧 CRC32 校验通过 → **必须回 `ACK(OK)`**（失败 → `ACK(ERROR)` + `ERROR(RESOURCE_FAIL)`） | 漏了这条 ACK，上位机的 `_current` 传输一直挂着，下一个 REQUEST 到来时它先 `ABORT` 旧资源 → 又被 mock 当成"资源没了"重发 → **REQUEST/ABORT 风暴**（实测 REQUEST=189、ABORT=188） |
+| §5.6 约定表（V1.1-21） | **"要不要回 ACK"只看 `FLAGS.ACK_REQUIRED`**：`SESSION_START` / `CONTROL` / 资源 `REQUEST` / 资源 `END` 置位，`ACK`/`ERROR`/实时帧/`BEGIN`/`DATA`/`LATENCY_*` 不置位；mock 用 `_ack_if_needed()` **按位**回，并对"置了位却没人回"的帧打告警 | 之前"谁该回 ACK"散在各章节流程图 + 靠 `CODE` 特判，`END` 甚至没置位 → 两端各写一套规则，漏一条就是一次故障 |
+| §9.5 | 资源 `END` 置 `ACK_REQUIRED = 1`，C 侧 CRC32 校验通过 → **必须回 `ACK(OK)`**（失败 → `ACK(ERROR)` + `ERROR(RESOURCE_FAIL)`）；即"位决定要不要回、校验结果决定 STATUS" | 漏了这条 ACK，上位机的 `_current` 传输一直挂着，下一个 REQUEST 到来时它先 `ABORT` 旧资源 → 又被 mock 当成"资源没了"重发 → **REQUEST/ABORT 风暴**（实测 REQUEST=189、ABORT=188） |
 | §9.6 | 被 `ABORT` / 校验失败 → 用**新的 REQUEST_ID** 重新 REQUEST，但**只针对"当前在途那一份"**（旧 rid 的 ABORT 只记一笔） | 不判断 rid 就会跟着对端的 `ABORT` 无脑重发，形成互相触发的风暴 |
 | §9.7 | 接收方自己把两种资源**串行化**：队列非空且在途为空才发下一个（歌词 → 封面） | 之前封面只在"歌词收齐"后才请求，歌词一失败封面就永远不请求 |
 | §9.8 | 收到 `ACK(NOT_READY)` → `200ms` 后用**新 REQUEST_ID** 重发（上限 10 次）；`BUSY` 稍后重试；其余状态记录并放弃 | 之前完全不处理 NOT_READY（封面还在 SMTC 异步读取时上位机就回它），表现为"点了请求封面没反应" |
@@ -392,8 +393,8 @@ TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）�
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
-| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错**（85 项） |
-| C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **128 项**（含资源接收 R8、时间轴投递 R9/R10、**延迟发起端 R10b**） |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动**（95 项） |
+| C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **143 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**） |
 | 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
 | 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |
 | 真 SMTC 探针 | `NewProtocolSelfTest.exe --tcp-smtc 127.0.0.1:9100 20` | 用真实播放器数据量"发包节奏"，验证抖动护栏 |

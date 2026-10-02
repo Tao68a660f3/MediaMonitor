@@ -76,6 +76,12 @@ ACK_NOT_READY = 0x05
 ACK_STATUS_NAMES = {ACK_OK: "OK", ACK_REJECTED: "REJECTED", ACK_INVALID: "INVALID",
                     ACK_BUSY: "BUSY", ACK_ERROR: "ERROR", ACK_NOT_READY: "NOT_READY"}
 
+# FLAGS（规范 §3）
+NP_FLAG_ACK_REQUIRED = 0x01        # 「要不要回 ACK」的唯一判据（§5.6 约定表，V1.1-21）
+NP_FLAG_RESPONSE = 0x04
+NP_FLAG_FRAGMENT = 0x08
+NP_FLAG_ERROR = 0x10
+
 # ERROR CODE（规范 §5.7）
 NP_ERR_RESOURCE_FAIL = 0x05        # 资源校验/分片失败（§9.5 与 ACK(ERROR) 成对出现）
 
@@ -920,6 +926,11 @@ class MockServer:
             if not self.quiet:
                 print_frame(f)
 
+            # §5.6 约定表（V1.1-21）：回不回 ACK 只看 FLAGS.ACK_REQUIRED。
+            # "要不要回"由位决定，"回什么 STATUS"由处理结果决定 —— 下面谁处理了谁回。
+            need_ack = (f.flags & NP_FLAG_ACK_REQUIRED) != 0
+            acked = False
+
             if f.type in (5, 6):
                 ev = self.dll.np_dll_res_on_frame(ctypes.byref(f))
                 if ev == 1:
@@ -928,20 +939,19 @@ class MockServer:
                 elif ev == 2:
                     self._res_activity(f)                 # 有数据在进来 → 刷新在途看门狗
                 elif ev == 3:
-                    # §9.5：接收方在整份资源 CRC32 校验通过后**必须回 ACK(OK)**
-                    # （C 侧 np_res_on_frame 走到 DONE 就说明校验已通过）
-                    self._ack(f, ACK_OK, "资源 CRC32 校验通过（§9.5）")
+                    # §9.5：END 置了 ACK_REQUIRED → 接收方必须回 ACK(OK)（C 侧走到 DONE 说明 CRC32 已通过）
+                    acked = self._ack_if_needed(f, ACK_OK, "资源 CRC32 校验通过（§9.5）")
                     self._on_resource_done(f.type)
                     self._res_on_done(f.type, f.request_id)   # 收齐 → 串行队列里的下一个
                 elif ev == 4:
                     err = self.dll.np_dll_res_last_err()
                     self.log("资源接收错误：%s（§9.5：回 ACK(ERROR) + ERROR(RESOURCE_FAIL) 后用新 REQUEST_ID 重来）"
                              % RES_ERR_NAMES.get(err, "?"))
-                    self._ack(f, ACK_ERROR, "资源校验失败")
+                    acked = self._ack_if_needed(f, ACK_ERROR, "资源校验失败")
                     self.dll.np_dll_send_error(NP_ERR_RESOURCE_FAIL, f.request_id, err)
                     self._res_retry_after_loss(f.type, f.request_id, "校验/分片错误")
                 elif ev == 5:
-                    # ABORT 不带 ACK（§9.1 时序图）；只有"当前在途的那一份"才需要重来（§9.6）
+                    # ABORT 不带 ACK（§9.1 时序图 / §5.6 约定表）；只有"当前在途的那一份"才需要重来（§9.6）
                     self._res_retry_after_loss(f.type, f.request_id, "被 ABORT")
 
             elif (f.type == 1) and (f.code == 0x05):
@@ -990,6 +1000,12 @@ class MockServer:
 
             elif f.type == 2:
                 self._on_media(f, active)
+
+            # 安全网（§5.6 约定表）：置了 ACK_REQUIRED 却没有处理层回 ACK 的帧，明确报出来 ——
+            # 否则对端会一直等 ACK 到超时，而日志里什么都看不到（这正是"END 漏 ACK"当初的样子）。
+            if need_ack and (not acked):
+                self.log("⚠ T=0x%02X C=0x%02X 置了 ACK_REQUIRED 但本端没有对应处理层 → 未回 ACK"
+                         "（收到该帧的一方本应回 ACK，§5.6 约定表）" % (f.type, f.code))
 
     # ---- 内部：资源请求状态机（规范 §9.6 / §9.7 / §9.8）----
 
@@ -1162,6 +1178,15 @@ class MockServer:
         r["queue"].insert(0, kind)
         self._res_push_state()
         self._res_pump(True)
+
+    def _ack_if_needed(self, f, status, why=""):
+        """§5.6 约定表（V1.1-21）：**只有置了 `ACK_REQUIRED` 的帧才回 ACK**（位是唯一判据）"""
+        if (f.flags & NP_FLAG_ACK_REQUIRED) == 0:
+            self.log("本帧未置 ACK_REQUIRED → 按 §5.6 不回 ACK（T=0x%02X C=0x%02X%s）"
+                     % (f.type, f.code, "，" + why if why else ""))
+            return False
+        self._ack(f, status, why)
+        return True
 
     def _ack(self, f, status, why=""):
         """回一条 ACK（§5.6）：SEQUENCE / REQUEST_ID 沿用被 ACK 的帧"""

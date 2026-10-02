@@ -224,7 +224,11 @@ namespace MediaMonitor.Protocol.New.Service
                         {
                             State = ProtocolState.Active;
                         }
-                        SendAck(f.Sequence, f.RequestId, (byte)NpAckStatus.Ok);
+                        // 规范 §5.6（V1.1-21）：回不回 ACK 只看 FLAGS.ACK_REQUIRED，不再按 CODE 特判
+                        if (f.NeedsAck)
+                        {
+                            SendAck(f.Sequence, f.RequestId, (byte)NpAckStatus.Ok);
+                        }
                         RaiseStateChanged();
                     }
                     return true;
@@ -375,6 +379,12 @@ namespace MediaMonitor.Protocol.New.Service
         private uint SendRaw(uint sid, uint rid, byte flags, byte type, byte code,
                              byte[]? payload, bool needAck)
         {
+            // 规范 §5.6（V1.1-21）：需要对方回 ACK 的帧必须置 FLAGS.ACK_REQUIRED。
+            // 注意两者语义不同、不能互相推导：ACK_REQUIRED = 对方要不要回；
+            // needAck = 本端要不要原帧重传（资源帧不做原帧重传，靠上层用新 REQUEST_ID 重来）。
+            Debug.Assert(!needAck || ((flags & NpFlag.AckRequired) != 0),
+                         "needAck=true 的帧必须置 NpFlag.AckRequired（规范 §5.6 约定表）");
+
             uint seq = NextSeq();
             payload ??= Array.Empty<byte>();
 
