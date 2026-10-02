@@ -27,6 +27,9 @@ internal static class Program
     private static int _pass;
     private static int _fail;
 
+    /// <summary>`--no-cover`：让封面资源以**空资源（FORMAT=0x00）**回应（§11 的"没有封面"路径，回归用）</summary>
+    private static bool _emptyCover;
+
     private static void Check(string name, bool ok)
     {
         Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}");
@@ -370,6 +373,15 @@ internal static class Program
                 byte[] data = LyricResourceBuilder.Build(lyrics, TimeSpan.FromSeconds(100), out int frames);
                 Console.WriteLine($"[demo] 生成歌词资源：{data.Length} 字节 / {frames} 帧（Legacy 帧字节流）");
                 return new NpResourceData(Crc32Ieee.Compute(data), data, 0, 0, 0);
+            }
+
+            if (_emptyCover && (type == NpType.AlbumCover))
+            {
+                // §11：模拟"这首没有封面" —— 上位机在 SMTC 无缩略图时就是这么回的：
+                // **空资源（FORMAT=0x00 / TOTAL_SIZE=0）**，而不是 ACK(NOT_READY)。
+                byte[] none = Array.Empty<byte>();
+                Console.WriteLine("[demo] 本次按 --no-cover 回空资源（FORMAT=0x00，§11）");
+                return new NpResourceData(Crc32Ieee.Compute(none), none, (byte)NpResFormat.None, 0, 0);
             }
 
             NpResourceData? art = ArtworkResourceBuilder.Build(coverJpeg, w, h, fmt, q, out string? err);
@@ -877,10 +889,74 @@ internal static class Program
     private static bool HasAnd(List<NpFrame> frames, Func<NpFrame, bool> pred, Func<NpFrame, bool> check)
         => frames.Any(pred) && check(frames.First(pred));
 
+    /* ---------------- R13：无封面 → 空资源（规范 §11） ---------------- */
+
+    /// <summary>
+    /// §11：**"这首没有封面"必须用空资源（`FORMAT=0x00` / `TOTAL_SIZE=0`）表达**，不能用 `NOT_READY`
+    /// （`NOT_READY` 只表示"暂时还没读出来"，§9.8-3）。
+    /// 这里验证：构造器不再返回 null，且真实发送路径是 ACK(OK) + BEGIN(0B/0x00) + END（没有 DATA）。
+    /// </summary>
+    private static void TestEmptyCover()
+    {
+        Console.WriteLine("R13 无封面 → 空资源 FORMAT=0x00（不是 NOT_READY）");
+
+        // (a) 构造器：SMTC 没有缩略图 → 空资源，而不是 null（null 会被上层当成 NOT_READY 回给对端）
+        NpResourceData? none = ArtworkResourceBuilder.Build(null, 240, 240, NpResFormat.Jpeg, 0, out _);
+        Check("R13 Build(null) 返回空资源而非 null", none != null);
+        Check("R13 空资源：FORMAT=NONE(0x00)、DATA 为空、W/H=0",
+              (none != null) && (none.Format == (byte)NpResFormat.None) && (none.Data.Length == 0) &&
+              (none.Width == 0) && (none.Height == 0));
+        Check("R13 空资源也带合法资源级 CRC32（CRC32(空串)=0x00000000）", (none?.Crc32 ?? 1u) == 0u);
+
+        // (b) 真实发送路径：对端请求封面 → ACK(OK) + BEGIN(0B/FORMAT=0x00) + END，且没有 DATA
+        var transport = new RecordingTransport();
+        using var scheduler = new NewSendScheduler(transport, frameIntervalMs: 5);
+        scheduler.Start();
+        using var session = new SessionManager(scheduler);
+        var sender = new ResourceSender(session, (type, w, h, fmt, q) =>
+            ArtworkResourceBuilder.Build(null, w, h, fmt, q, out _));
+
+        byte[] reqPay = new byte[8];
+        NpWriter.WriteU16(reqPay, 240);
+        NpWriter.WriteU16(reqPay.AsSpan(2), 240);
+        reqPay[4] = (byte)NpResFormat.Jpeg;
+        reqPay[5] = 0;
+
+        sender.OnFrame(new NpFrame
+        {
+            Version = NpConstants.Version11,
+            Flags = NpFlag.AckRequired,
+            Type = NpType.AlbumCover,
+            Code = NpResCode.Request,
+            HeaderLen = NpConstants.HeaderLenFixed,
+            PayloadLen = (uint)reqPay.Length,
+            Sequence = 2,
+            SessionId = 0x0000002A,
+            RequestId = 9,
+            Payload = reqPay
+        });
+        scheduler.WaitDrainedAsync(500).GetAwaiter().GetResult();
+
+        List<NpFrame> frames = DecodeAll(transport);
+        Check("R13 无封面仍回 ACK(OK)（不是 NOT_READY）",
+              HasAnd(frames, f => f.Type == NpType.System && f.Code == NpSysCode.Ack,
+                     f => f.Payload.Span[4] == (byte)NpAckStatus.Ok));
+        Check("R13 BEGIN 声明 TOTAL_SIZE=0、FORMAT=0x00（对端据此清空封面区）",
+              HasAnd(frames, f => f.Code == NpResCode.Begin,
+                     f => (NpReader.ReadU32(f.Payload.Span[4..]) == 0u) &&
+                          (f.Payload.Span[8] == (byte)NpResFormat.None)));
+        Check("R13 空资源没有 DATA 帧", !frames.Any(f => f.Code == NpResCode.Data));
+        Check("R13 END 置 ACK_REQUIRED（等接收方确认已收齐/已清屏）",
+              HasAnd(frames, f => f.Code == NpResCode.End, f => f.NeedsAck));
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
+
+        // 回归用开关：让封面以"空资源"回应（§11 的"没有封面"路径）
+        _emptyCover = args.Contains("--no-cover");
 
         // 端到端握手模式：dotnet run -- --tcp 127.0.0.1:9100
         // （对端用 A_tools/mock_esp32_new.py，它跑的是 ref_c 编出来的真 C 代码）
@@ -893,7 +969,7 @@ internal static class Program
         // （mock 用配对的那一端：python mock_esp32_new.py --transport com --com COM23 --baud 115200）
         if ((args.Length >= 2) && (args[0] == "--com"))
         {
-            int baud = (args.Length >= 3) ? int.Parse(args[2]) : 115200;
+            int baud = (args.Length >= 3) && int.TryParse(args[2], out int b) ? b : 115200;
             return ComHandshakeDemo(args[1], baud).GetAwaiter().GetResult();
         }
 
@@ -928,6 +1004,8 @@ internal static class Program
         TestConfig();
         Console.WriteLine();
         TestAckFlags();
+        Console.WriteLine();
+        TestEmptyCover();
 
         Console.WriteLine($"\n=== 通过 {_pass} 项，失败 {_fail} 项 ===");
         return _fail == 0 ? 0 : 1;

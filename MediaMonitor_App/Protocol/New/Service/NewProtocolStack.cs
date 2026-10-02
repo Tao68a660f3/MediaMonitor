@@ -506,7 +506,17 @@ namespace MediaMonitor.Protocol.New.Service
         }
 
         private void OnThumbnailUpdated(byte[]? raw)
-            => _thumbEventForTrack = true;                  // 有事件就说明"读过了"，null 才是真的没封面
+        {
+            // 有事件就说明"读过了"：null 才是真的没封面（此时按 §11 发**空资源 FORMAT=0x00**，而不是 NOT_READY）
+            _thumbEventForTrack = true;
+
+            if (_wantConnect)
+            {
+                Emit(NpLogLevel.Info, (raw == null)
+                    ? "封面：SMTC 已通知本曲目无封面 → 对端请求时回空资源（FORMAT=0x00，§11）"
+                    : $"封面：SMTC 已就绪（{raw.Length} 字节）→ 对端请求时可正常发送");
+            }
+        }
 
         /* ------------------------------------------------------------------ */
         /* 资源提供（规范 §10 歌词 / §11 封面）                                 */

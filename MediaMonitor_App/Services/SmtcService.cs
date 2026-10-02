@@ -62,6 +62,12 @@ namespace MediaMonitor.Services
         // 封面内容摘要（SHA256 十六进制）：SMTC 在同一首歌上会反复发 MediaPropertiesChanged，
         // 用它去重，避免重复解码、重复通知；切会话时连同缓存一起清掉，保证新会话首帧一定生效。
         private string? _thumbHash;
+        /// <summary>
+        /// 是否已经把"当前曲目有/无封面"这件事通知过上层。
+        /// 必须与 `_thumbHash` 一起参与去重：单靠 hash 会把"无封面（null）"的首个事件也挡掉
+        /// —— 上层就永远等不到通知，只能一直回 `ACK(NOT_READY)`（实测踩过：mock 重试 10 次放弃）。
+        /// </summary>
+        private bool _thumbNotified;
 
         public event Action<GlobalSystemMediaTransportControlsSessionPlaybackStatus>? PlaybackChanged;
         public Action<GlobalSystemMediaTransportControlsSessionMediaProperties>? OnMediaUpdated;
@@ -147,6 +153,7 @@ namespace MediaMonitor.Services
             // 封面缓存同理（不触发 OnThumbnailUpdated：会话消失按既有约定不下发、不提示）
             CurrentThumbnail = null;
             _thumbHash = null;
+            _thumbNotified = false;      // 下次会话的首个封面事件必须能发出去
 
             if (notify && hadSession)
                 MediaCleared?.Invoke();
@@ -267,6 +274,13 @@ namespace MediaMonitor.Services
                     if (string.IsNullOrEmpty(props.Title))
                         return;
 
+                    // 是否换曲：换曲时封面去重状态要清零 —— 否则"新曲目封面字节与上一首相同"
+                    // （同专辑/同封面）会被哈希去重挡掉，上层等不到 OnThumbnailUpdated，
+                    // 对端请求封面时只能一直收到 ACK(NOT_READY)（实测踩过）。
+                    bool trackChanged = (CurrentTitle != props.Title)
+                                     || (CurrentArtist != props.Artist)
+                                     || (CurrentAlbum != props.AlbumTitle);
+
                     CurrentTitle = props.Title; // 赋值
                     CurrentArtist = props.Artist; // 赋值
                     CurrentAlbum = props.AlbumTitle;
@@ -274,7 +288,7 @@ namespace MediaMonitor.Services
 
                     // 封面走独立异步支线：不阻塞元数据/歌词路径；
                     // 内部自带 try/catch 与 sender/seq 校验，不会产生未观察异常、也不会让旧封面盖新封面。
-                    _ = UpdateThumbnailAsync(sender, props.Thumbnail, seq);
+                    _ = UpdateThumbnailAsync(sender, props.Thumbnail, seq, trackChanged);
                 }
             }
             catch (Exception ex)
@@ -292,13 +306,16 @@ namespace MediaMonitor.Services
         /// <item>整段 try/catch：会话消亡（播放器退出/切歌瞬间）OpenReadAsync 会抛 COMException(0x80030070)；</item>
         /// <item>await 完成后再校验 sender + seq：切歌/切会话瞬间系统会连发多个事件，
         /// 且完成顺序不保证与触发顺序一致，旧事件的延迟完成必须丢弃；</item>
-        /// <item>内容摘要去重：同一首歌反复触发 MediaPropertiesChanged（Chrome 尤甚）时不重复处理、不重复通知。</item>
+        /// <item>内容摘要去重：同一首歌反复触发 MediaPropertiesChanged（Chrome 尤甚）时不重复处理、不重复通知。
+        /// <b>但去重只针对"同一曲目内的重复事件"</b>：每个曲目的**首个**事件必须发出去（哪怕结果是"无封面"），
+        /// 否则上层无法区分"这首没封面"（应按 §11 发空资源）与"还没读出来"（回 ACK(NOT_READY)）。</item>
         /// </list>
         /// </summary>
         private async Task UpdateThumbnailAsync(
             GlobalSystemMediaTransportControlsSession sender,
             IRandomAccessStreamReference? reference,
-            long seq)
+            long seq,
+            bool trackChanged)
         {
             byte[]? raw = null;
 
@@ -327,11 +344,23 @@ namespace MediaMonitor.Services
             if (sender != _currentSession || seq != Volatile.Read(ref _mediaUpdateSeq))
                 return;
 
+            if (trackChanged)
+            {
+                // 换曲：去重状态清零（否则"与上一首封面字节相同"的新曲目会被当成重复事件挡掉）
+                _thumbHash = null;
+                _thumbNotified = false;
+            }
+
             string? hash = raw == null ? null : Convert.ToHexString(SHA256.HashData(raw));
-            if (hash == _thumbHash)
-                return;   // 内容没变（同一首歌的重复事件）：不重复通知
+
+            // 去重只针对"同一曲目内的重复事件"：_thumbNotified 保证**每个曲目的首个事件一定发出去**
+            // —— 哪怕 raw == null（= 这首真的没封面）。少这一条，上层就永远等不到通知，
+            // 只能一直回 ACK(NOT_READY)（规范 §11 要求"无封面"用空资源 FORMAT=0x00 表达）。
+            if (_thumbNotified && (hash == _thumbHash))
+                return;
 
             _thumbHash = hash;
+            _thumbNotified = true;
             CurrentThumbnail = raw;
             OnThumbnailUpdated?.Invoke(raw);
         }

@@ -456,6 +456,15 @@ class MockGui:
     def _show_cover(self, cover):
         fmt, w, h, data = cover["format"], cover["w"], cover["h"], cover["data"]
 
+        if (cover.get("size", 0) == 0) or (fmt == 0x00):   # §11：空资源 = 对端明确说"没有封面" → 清空
+            self._photo = None
+            self._pil_photo = None
+            self.canvas.delete("all")
+            self.canvas.create_text(245, 235, text="（对端无封面：已清空封面区）",
+                                    fill="#999999", font=FONT)
+            self._append_log("封面区已清空（对端回空资源 FORMAT=0x00，§11）")
+            return
+
         if fmt == 0x10:                                  # RGB565 → PPM（Tk 原生支持）
             ppm = core.decode_rgb565_to_ppm(data, w, h)
             if ppm is None:
@@ -612,6 +621,8 @@ def headless_run(dll, args, caps):
 
 def main():
     args = parse_args()
+
+    core.setup_utf8_console()
 
     caps = 0
     for name in args.caps.split(","):

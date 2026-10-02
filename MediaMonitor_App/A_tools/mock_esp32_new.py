@@ -615,7 +615,16 @@ class MockServer:
         with self._lock:
             self._events.append(line)
         if self.cli:
-            print("[mock] %s" % text)
+            # ⚠ 别让日志打死服务端线程：Windows 控制台/重定向文件常见 GBK，
+            # 打不出 ✓ ✗ ⚠ 这类字符会抛 UnicodeEncodeError（实测：整个 mock 线程直接挂掉，
+            # 之后 MEDIA/时间轴/回控全断，看起来像"协议不对"）。
+            try:
+                print("[mock] %s" % text)
+            except UnicodeEncodeError:
+                enc = getattr(sys.stdout, "encoding", None) or "gbk"
+                print(("[mock] %s" % text).encode(enc, "replace").decode(enc, "replace"))
+            except Exception:
+                pass
         if self.on_event:
             try:
                 self.on_event(line)
@@ -939,20 +948,32 @@ class MockServer:
                 elif ev == 2:
                     self._res_activity(f)                 # 有数据在进来 → 刷新在途看门狗
                 elif ev == 3:
-                    # §9.5：END 置了 ACK_REQUIRED → 接收方必须回 ACK(OK)（C 侧走到 DONE 说明 CRC32 已通过）
-                    acked = self._ack_if_needed(f, ACK_OK, "资源 CRC32 校验通过（§9.5）")
+                    # 收齐且 CRC32 通过：先记结果，再**立刻回 ACK**（本帧就是 END、带着位）——
+                    # 顺序很重要：ACK 必须早于 _res_on_done 排出的下一个 REQUEST，
+                    # 否则发送方还没收到这份 END 的 ACK 就先看到新 REQUEST，会按 §9.7 N-13 ABORT 掉这一份
+                    # （实测：ABORT 计数从 0 变 2；rid 守卫让它不至于变成风暴，但语义已经错了）。
+                    self._res_result = {"rid": f.request_id, "status": ACK_OK}
+                    acked = self._ack_if_needed(f, ACK_OK, "资源 END（§9.5）")
                     self._on_resource_done(f.type)
                     self._res_on_done(f.type, f.request_id)   # 收齐 → 串行队列里的下一个
                 elif ev == 4:
                     err = self.dll.np_dll_res_last_err()
                     self.log("资源接收错误：%s（§9.5：回 ACK(ERROR) + ERROR(RESOURCE_FAIL) 后用新 REQUEST_ID 重来）"
                              % RES_ERR_NAMES.get(err, "?"))
+                    self._res_result = {"rid": f.request_id, "status": ACK_ERROR}
                     acked = self._ack_if_needed(f, ACK_ERROR, "资源校验失败")
                     self.dll.np_dll_send_error(NP_ERR_RESOURCE_FAIL, f.request_id, err)
                     self._res_retry_after_loss(f.type, f.request_id, "校验/分片错误")
                 elif ev == 5:
                     # ABORT 不带 ACK（§9.1 时序图 / §5.6 约定表）；只有"当前在途的那一份"才需要重来（§9.6）
                     self._res_retry_after_loss(f.type, f.request_id, "被 ABORT")
+
+                # 补一条 ACK：**空资源（TOTAL_SIZE=0）**时 C 侧在 BEGIN 帧就报 DONE（BEGIN 没有位 → 不回），
+                # 等 END 帧到达时 ev 已经是 NONE —— 只按事件回 ACK 就会漏掉它，
+                # 发送方会一直认为没传完（实测：上位机 _current 挂着，切歌时多发一次 ABORT）。
+                if (not acked) and (f.code == 0x04) and (self._res_result is not None) \
+                        and (self._res_result["rid"] == f.request_id):
+                    acked = self._ack_if_needed(f, self._res_result["status"], "资源 END（空资源，§9.5）")
 
             elif (f.type == 1) and (f.code == 0x05):
                 self._on_ack(f)                            # ACK(NOT_READY/BUSY) → 换新 rid 重试（§9.8）
@@ -1020,6 +1041,7 @@ class MockServer:
             "done": {},                       # kind → "已收齐" / "放弃：原因"
             "last_ack": "",
         }
+        self._res_result = None               # 最近一份资源的处理结果 {"rid","status"}，供 END 帧回 ACK 用
         self._res_push_state()
 
     def _res_push_state(self):
@@ -1201,6 +1223,14 @@ class MockServer:
         self._res["retry"][kind] = 0
         self._res["done"][kind] = "放弃：%s" % why
         self.log("✗ 放弃 %s：%s（可点对应按钮再来一次）" % (kind, why))
+        if (kind == "cover") and ("NOT_READY" in why):
+            # 规范 §11：**"这首没有封面"必须用空资源（FORMAT=0x00 / TOTAL_SIZE=0）表达**；
+            # NOT_READY 只表示"暂时还没读出来"（§9.8-3），不该被用来表达"就是没有"。
+            # 若对端一直回 NOT_READY：先看它的事件日志里有没有"封面：SMTC 已通知本曲目无封面"那一行
+            # （没有的话多半是它没把"无封面"这个状态通知给资源层，例如封面去重把首个 null 事件挡掉了）。
+            self.log("   提示（§11 / §9.8-3）：一直 NOT_READY 通常是上位机把\"没有封面\"当成了\"还没就绪\" —— "
+                     "规范要求无封面用**空资源 FORMAT=0x00** 表达；可核对上位机日志里是否有"
+                     "\"封面：SMTC 已通知本曲目无封面\"")
         self._res_push_state()
         self._res_pump(True)                            # 放弃一个不代表放弃另一个
 
@@ -1466,8 +1496,13 @@ class MockServer:
         else:
             self._set(cover={"size": size, "path": path, "format": fmt,
                              "w": w, "h": h, "data": data})
-            self.log("=== 封面收齐：%d 字节 格式=0x%02X %dx%d（CRC32 由 C 侧校验通过）→ %s"
-                     % (size, fmt, w, h, path))
+            if size == 0 or fmt == 0x00:
+                # §11：**空资源（FORMAT=0x00 / TOTAL_SIZE=0）= 对端明确告知"这首没有封面"**，
+                # ESP32 收到即清除封面区；这是正常响应，不是错误，更不是 NOT_READY（§9.8-4 同理）。
+                self.log("=== 对端无封面（空资源 FORMAT=0x00）→ 已清空封面区（§11）")
+            else:
+                self.log("=== 封面收齐：%d 字节 格式=0x%02X %dx%d（CRC32 由 C 侧校验通过）→ %s"
+                         % (size, fmt, w, h, path))
 
     def _refresh_stats(self):
         self._set(frames_rx=self.dll.np_dll_stat_frames_rx(),
@@ -1477,6 +1512,16 @@ class MockServer:
 
 
 # ---------------------------------------------------------------- 命令行入口
+
+def setup_utf8_console():
+    """Windows 控制台 / 重定向文件的编码常是 GBK，打不出 ✓ ✗ ⚠ 这类字符（会抛 UnicodeEncodeError）。
+    这里能改就改成 UTF-8；改不了也无所谓 —— MockServer.log() 里还有一层降级保护。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 
 def parse_args():
     ap = argparse.ArgumentParser(description="New Protocol V1.1 ESP32 模拟器（协议层跑 np_ref.dll）")
@@ -1511,6 +1556,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    setup_utf8_console()
 
     caps = 0
     for name in args.caps.split(","):
