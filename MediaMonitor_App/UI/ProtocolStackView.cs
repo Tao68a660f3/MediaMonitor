@@ -23,6 +23,12 @@ namespace MediaMonitor.UI
         /// </summary>
         bool SessionActive { get; }
 
+        /// <summary>
+        /// 连接 / 重试**还在进行中**（新协议：点了连接但链路还没建立 → 按钮显示「取消重试」；
+        /// Legacy 是同步连接，没有这个中间态）。
+        /// </summary>
+        bool ConnectPending { get; }
+
         /// <summary>给界面看的一行状态文本</summary>
         string StatusText { get; }
 
@@ -62,6 +68,9 @@ namespace MediaMonitor.UI
 
         /// <summary>Legacy 没有"会话握手"概念：链路通就算对端在（回控靠 0xAB，不握手）</summary>
         public bool SessionActive => App.TransportMgr.IsConnected;
+
+        /// <summary>Legacy 的 Connect 是同步的：点下去要么连上要么报错，没有"重试中"这个状态</summary>
+        public bool ConnectPending => false;
 
         public string StatusText => App.TransportMgr.IsConnected ? "已连接（0xAA/0xAB）" : "未连接";
 
@@ -113,6 +122,9 @@ namespace MediaMonitor.UI
         public bool IsConnected => _stack.IsConnected;
 
         public bool SessionActive => _stack.SessionActive;
+
+        /// <summary>点了连接但链路还没建立（含自动重试中）→ 按钮显示「取消重试」，点它立刻停</summary>
+        public bool ConnectPending => _stack.IsRetrying;
 
         public string StatusText => _stack.StateText;
 

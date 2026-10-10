@@ -118,9 +118,16 @@ class MockGui:
         self.btn_start.pack(side="left", padx=6)
         self.btn_stop = ttk.Button(top, text="停止", command=self.on_stop, state="disabled")
         self.btn_stop.pack(side="left")
+        # 改了端口/IP/串口后一键"重启服务端"（= 停止 + 启动）：省掉漏掉一步导致"改了却没生效"
+        self.btn_restart = ttk.Button(top, text="重启服务端", command=self.on_restart)
+        self.btn_restart.pack(side="left", padx=4)
 
         self.lbl_phase = ttk.Label(top, text="未启动", font=FONT_BOLD, foreground="#555555")
         self.lbl_phase.pack(side="left", padx=12)
+
+        # 实际监听地址：与输入框分开显示，避免"输入框写了 8899 而 socket 在 9100"这种错觉
+        self.lbl_listen = ttk.Label(top, text="实际监听: 未启动", font=FONT_MONO, foreground="#555555")
+        self.lbl_listen.pack(side="left", padx=8)
 
         self._apply_transport_state()        # 按当前传输方式把不适用的输入框灰掉
 
@@ -248,6 +255,13 @@ class MockGui:
         self._append_log("封面请求格式 → %s（0x%02X）" % (self.var_fmt.get(), fmt))
 
     def on_start(self):
+        # 起新的之前先把上一个停干净：旧实例还占着端口/串口时，新的必然"启动失败"
+        if self.server is not None:
+            if self.server.is_alive():
+                self._append_log("先停掉上一次的服务端（避免端口 / 串口被旧实例占着）")
+            self.server.stop()
+            self.server = None
+
         transport = self.var_transport.get().lower()
         try:
             port = int(self.var_port.get())
@@ -296,6 +310,14 @@ class MockGui:
         self.btn_start.config(state="normal")
         self.btn_stop.config(state="disabled")
         self._append_log("已停止服务端")
+
+    def on_restart(self):
+        """改了端口/IP/串口/波特率/传输后一键生效：停掉旧的，再按当前输入框重新启动"""
+        if self.server is not None:
+            self.server.stop()
+            self.server = None
+        self._append_log("重启服务端：按当前输入框重新启动")
+        self.on_start()
 
     def _session_active(self):
         """(是否 SESSION ACTIVE, 状态名)；GUI 里凡是"点了没反应"都要在这里给一句明确的话"""
@@ -351,10 +373,22 @@ class MockGui:
         self.root.after(200, self._tick)
 
     def _render(self, st):
-        # 顶栏：阶段
+        # 顶栏：阶段（失败阶段要标红：绑定失败 / 串口打开失败 / 异常退出，过去只是一行灰字，容易漏看）
+        failed = st["phase"] in ("绑定失败", "串口打开失败", "异常退出", "启动失败")
         self._upd(self.lbl_phase, (st["phase"], st["session_state"]),
                   text=st["phase"],
-                  foreground="#0A7D28" if st["session_state"] == 4 else "#B36B00")
+                  foreground="#C62828" if failed else ("#0A7D28" if st["session_state"] == 4 else "#B36B00"))
+
+        # 实际监听地址（真实 bind 结果）：连不上时先看这一行，别对着输入框猜
+        listen = st.get("listening") or ""
+        if listen:
+            listen_text = "实际监听: %s" % listen
+        elif failed:
+            listen_text = "实际监听: 无（%s）" % st["phase"]
+        else:
+            listen_text = "实际监听: 未启动（改端口/IP/串口后点「重启服务端」生效）"
+        self._upd(self.lbl_listen, listen_text, text=listen_text,
+                  foreground="#C62828" if (failed or not listen) else "#0A7D28")
 
         # 会话与统计
         self._upd(self.lbl_session, (st["session_name"], st["session_state"]),
@@ -462,7 +496,7 @@ class MockGui:
             self.canvas.delete("all")
             self.canvas.create_text(245, 235, text="（对端无封面：已清空封面区）",
                                     fill="#999999", font=FONT)
-            self._append_log("封面区已清空（对端回空资源 FORMAT=0x00，§11）")
+            self._append_log("封面区已清空（对端回空资源 FORMAT=0x00）")
             return
 
         if fmt == 0x10:                                  # RGB565 → PPM（Tk 原生支持）

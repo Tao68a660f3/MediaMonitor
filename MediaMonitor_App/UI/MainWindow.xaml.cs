@@ -48,6 +48,10 @@ namespace MediaMonitor
         {
             InitializeComponent();
 
+            // 0. 窗口标题（含版本号）统一取自 AppInfo：版本号唯一来源 = MediaMonitor.csproj 的 <Version>，
+            //    托盘提示在 UpdateUI 里复用 this.Title，于是界面/托盘/exe 属性三处永远一致（以前 XAML 里写死 V3.0.0）。
+            Title = AppInfo.WindowTitle;
+
             // 1. 初始化托盘
             _tray = new TrayManager();
 
@@ -508,8 +512,8 @@ namespace MediaMonitor
                 return;
             }
 
-            // 1. 如果已经连接，就断开
-            if (view.IsConnected)
+            // 1. 已经连上 / 正在连接或重试 → 点它就是"停"（重试中按钮文案是「取消重试」）
+            if (view.IsConnected || view.ConnectPending)
             {
                 view.Disconnect();
                 UpdateConnectButtonState(false);
@@ -540,17 +544,37 @@ namespace MediaMonitor
 
         // 辅助方法：美化 UI 状态
         //
-        // linkUp        = 链路已建立（TCP 连上 / 串口打开）
-        // sessionActive = **对端已应答**（新协议 = SESSION ACTIVE；Legacy 传 null，按链路算）
+        // linkUp         = 链路已建立（TCP 连上 / 串口打开）
+        // sessionActive  = **对端已应答**（新协议 = SESSION ACTIVE；Legacy 传 null，按链路算）
+        // connectPending = **连接/重试进行中**（链路还没建立，但后台还在自动尝试）
         //
         // 这个区分很要紧：只开了串口/连上 TCP 但对端根本没应答时，不能显示"已连接"，
-        // 按钮也只能是"取消连接"（点击 = 放弃等待），不是"断开连接"。
-        private void UpdateConnectButtonState(bool linkUp, bool? sessionActive = null)
+        // 按钮也只能是"取消连接"（点击 = 放弃等待）；而"连不上、后台正在重试"时按钮是
+        // **「取消重试」**（点击 = 立刻停止重试，不留后台循环）。
+        private void UpdateConnectButtonState(bool linkUp, bool? sessionActive = null, bool connectPending = false)
         {
             bool active = sessionActive ?? linkUp;
 
-            BtnConnect.Content = active ? "断开连接" : (linkUp ? "取消连接" : "开始连接");
-            BtnConnect.Background = active ? Brushes.OrangeRed : (linkUp ? Brushes.DarkOrange : Brushes.SeaGreen);
+            if (active)
+            {
+                BtnConnect.Content = "断开连接";
+                BtnConnect.Background = Brushes.OrangeRed;
+            }
+            else if (connectPending)
+            {
+                BtnConnect.Content = "取消重试";
+                BtnConnect.Background = Brushes.DarkOrange;
+            }
+            else if (linkUp)
+            {
+                BtnConnect.Content = "取消连接";
+                BtnConnect.Background = Brushes.DarkOrange;
+            }
+            else
+            {
+                BtnConnect.Content = "开始连接";
+                BtnConnect.Background = Brushes.SeaGreen;
+            }
 
             // 有链路就锁住模式切换与传输参数，避免"跑着换协议"
             RbSerial.IsEnabled = !linkUp;
@@ -866,9 +890,9 @@ namespace MediaMonitor
             // 「同步系统时间 (0x20)」是 Legacy 专有包，新协议没有对应命令
             BtnSyncTime.Visibility = isNew ? Visibility.Collapsed : Visibility.Visible;
 
-            // 切换后按钮状态按新模式的连接状态重算；新协议的"连接中"由轮询体现
+            // 切换后按钮状态按新模式的连接状态重算；新协议的"连接中/重试中"由轮询体现
             var view = CurrentView;
-            UpdateConnectButtonState(view?.IsConnected == true, view?.SessionActive == true);
+            UpdateConnectButtonState(view?.IsConnected == true, view?.SessionActive == true, view?.ConnectPending == true);
             UpdateNewStatusUI();
         }
 
@@ -945,17 +969,17 @@ namespace MediaMonitor
             TxtNewCaps.Text = stack.RemoteCapsText;
             TxtNewLatency.Text = stack.LatencyText;
 
-            // 颜色跟着状态走：绿=对端已应答 / 橙=有链路但还没应答 / 红=对端无应答 / 灰=未连接
+            // 颜色跟着状态走：绿=对端已应答 / 橙=有链路但还没应答 / 红=对端无应答·重试用尽 / 灰=未连接
             TxtNewSession.Foreground = stack.SessionActive
                 ? Brushes.Green
-                : stack.HandshakeFailed
+                : (stack.HandshakeFailed || stack.ReconnectGaveUp)
                     ? Brushes.OrangeRed
                     : stack.LinkUp ? Brushes.DarkOrange : Brushes.Gray;
 
             // 按钮与单选的启用状态也跟随（只在 New 模式下改，别抢 Legacy 的按钮）
             if (App.Mode == ProtocolMode.New)
             {
-                UpdateConnectButtonState(stack.LinkUp, stack.SessionActive);
+                UpdateConnectButtonState(stack.LinkUp, stack.SessionActive, stack.IsRetrying);
             }
         }
 

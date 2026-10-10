@@ -573,6 +573,7 @@ class MockServer:
         self._st = {
             "running": False,
             "phase": "未启动",
+            "listening": "",                    # 实际绑定的地址（GUI 顶栏显示，避免"输入框写了 8899 但 socket 在 9100"的错觉）
             "peer": "",
             "conn_seq": 0,
             "session_state": 0,
@@ -716,12 +717,31 @@ class MockServer:
 
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((self.ip, self.port))
-        srv.listen(1)
+        try:
+            srv.bind((self.ip, self.port))
+        except OSError as ex:
+            # 端口被占用是"改了端口却连不上"的常见原因：必须明说，不能混在"异常退出"里
+            self.log("✗ 绑定 %s:%d 失败：%s" % (self.ip, self.port, ex))
+            self.log("   常见原因：端口被上一次没退干净的实例占用 / 权限不足。"
+                     "换个端口，或先关掉占用它的进程再启动。")
+            self._set(running=False, phase="绑定失败", listening="")
+            self.exit_code = 4
+            return
+
+        srv.listen(2)                           # backlog 给 2：多出来的那条连接才 accept 得到、报得出来
         srv.settimeout(0.3)                     # 让 stop() 能及时退出
 
+        real = srv.getsockname()
+        self._set(phase="监听中", listening="%s:%d" % (real[0], real[1]))
+        self.log("实际监听：%s:%d（上位机的「地址 / 端口」要填这个）" % (real[0], real[1]))
+
+        state = {"link": None, "worker": None, "served": 0}
         try:
             while not self._stop.is_set():
+                # 单会话模式（CLI 默认 serve_forever=False）：服务完一条连接就退出，别把脚本挂住
+                if (not self.serve_forever) and (state["served"] > 0) and (state["link"] is None):
+                    break
+
                 try:
                     conn, addr = srv.accept()
                 except socket.timeout:
@@ -729,24 +749,52 @@ class MockServer:
                 except OSError:
                     break
 
-                conn.setblocking(False)
-                link = TcpLink(conn, addr)
-                try:
-                    self._serve(link)
-                except LinkClosed as ex:
-                    self.log("链路断开：%s" % ex)
-                finally:
-                    link.close()
+                if state["link"] is not None:
+                    # 服务中又来了第二条连接：它一定是多余的（真正在用的还是第一条），
+                    # 而它会**把在用的那条顶掉**（上位机侧只看最后一条）→ 表现成"只有时间轴能用、其他全废"。
+                    # 所以直接关掉，并在日志里喊出来，别让它静默发生。
+                    self.log("⚠ 已有连接在服务中（%s），新连接 %s 直接关闭 —— "
+                             "对端同时开了两条 TCP 连接？第二条会把正在用的那条顶掉。"
+                             % (state["link"].label, addr))
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
+                    continue
 
-                if not self.serve_forever:
-                    break
+                conn.setblocking(False)
+                self._set(peer="%s:%d" % (addr[0], addr[1]))
+                link = TcpLink(conn, addr)
+                state["link"] = link
+                state["served"] += 1
+
+                # 放到线程里服务：accept 循环继续转，才看得见"同时来了第二条"
+                worker = threading.Thread(target=self._serve_once, args=(link, state), daemon=True,
+                                          name="mock-esp32-serve")
+                state["worker"] = worker
+                worker.start()
         finally:
+            worker = state["worker"]
+            if (worker is not None) and worker.is_alive():
+                worker.join(timeout=1.5)         # 等它看到 _stop 退出：C 侧是全局状态，不能和下一轮重叠
             try:
                 srv.close()
             except OSError:
                 pass
-            self._set(running=False, phase="已停止", peer="")
+            self._set(running=False, phase="已停止", peer="", listening="")
             self.log("服务端已停止")
+
+    def _serve_once(self, link, state):
+        """服务一条连接（在独立线程里跑），结束后清掉"在服务"标记"""
+        try:
+            self._serve(link)
+        except LinkClosed as ex:
+            self.log("链路断开：%s" % ex)
+        except Exception as ex:                     # 兜底：单条连接出事不该带走整个服务端
+            self.log("✗ 连接服务异常：%s" % ex)
+        finally:
+            link.close()
+            state["link"] = None
 
     def _run_com(self):
         """串口是点对点链路：打开一次，一直服务；出错（拔线/对端异常）后重开。"""
@@ -953,12 +1001,12 @@ class MockServer:
                     # 否则发送方还没收到这份 END 的 ACK 就先看到新 REQUEST，会按 §9.7 N-13 ABORT 掉这一份
                     # （实测：ABORT 计数从 0 变 2；rid 守卫让它不至于变成风暴，但语义已经错了）。
                     self._res_result = {"rid": f.request_id, "status": ACK_OK}
-                    acked = self._ack_if_needed(f, ACK_OK, "资源 END（§9.5）")
+                    acked = self._ack_if_needed(f, ACK_OK, "资源 END")
                     self._on_resource_done(f.type)
                     self._res_on_done(f.type, f.request_id)   # 收齐 → 串行队列里的下一个
                 elif ev == 4:
                     err = self.dll.np_dll_res_last_err()
-                    self.log("资源接收错误：%s（§9.5：回 ACK(ERROR) + ERROR(RESOURCE_FAIL) 后用新 REQUEST_ID 重来）"
+                    self.log("资源接收错误：%s（回 ACK(ERROR) + ERROR(RESOURCE_FAIL) 后用新 REQUEST_ID 重来）"
                              % RES_ERR_NAMES.get(err, "?"))
                     self._res_result = {"rid": f.request_id, "status": ACK_ERROR}
                     acked = self._ack_if_needed(f, ACK_ERROR, "资源校验失败")
@@ -973,7 +1021,7 @@ class MockServer:
                 # 发送方会一直认为没传完（实测：上位机 _current 挂着，切歌时多发一次 ABORT）。
                 if (not acked) and (f.code == 0x04) and (self._res_result is not None) \
                         and (self._res_result["rid"] == f.request_id):
-                    acked = self._ack_if_needed(f, self._res_result["status"], "资源 END（空资源，§9.5）")
+                    acked = self._ack_if_needed(f, self._res_result["status"], "资源 END（空资源）")
 
             elif (f.type == 1) and (f.code == 0x05):
                 self._on_ack(f)                            # ACK(NOT_READY/BUSY) → 换新 rid 重试（§9.8）
@@ -1011,7 +1059,7 @@ class MockServer:
                     lat["peer_req_log"] = now
                     self.log("对端发起延迟测量（rid=%d）→ 本端应答（PROC_US=%d）%s"
                              % (f.request_id, LAT_SIM_PROC_US,
-                                "；本端自测不受影响（§15：ESP32 优先）" if lat["running"] else ""))
+                                "；本端自测不受影响（ESP32 优先）" if lat["running"] else ""))
 
             elif (f.type == 1) and (f.code == 0x11):
                 self._lat_on_response(f)
@@ -1026,7 +1074,7 @@ class MockServer:
             # 否则对端会一直等 ACK 到超时，而日志里什么都看不到（这正是"END 漏 ACK"当初的样子）。
             if need_ack and (not acked):
                 self.log("⚠ T=0x%02X C=0x%02X 置了 ACK_REQUIRED 但本端没有对应处理层 → 未回 ACK"
-                         "（收到该帧的一方本应回 ACK，§5.6 约定表）" % (f.type, f.code))
+                         "（收到该帧的一方本应回 ACK）" % (f.type, f.code))
 
     # ---- 内部：资源请求状态机（规范 §9.6 / §9.7 / §9.8）----
 
@@ -1066,7 +1114,7 @@ class MockServer:
             r["done"].pop(kind, None)
             infl = r["inflight"]
             if (infl is not None) and (infl["kind"] == kind):
-                self.log("%s：手工重来 → 丢掉在途的这一轮（对端会 ABORT 旧资源，§9.7）" % kind)
+                self.log("%s：手工重来 → 丢掉在途的这一轮（对端会 ABORT 旧资源）" % kind)
                 r["inflight"] = None
                 self.dll.np_dll_res_init()
             if kind in r["queue"]:
@@ -1077,7 +1125,7 @@ class MockServer:
         r["queue"].append(kind)
         self.log("计划请求 %s（%s）%s"
                  % (kind, reason,
-                    "；当前在途 %s，按 §9.7 串行排队" % r["inflight"]["kind"] if r["inflight"] else ""))
+                    "；当前在途 %s，串行排队" % r["inflight"]["kind"] if r["inflight"] else ""))
         self._res_push_state()
         self._res_pump(active)
 
@@ -1204,7 +1252,7 @@ class MockServer:
     def _ack_if_needed(self, f, status, why=""):
         """§5.6 约定表（V1.1-21）：**只有置了 `ACK_REQUIRED` 的帧才回 ACK**（位是唯一判据）"""
         if (f.flags & NP_FLAG_ACK_REQUIRED) == 0:
-            self.log("本帧未置 ACK_REQUIRED → 按 §5.6 不回 ACK（T=0x%02X C=0x%02X%s）"
+            self.log("本帧未置 ACK_REQUIRED → 不回 ACK（T=0x%02X C=0x%02X%s）"
                      % (f.type, f.code, "，" + why if why else ""))
             return False
         self._ack(f, status, why)
@@ -1228,7 +1276,7 @@ class MockServer:
             # NOT_READY 只表示"暂时还没读出来"（§9.8-3），不该被用来表达"就是没有"。
             # 若对端一直回 NOT_READY：先看它的事件日志里有没有"封面：SMTC 已通知本曲目无封面"那一行
             # （没有的话多半是它没把"无封面"这个状态通知给资源层，例如封面去重把首个 null 事件挡掉了）。
-            self.log("   提示（§11 / §9.8-3）：一直 NOT_READY 通常是上位机把\"没有封面\"当成了\"还没就绪\" —— "
+            self.log("   提示：一直 NOT_READY 通常是上位机把\"没有封面\"当成了\"还没就绪\" —— "
                      "规范要求无封面用**空资源 FORMAT=0x00** 表达；可核对上位机日志里是否有"
                      "\"封面：SMTC 已通知本曲目无封面\"")
         self._res_push_state()
@@ -1277,7 +1325,7 @@ class MockServer:
             wait = RES_RETRY_NOT_READY_S if status == ACK_NOT_READY else RES_RETRY_BUSY_S
             infl["phase"] = "等重试"
             infl["deadline"] = time.monotonic() + wait
-            self.log("ACK(%s) %s rid=%d → %.0fms 后用新 REQUEST_ID 重试（第 %d/%d 次，§9.8）"
+            self.log("ACK(%s) %s rid=%d → %.0fms 后用新 REQUEST_ID 重试（第 %d/%d 次）"
                      % (name, kind, infl["rid"], wait * 1000, r["retry"][kind], RES_MAX_RETRY))
         else:
             self.log("ACK(%s) %s rid=%d → 放弃本轮（不自动重试，可点手工按钮再来）"
@@ -1450,7 +1498,7 @@ class MockServer:
 
         # 曲目变了（或本次会话第一次收到）→ 重新计划两种资源；队列保证"先歌词后封面"（§9.7）
         if not (title or artist or album):
-            self.log("空元数据（当前无媒体）→ 不请求资源，仅清屏（§6）")
+            self.log("空元数据（当前无媒体）→ 不请求资源，仅清屏")
             self._reset_res_state()
             return
 
@@ -1499,7 +1547,7 @@ class MockServer:
             if size == 0 or fmt == 0x00:
                 # §11：**空资源（FORMAT=0x00 / TOTAL_SIZE=0）= 对端明确告知"这首没有封面"**，
                 # ESP32 收到即清除封面区；这是正常响应，不是错误，更不是 NOT_READY（§9.8-4 同理）。
-                self.log("=== 对端无封面（空资源 FORMAT=0x00）→ 已清空封面区（§11）")
+                self.log("=== 对端无封面（空资源 FORMAT=0x00）→ 已清空封面区")
             else:
                 self.log("=== 封面收齐：%d 字节 格式=0x%02X %dx%d（CRC32 由 C 侧校验通过）→ %s"
                          % (size, fmt, w, h, path))

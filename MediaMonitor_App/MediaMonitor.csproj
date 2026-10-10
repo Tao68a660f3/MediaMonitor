@@ -10,6 +10,21 @@
 	<Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <!--
+    ★ 版本号唯一来源 ★ —— 改这一行即可：
+      窗口标题 / 托盘提示 / exe「属性 → 详细信息」/ （将来的）关于信息都自动跟着走，
+      界面侧读法见 Core/AppInfo.cs（自测 R15 守着"XAML 里不许再写死版本号"）。
+
+    <Version> 会同时派生 AssemblyVersion / FileVersion / InformationalVersion(= x.y.z[+git sha])，
+    所以发出去的 exe 元数据与窗口标题永远一致（以前标题写 V3.0.0、exe 属性却是 1.0.0.0）。
+    临时覆盖（打包/CI）：dotnet publish -p:Version=3.0.2
+  -->
+  <PropertyGroup>
+    <Version>3.0.1</Version>
+    <AssemblyTitle>媒体同步调试终端</AssemblyTitle>
+    <Product>媒体同步调试终端</Product>
+  </PropertyGroup>
+
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
     <Optimize>False</Optimize>
   </PropertyGroup>

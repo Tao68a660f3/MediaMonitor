@@ -1,6 +1,7 @@
 ﻿using MediaMonitor;
 using MediaMonitor.Core;
 using MediaMonitor.Protocol.New.Service;
+using MediaMonitor.Protocol.New.Transport;
 using MediaMonitor.Services;
 using MediaMonitor.Tools;
 using System;
@@ -112,7 +113,19 @@ namespace MediaMonitor
 
                 // 新协议栈（Transport → Codec → Session → 各 Service 的装配）。
                 // 创建即订阅 SMTC/歌词数据源；只有 MainWindow 在 New 模式下点了「开始连接」才真正建链路。
-                NewStack = new NewProtocolStack(NewConfigSvc.Current, Smtc, Lyrics);
+                // 回控执行器与串口传输都在这里注入（协议层不依赖 WPF / 串口服务实现，自测工程才不用链接它们）
+                NewStack = new NewProtocolStack(NewConfigSvc.Current, Smtc, Lyrics,
+                                                cmd => MediaKeyInvoker.Instance.EnqueueCommand(cmd),
+                                                cfg =>
+                                                {
+                                                    var com = new ComTransport();
+                                                    if (com.Connect(cfg.ComPortName, cfg.BaudRate, out string? err))
+                                                    {
+                                                        return ((INewTransport?)com, (string?)null);
+                                                    }
+
+                                                    return ((INewTransport?)null, (string?)err);
+                                                });
 
                 // 异步启动 SMTC 服务
                 await Smtc.InitializeAsync();

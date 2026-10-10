@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
@@ -380,7 +381,7 @@ internal static class Program
                 // §11：模拟"这首没有封面" —— 上位机在 SMTC 无缩略图时就是这么回的：
                 // **空资源（FORMAT=0x00 / TOTAL_SIZE=0）**，而不是 ACK(NOT_READY)。
                 byte[] none = Array.Empty<byte>();
-                Console.WriteLine("[demo] 本次按 --no-cover 回空资源（FORMAT=0x00，§11）");
+                Console.WriteLine("[demo] 本次按 --no-cover 回空资源（FORMAT=0x00）");
                 return new NpResourceData(Crc32Ieee.Compute(none), none, (byte)NpResFormat.None, 0, 0);
             }
 
@@ -850,10 +851,10 @@ internal static class Program
                      f => (f.Flags == NpFlag.Response) && !f.NeedsAck));
         Check("R12 BEGIN 不置 ACK_REQUIRED",
               HasAnd(frames, f => f.Code == NpResCode.Begin, f => !f.NeedsAck));
-        Check("R12 DATA 只有 FRAGMENT（§9.4 不逐片 ACK）",
+        Check("R12 DATA 只有 FRAGMENT（数据帧不逐片 ACK）",
               HasAnd(frames, f => f.Code == NpResCode.Data,
                      f => f.HasFlag(NpFlag.Fragment) && !f.NeedsAck));
-        Check("R12 END 置 ACK_REQUIRED=1（§5.6 约定表：接收方必须回 ACK）",
+        Check("R12 END 置 ACK_REQUIRED=1（接收方必须回 ACK）",
               HasAnd(frames, f => f.Code == NpResCode.End, f => f.NeedsAck));
 
         // (d) CONTROL 置位、实时帧与延迟帧不置位
@@ -863,11 +864,11 @@ internal static class Program
         scheduler.WaitDrainedAsync(500).GetAwaiter().GetResult();
 
         List<NpFrame> frames2 = DecodeAll(transport);
-        Check("R12 CONTROL 置 ACK_REQUIRED（§8）",
+        Check("R12 CONTROL 置 ACK_REQUIRED",
               HasAnd(frames2, f => f.Type == NpType.Control, f => f.NeedsAck));
-        Check("R12 MEDIA 实时帧不置 ACK_REQUIRED（§6）",
+        Check("R12 MEDIA 实时帧不置 ACK_REQUIRED",
               HasAnd(frames2, f => f.Type == NpType.Media, f => !f.NeedsAck));
-        Check("R12 LATENCY_REQUEST 不置 ACK_REQUIRED（§14：响应即回答）",
+        Check("R12 LATENCY_REQUEST 不置 ACK_REQUIRED（响应即回答）",
               HasAnd(frames2, f => f.IsSystem(NpSysCode.LatencyRequest), f => !f.NeedsAck));
     }
 
@@ -950,6 +951,224 @@ internal static class Program
               HasAnd(frames, f => f.Code == NpResCode.End, f => f.NeedsAck));
     }
 
+    /* ---------------- R14：连接失败 → 有界重试 / 能停下 / 不开第二条连接 ---------------- */
+
+    /// <summary>
+    /// 连接层行为（跑的是 <see cref="NewProtocolStack"/> 里的真代码，只有传输是注入的假传输）。
+    ///
+    /// 回归的是三个"用户能感觉到"的点：
+    /// 1) **连不上不会无限重连**：首次 + 3 次重试（<see cref="NpReconnectPolicy.MaxRetries"/>）后**停止**；
+    /// 2) **能随时停下**：重试等待中点"停"→ 立刻不再尝试（过去 TCP 连不上时按钮根本没有停止入口）；
+    /// 3) **已连上时再点连接不会再开第二条**（过去重连循环会把正在用的链路顶掉，表现为"只有时间轴能用"）。
+    /// </summary>
+    private static void TestReconnectControl()
+    {
+        Console.WriteLine("R14 连不上：首次 + 3 次重试后停止 / 可随时取消 / 不开第二条连接");
+
+        // ---- (1) 策略本身（纯逻辑）----
+        Check("R14 策略：重试上限 = 3 次（不含首次尝试）", NpReconnectPolicy.MaxRetries == 3);
+
+        var policy = new NpReconnectPolicy(1000);
+        var delays = new List<int>();
+        while (policy.TryBeginNext(out int d))
+        {
+            delays.Add(d);
+        }
+        Check("R14 策略：恰好给出 3 次重试预算", delays.Count == 3);
+        Check("R14 策略：退避 1000 → 2000 → 4000", string.Join(",", delays) == "1000,2000,4000");
+        Check("R14 策略：预算用尽后不再给（该停止）", policy.Exhausted && !policy.TryBeginNext(out _));
+
+        policy.Reset();
+        Check("R14 策略：Reset 后重新给满预算（退避从头开始）",
+              policy.TryBeginNext(out int dAfterReset) && (dAfterReset == 1000));
+        Check("R14 策略：退避下限兜底（start=0 也算 200ms）",
+              new NpReconnectPolicy(0).TryBeginNext(out int dMin) && (dMin == NpReconnectPolicy.MinBackoffMs));
+
+        var policy2 = new NpReconnectPolicy(1000);
+        policy2.TryBeginNext(out _);
+        policy2.TryBeginNext(out _);
+        Check("R14 策略：状态文案可读（\"第 2/3 次重试\"）", policy2.Describe(true).Contains("第 2/3 次重试"));
+
+        // 连不上时用最短退避，测试才跑得快（200/400/800ms）
+        var cfg = new NewProtocolConfig
+        {
+            TransportMode = NewTransportType.Tcp,
+            TcpRemoteIp = "127.0.0.1",
+            TcpRemotePort = FindFreePort(),                  // 拿一个"确定没人监听"的端口 → 连接必被拒
+            TcpReconnectBackoffMs = NpReconnectPolicy.MinBackoffMs,
+        };
+
+        // ---- (2) 一直连不上：首次 + 3 次重试后停止 ----
+        // 每次失败都会打一条"TCP 连接失败"，用它统计尝试次数（真跑 TCP，不做任何注入）
+        int fails = 0;
+        var stack = new NewProtocolStack(cfg, new SmtcService(), new LyricService());
+        stack.Log += (_, msg) =>
+        {
+            if (msg.Contains("TCP 连接失败"))
+            {
+                System.Threading.Interlocked.Increment(ref fails);
+            }
+        };
+
+        stack.ConnectAsync().GetAwaiter().GetResult();
+
+        // 不同机器上"连不上"的单次耗时不一样（本机 SYN 重传要约 1s），所以轮询状态而不是死等固定时长
+        for (int i = 0; (i < 750) && !stack.ReconnectGaveUp; i++)
+        {
+            System.Threading.Thread.Sleep(20);            // 上限 15s，足够 4 次尝试 + 200/400/800ms 退避
+        }
+
+        Check("R14 连不上：总共尝试 4 次（首次 + 3 次重试）", fails == 4);
+        Check("R14 连不上：重试用尽即停止（不再有后台重连）",
+              stack.ReconnectGaveUp && !stack.WantConnect && !stack.IsRetrying);
+        Check("R14 连不上：状态栏写明原因（无人应答/连接失败）",
+              stack.StateText.Contains("无人应答") || stack.StateText.Contains("连接失败"));
+
+        int frozen = fails;
+        System.Threading.Thread.Sleep(500);
+        Check("R14 停止之后：不再有任何新的连接尝试", fails == frozen);
+        stack.Dispose();
+
+        // ---- (3) 重试等待中"点停"：立刻停 ----
+        var stack2 = new NewProtocolStack(cfg, new SmtcService(), new LyricService());
+        stack2.ConnectAsync().GetAwaiter().GetResult();   // 首次失败 → 进入第 1 轮重试（等 200ms）
+
+        // 等"第 1 轮重试已经排上"（首轮失败耗时因机器而异，轮询比死等稳）
+        for (int i = 0; (i < 100) && (stack2.ReconnectAttempt < 1); i++)
+        {
+            System.Threading.Thread.Sleep(20);
+        }
+
+        Check("R14 取消前：确实进入了重试（界面按钮 = 「取消重试」）",
+              stack2.IsRetrying && (stack2.ReconnectAttempt == 1));
+        Check("R14 取消前：状态栏带目标与第几次重试",
+              stack2.StateText.Contains("127.0.0.1") && stack2.StateText.Contains("第 1/3 次重试"));
+
+        stack2.Disconnect();                             // = 界面上点「取消重试」
+
+        // 取消后重试轮数必须冻结：后台若还在跑，200ms 内就会再涨一轮
+        int roundsAtCancel = stack2.ReconnectAttempt;
+        System.Threading.Thread.Sleep(1000);
+        Check("R14 取消后：不再进入新的重试轮次（后台循环确实停了）",
+              (stack2.ReconnectAttempt == roundsAtCancel) && !stack2.IsRetrying);
+        Check("R14 取消后：状态回到\"未连接\"",
+              !stack2.ReconnectGaveUp && (stack2.StateText == "未连接"));
+        stack2.Dispose();
+
+        // ---- (4) 已连上时再点连接：不会再开第二条 ----
+        // 起一个真监听，数"被接受了多少条连接"：这就是"有没有偷偷开第二条连接"的直接证据
+        int accepted = 0;
+        var keep = new List<System.Net.Sockets.TcpClient>();
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        int listenPort = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                System.Net.Sockets.TcpClient client;
+                try
+                {
+                    client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    return;                                   // listener.Stop() → 退出
+                }
+
+                lock (keep)
+                {
+                    keep.Add(client);                         // 保持连接打开（关掉就不叫"已经连上"了）
+                }
+                System.Threading.Interlocked.Increment(ref accepted);
+            }
+        });
+
+        var cfg2 = new NewProtocolConfig
+        {
+            TransportMode = NewTransportType.Tcp,
+            TcpRemoteIp = "127.0.0.1",
+            TcpRemotePort = listenPort,
+            TcpReconnectBackoffMs = NpReconnectPolicy.MinBackoffMs,
+        };
+
+        var stack3 = new NewProtocolStack(cfg2, new SmtcService(), new LyricService());
+        stack3.ConnectAsync().GetAwaiter().GetResult();
+        bool firstLinkUp = stack3.LinkUp;
+        stack3.ConnectAsync().GetAwaiter().GetResult();       // 再点一次（或并发点）
+        System.Threading.Thread.Sleep(150);
+        Check("R14 已连上再点连接：只开了 1 条连接，原有链路保持",
+              firstLinkUp && stack3.LinkUp && (accepted == 1));
+        stack3.Dispose();
+
+        listener.Stop();
+        lock (keep)
+        {
+            foreach (System.Net.Sockets.TcpClient c in keep)
+            {
+                try { c.Dispose(); } catch { /* 忽略 */ }
+            }
+        }
+    }
+
+    /* ---------------- R15：版本号单一来源（csproj <Version> → Core/AppInfo.cs） ---------------- */
+
+    /// <summary>从 bin 目录往上找仓库里的文件（自测工程只链接源文件，没有源码树副本）</summary>
+    private static string? FindRepoFile(string relative)
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
+        {
+            string path = Path.Combine(dir.FullName, relative);
+            if (File.Exists(path))
+            {
+                return path;
+            }
+        }
+        return null;
+    }
+
+    private static void TestAppInfo()
+    {
+        Console.WriteLine("R15 版本号单一来源（csproj <Version> → Core/AppInfo.cs）");
+
+        // 注意：自测工程是"链接源文件"编译的，AppInfo 读到的是**自测程序集自己的**版本（默认 1.0.0），
+        // 所以这里只校验"解析格式 + 拼接自洽"，不断言具体版本号（那是 MediaMonitor.csproj 的事）。
+        Check("R15 程序名非空且无首尾空白",
+              AppInfo.Name.Length > 0 && AppInfo.Name == AppInfo.Name.Trim());
+        bool versionReadable = true;
+        string versionText = string.Empty;
+        try { versionText = AppInfo.Version; } catch { versionReadable = false; }
+        Check("R15 读取 Version 不抛异常（元数据坏也只退化成 0.0.0）",
+              versionReadable && versionText.Length > 0);
+        Check("R15 Version 是三段号（已剥掉 +git 元数据）",
+              Regex.IsMatch(AppInfo.Version, @"^\d+\.\d+\.\d+$") && !AppInfo.Version.Contains('+'));
+        Check("R15 VersionText = \"V\" + Version", AppInfo.VersionText == "V" + AppInfo.Version);
+        Check("R15 WindowTitle = 程序名 + 空格 + VersionText",
+              AppInfo.WindowTitle == $"{AppInfo.Name} {AppInfo.VersionText}");
+        Check("R15 BuildInfo 非空且以 Version 开头（可带 +git 元数据）",
+              AppInfo.BuildInfo.StartsWith(AppInfo.Version, StringComparison.Ordinal));
+
+        // 两条"以后别再写死"的守护：XAML 里不许出现 Vx.y.z；csproj 必须声明 <Version>
+        string? xaml = FindRepoFile(Path.Combine("MediaMonitor_App", "UI", "MainWindow.xaml"));
+        Check("R15 窗口 XAML 里没有硬编码版本号（标题由 AppInfo 赋值）",
+              xaml != null && !Regex.IsMatch(File.ReadAllText(xaml), @"V\d+\.\d+\.\d+"));
+        string? csproj = FindRepoFile(Path.Combine("MediaMonitor_App", "MediaMonitor.csproj"));
+        Check("R15 csproj 声明了 <Version>x.y.z</Version>（版本号唯一来源）",
+              csproj != null && Regex.IsMatch(File.ReadAllText(csproj), @"<Version>\d+\.\d+\.\d+</Version>"));
+    }
+
+    /// <summary>拿一个"当前没人监听"的端口：起一个临时监听拿到系统分配的端口号，然后立刻关掉。</summary>
+    private static int FindFreePort()
+    {
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        int port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        return port;
+    }
+
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -1006,6 +1225,10 @@ internal static class Program
         TestAckFlags();
         Console.WriteLine();
         TestEmptyCover();
+        Console.WriteLine();
+        TestReconnectControl();
+        Console.WriteLine();
+        TestAppInfo();
 
         Console.WriteLine($"\n=== 通过 {_pass} 项，失败 {_fail} 项 ===");
         return _fail == 0 ? 0 : 1;

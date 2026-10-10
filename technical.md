@@ -345,19 +345,34 @@ python MediaMonitor_App/A_tools/mock_esp32_gui.py          # 图形版（开窗�
 
 **顺序不能反**：模拟器是服务端，上位机是客户端 —— 先起模拟器，再点上位机的连接。
 
-### 9.7 连接状态的三段语义（别再只看"链路"）
+### 9.7 连接状态的四段语义（别再只看"链路"）
 
 | 概念 | 字段 | 界面表现 |
 | :--- | :--- | :--- |
-| 链路 | `NewProtocolStack.LinkUp`（TCP 已连 / 串口已开） | `连接中…（等待链路）`；有链路时按钮为「取消连接」 |
+| 意图 | `NewProtocolStack.WantConnect`（用户点了连接且还没停） | `连接中… <目标>（第 n/3 次重试，x.xs 后再试）`；按钮「取消重试」 |
+| 链路 | `LinkUp`（TCP 已连 / 串口已开） | 有链路时按钮为「取消连接」 |
 | 会话 | `SessionActive`（收到 `SESSION_START`） | **只有它为真才显示 `已连接 · SESSION ACTIVE`、按钮才是「断开连接」** |
-| 失败 | `HandshakeFailed`（HELLO 重发 3 次无应答） | `未连接（对端无应答）`（红色） |
+| 放弃 | `ReconnectGaveUp`（首次 + 3 次重试全失败） | `未连接（连接失败：… 无人应答）`（红色）；按钮回到「开始连接」 |
 
 只把串口打开/TCP 连上就显示"已连接"会骗人 —— 实测过：对端没启动、只是本机有个同名 COM 口或一个只 accept 不回应的 TCP 监听，用户就会以为连上了。所以：
 
-* `IProtocolStackView` 同时暴露 `IsConnected`（链路）与 `SessionActive`（对端已应答），Legacy 没有会话概念 → 两者同值；
-* 按钮文案三态：`开始连接` / `取消连接`（有链路但对端没应答）/ `断开连接`（会话建立）；
-* 握手失败时日志给排查建议（对端没启动 / 串口被占用 / 波特率不一致）。
+* `IProtocolStackView` 暴露 `IsConnected`（链路）/ `SessionActive`（对端已应答）/ `ConnectPending`（连接或重试进行中），Legacy 是同步连接 → `ConnectPending` 恒为 false；
+* 按钮**四态**：`开始连接` / **`取消重试`**（后台正在重试）/ `取消连接`（有链路但对端没应答）/ `断开连接`（会话建立）；
+* **重试是有界的**：次数与退避只定义在 `NpReconnectPolicy`（首次 + 3 次重试，退避 1s→2s→4s，封顶 10s）；
+  用尽即停止并把原因写进状态栏，**不再无限重连**；点「取消重试」= `Disconnect()`，退避中的 `Task.Delay` 会被令牌立刻打断。
+
+**连接管理上踩过的两个坑**（现在都有代码级约束 + R14 回归）：
+
+1. **多个重连循环并存**：`ConnectAsync`（首次失败）与 `OnTransportDisconnected`（掉线）都各自起一个循环，
+   而旧循环在 `Task.Delay` 里睡到点才检查 `WantConnect` → 期间被重新置 true 就"复活"。结果是**两条连接同时在跑**。
+2. **重连不看"是否已连上"就 New 一条链路**，把正在用的那条顶掉：对端还在服务旧连接（新连接没人读），
+   而旧链路上残留的 `TimelinePump`/事件订阅照旧工作 → 表现成 **"时间轴能走，元数据/歌词/封面/回控全废"**（实测日志里能看到）
+   且状态机被"新会话的 Idle"打成 `会话状态 → IDLE` 的错乱序列。
+
+对策：`SemaphoreSlim` 串行化"拆旧链路 + 建新链路"、`LinkUp` 时**绝不再开第二条**、
+只允许**一个**重连循环（`_reconnectTask` + `CancellationTokenSource` 秒停）、
+拆链路前先完整 `Teardown()`（含旧服务与其事件订阅）、传输事件用"是不是当前这条链路"做代际校验、
+握手失败（`HandshakeFailed`）时**主动关掉僵尸链路**再交给重试预算；对端（mock）也会把"服务中又来了第二条连接"直接喊出来。
 
 ### 9.8 对端模拟器（`A_tools/mock_esp32_gui.py`）
 
@@ -369,6 +384,8 @@ python MediaMonitor_App/A_tools/mock_esp32_gui.py          # 图形版（开窗�
 * **显示**：会话与统计、`MEDIA`（标题/艺术家/专辑）、`LYRICS`（紧跟 MEDIA 下方）、`TIMELINE`（进度条 + chunk 时间戳）、`ALBUMCOVER` 预览（**默认请求 JPEG**，有 PIL 即解码；RGB565 走 PPM 直接渲染）、**资源请求状态行**（在途/排队/完成/上次 ACK）、**延迟统计行**、事件日志（可回溯"点了没反应"）；按钮行里可随时切换请求格式（JPEG / PNG / RGB565，只影响下一次 REQUEST）；
 * **刷新策略**：所有控件都走"值变了才 `configure`"（`_upd` 辅助函数），歌词/封面只在**资源更新时**整体重画 —— 早期版本每 200ms 重画歌词区，导致用户选不中、滚不动（实测踩过）；
 * **断线后继续监听**（`serve_forever=True`），方便反复联调；每次新连接都会 `np_dll_init/session_init/res_init/timeline_init`，避免上一次的残留；
+* **"端口到底生效没有"一眼可见**：顶栏 `实际监听: 127.0.0.1:8899` 显示**真实 `getsockname()` 结果**（与输入框分开显示，避免"输入框写了 8899 而 socket 在 9100"）；启动失败（`绑定失败` / `串口打开失败` / `异常退出`）阶段文字**标红**；改了端口/IP/串口/波特率后点**「重启服务端」**一键 stop+start（`on_start` 也会先停掉上一个实例，避免端口/串口被旧实例占着）；
+* **服务中又来了第二条连接会立刻喊出来**：连接在独立线程里服务（accept 循环继续转），检测到"已有连接在服务"就记一条告警并关掉新连接 —— "对端同时开了两条 TCP 连接、第二条把在用的那条顶掉"正是上位机侧 zombie 故障的现场证据；
 * `--headless --seconds N` 可无窗口跑一遍并打印解码摘要（自动化验证用）；`--trace` 把事件同时打到控制台，便于留日志。
 
 **合规行为**（规范里对 ESP32 的硬要求，mock 不照做就会"看起来连上了但数据不对"）：
@@ -395,7 +412,7 @@ TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）�
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
-| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动**（95 项） |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）**（共 126 项） |
 | C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **143 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**） |
 | 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
 | 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |

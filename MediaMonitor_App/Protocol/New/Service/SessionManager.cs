@@ -383,7 +383,7 @@ namespace MediaMonitor.Protocol.New.Service
             // 注意两者语义不同、不能互相推导：ACK_REQUIRED = 对方要不要回；
             // needAck = 本端要不要原帧重传（资源帧不做原帧重传，靠上层用新 REQUEST_ID 重来）。
             Debug.Assert(!needAck || ((flags & NpFlag.AckRequired) != 0),
-                         "needAck=true 的帧必须置 NpFlag.AckRequired（规范 §5.6 约定表）");
+                         "needAck=true 的帧必须置 NpFlag.AckRequired");
 
             uint seq = NextSeq();
             payload ??= Array.Empty<byte>();

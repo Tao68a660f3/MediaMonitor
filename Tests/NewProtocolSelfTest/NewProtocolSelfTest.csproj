@@ -37,10 +37,15 @@
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\ArtworkResourceBuilder.cs" LinkBase="Service" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\LatencyManager.cs" LinkBase="Service" />
     <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\OffsetTimelineSource.cs" LinkBase="Service" />
+    <!-- 连接管理层（R14 直接驱动真实协议栈：有界重试 / 点一下就停 / 不再开第二条连接） -->
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\NpReconnectPolicy.cs" LinkBase="Service" />
+    <Compile Include="..\..\MediaMonitor_App\Protocol\New\Service\NewProtocolStack.cs" LinkBase="Service" />
     <!-- 业务数据源（纯逻辑，无 WPF 依赖）：歌词解析 + Legacy 帧构造 + 封面重编码 -->
     <Compile Include="..\..\MediaMonitor_App\Services\LyricService.cs" LinkBase="App" />
     <Compile Include="..\..\MediaMonitor_App\Tools\PackageBuilder.cs" LinkBase="App" />
     <Compile Include="..\..\MediaMonitor_App\Tools\ArtworkProcessor.cs" LinkBase="App" />
+    <!-- 应用信息（R15：版本号单一来源 —— 只读自身程序集元数据，无 WPF 依赖，可直接链接） -->
+    <Compile Include="..\..\MediaMonitor_App\Core\AppInfo.cs" LinkBase="App" />
     <!-- 配置层（P6）：泛型容错读写 + 新协议配置 + 运行期模式枚举 -->
     <Compile Include="..\..\MediaMonitor_App\Core\PackageConfig.cs" LinkBase="App" />
     <Compile Include="..\..\MediaMonitor_App\Core\ProtocolMode.cs" LinkBase="App" />

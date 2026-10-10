@@ -129,17 +129,24 @@ namespace MediaMonitor.Services
         }
 
         /// <summary>
-        /// 核心缓冲区管理：自动清理超过100行的记录
+        /// 核心缓冲区管理：**滚动窗口** —— 超过 100 行只丢最旧的一段。
+        /// （过去是整框 <c>Clear()</c>：连接失败等场景日志刷得快，一清空就像"日志凭空没了"，很难复盘。）
         /// </summary>
         private void AppendBlock(Block block)
         {
-            if (_outputBox.Document.Blocks.Count > MAX_BLOCK_COUNT)
+            var blocks = _outputBox.Document.Blocks;
+            while (blocks.Count >= MAX_BLOCK_COUNT)
             {
-                _outputBox.Document.Blocks.Clear();
-                _outputBox.Document.Blocks.Add(new Paragraph(new Run("--- 缓冲区已自动清空 ---") { Foreground = Brushes.Gray }));
+                Block? oldest = blocks.FirstBlock;
+                if (oldest == null)
+                {
+                    break;
+                }
+
+                blocks.Remove(oldest);
             }
 
-            _outputBox.Document.Blocks.Add(block);
+            blocks.Add(block);
             _outputBox.ScrollToEnd();
         }
 
