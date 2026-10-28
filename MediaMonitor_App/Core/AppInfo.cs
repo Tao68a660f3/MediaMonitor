@@ -9,7 +9,7 @@ namespace MediaMonitor.Core
     ///
     /// **版本号的唯一来源是 `MediaMonitor.csproj` 的 `&lt;Version&gt;`**：
     /// 窗口标题、托盘提示、exe「属性 → 详细信息」都从这份程序集元数据来 ——
-    /// 不要再把 `V3.0.1` 这类字面量写回 XAML / 代码里（自测 R15 会拦住）。
+    /// 不要再把 `V3.x.x` 这类字面量写回 XAML / 代码里（自测 R15 会拦住）。
     ///
     /// 只依赖自身程序集的元数据、不引用任何 WPF 类型，因此
     /// `Tests/NewProtocolSelfTest` 可以直接链接本文件做断言
@@ -27,7 +27,7 @@ namespace MediaMonitor.Core
         private static string? _buildInfo;
 
         /// <summary>
-        /// 语义版本，三段：`3.0.1`。
+        /// 语义版本，三段：`3.x.x`。
         /// **用惰性求值而不是字段初始化器**（两个原因，都是实测踩出来的）：
         /// ① 静态字段按声明顺序初始化，<see cref="VersionHead"/> 排在后面时 `Version` 初始化会读到 null
         ///    → 类型初始化抛异常 → App 直接弹「初始化零件失败: The type initializer for ... threw an exception」；
@@ -35,17 +35,17 @@ namespace MediaMonitor.Core
         /// </summary>
         public static string Version => _version ??= ResolveVersion();
 
-        /// <summary>展示用版本（带 V 前缀）：`V3.0.1`</summary>
+        /// <summary>展示用版本（带 V 前缀）：`V3.x.x`</summary>
         public static string VersionText => "V" + Version;
 
         /// <summary>
-        /// 窗口标题：`媒体同步调试终端 V3.0.1`。
+        /// 窗口标题：`媒体同步调试终端 V3.x.x`。
         /// MainWindow 构造时把这个值赋给 `Title`，托盘提示（`$"... | {this.Title}"`）也就跟着走。
         /// </summary>
         public static string WindowTitle => $"{Name} {VersionText}";
 
         /// <summary>
-        /// 完整构建标识：`3.0.1+1a2b3c4`（.NET SDK 在 git 仓库里会把提交号拼进 InformationalVersion）。
+        /// 完整构建标识：`3.x.x+1a2b3c4`（.NET SDK 在 git 仓库里会把提交号拼进 InformationalVersion）。
         /// 排障时用它确认"跑的到底是哪次构建"；拿不到 git 信息时等于 <see cref="Version"/>。
         /// </summary>
         public static string BuildInfo => _buildInfo ??= ResolveBuildInfo();

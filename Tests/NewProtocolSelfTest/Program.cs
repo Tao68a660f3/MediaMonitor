@@ -346,7 +346,7 @@ internal static class Program
         string lrcDir = Path.Combine(Path.GetTempPath(), "np_lrc_test");
         Directory.CreateDirectory(lrcDir);
         File.WriteAllText(Path.Combine(lrcDir, "测试歌手 - 测试歌曲.lrc"),
-            "[offset:-200]\n[00:00.50]第一行歌词\n[00:03.00]第二行歌词\n[00:06.00]第三行歌词\n",
+            "[offset:-200]\n[00:00.50]第一行歌词\n[00:02.00]\n[00:03.00]第二行歌词\n[00:06.00]第三行歌词\n",
             new UTF8Encoding(false));
 
         var lyrics = new LyricService { LyricFolder = lrcDir };
@@ -1158,6 +1158,128 @@ internal static class Program
               csproj != null && Regex.IsMatch(File.ReadAllText(csproj), @"<Version>\d+\.\d+\.\d+</Version>"));
     }
 
+    /* ---------------- R16：歌词资源整份序列化（空行照发，§10.1 不做裁剪） ---------------- */
+
+    /// <summary>
+    /// R16：`[00:03.00]` 这种"有时间戳、正文与翻译都空"的行必须照发成一条 `0x15` 空文本行。
+    /// 固件 <c>LyricWidget</c> 只按 `t_ms` 找"最后一个不晚于当前进度的行"，自己不会主动清屏 ——
+    /// 丢掉空行会让间奏期间一直挂着上一句，与 Legacy 链路（`PackageMaster` 不筛行）行为不一致，
+    /// 也违反规范 §10.1"有什么发什么…不做任何裁剪或筛选"。
+    /// </summary>
+    private static void TestLyricResource()
+    {
+        Console.WriteLine("R16 歌词资源整份序列化（空行照发，§10.1 不做裁剪）");
+
+        string dir = Path.Combine(Path.GetTempPath(), "np_lrc_r16");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "测试歌手 - 空行测试.lrc"),
+            "[00:01.00]第一行\n" +
+            "[00:03.00]\n" +                       // 孤立空行：间奏清屏（必须照发）
+            "[00:05.00]第二行\n" +
+            "[00:07.00]\n" +                       // 空原文 + 同时间戳翻译 → 合并成一行（不算空行）
+            "[00:07.00]翻译行\n",
+            new UTF8Encoding(false));
+
+        var lyrics = new LyricService { LyricFolder = dir };
+        lyrics.LoadAndParse("空行测试", "测试歌手");
+
+        Check("R16 带时间戳的空行保留在歌词池（Lines.Count = 4）", lyrics.Lines.Count == 4);
+        Check("R16 池内第 2 行是空行（IsEmpty 且 Content 为空）",
+              (lyrics.Lines.Count >= 2) && lyrics.Lines[1].IsEmpty && (lyrics.Lines[1].Content.Length == 0));
+        Check("R16 空原文 + 同时间戳翻译合并成一行（Content 空 / Translation 非空 → 不算空行）",
+              (lyrics.Lines.Count >= 4) && (lyrics.Lines[3].Content.Length == 0) &&
+              (lyrics.Lines[3].Translation == "翻译行") && !lyrics.Lines[3].IsEmpty);
+
+        byte[] data = LyricResourceBuilder.Build(lyrics, TimeSpan.FromSeconds(10), out int frameCount);
+        var frames = ParseLegacyLyricFrames(data);
+
+        Check("R16 资源流每一帧都过 AA / 长度 / XOR 自检", frames != null);
+        if (frames == null)
+        {
+            return;
+        }
+
+        Check("R16 帧数 = 原文行 4 + 翻译行 1 = 5（空行没被丢）",
+              (frameCount == 5) && (frames.Count == 5));
+
+        var originals = frames.Where(f => f.Cmd == 0x15).ToList();
+        Check("R16 4 条 0x15 原文行，idx 与池下标一一对应（0,1,2,3）",
+              (originals.Count == 4) &&
+              originals.Select(f => (int)f.Idx).SequenceEqual(new[] { 0, 1, 2, 3 }));
+        Check("R16 空行发成 0x15 空文本（start=3000，固件据此清屏）",
+              (originals.Count == 4) && (originals[1].StartMs == 3000) && (originals[1].Text.Length == 0));
+        Check("R16 上一行的 end_ms = 空行时间（3000）—— 间奏起点明确",
+              (originals.Count == 4) && (originals[0].EndMs == 3000));
+        Check("R16 翻译行 0x13：同 idx(3) / 同 start(7000) / 文本正确",
+              frames.Any(f => (f.Cmd == 0x13) && (f.Idx == 3) && (f.StartMs == 7000) && (f.Text == "翻译行")));
+    }
+
+    /// <summary>
+    /// 拆 Legacy 帧字节流（`AA | cmd | lenH | lenL | payload | xor`，见 <see cref="PackageBuilder.BuildPacket"/>）。
+    /// 任一帧的魔数 / 长度 / XOR 不符 → 返回 null（说明资源流本身就是坏的）。
+    /// 载荷布局：idx(2, 小端) + start(4, 小端) [+ end(4) for 0x15] + text(UTF-8)。
+    /// </summary>
+    private static List<(byte Cmd, short Idx, uint StartMs, uint EndMs, string Text)>? ParseLegacyLyricFrames(byte[] data)
+    {
+        var list = new List<(byte, short, uint, uint, string)>();
+        int off = 0;
+
+        while (off < data.Length)
+        {
+            if (((off + 5) > data.Length) || (data[off] != 0xAA))
+            {
+                return null;
+            }
+
+            int len = (data[off + 2] << 8) | data[off + 3];
+            int frameLen = 4 + len + 1;
+            if ((off + frameLen) > data.Length)
+            {
+                return null;
+            }
+
+            byte check = 0;
+            for (int i = off; i < off + 4 + len; i++)
+            {
+                check ^= data[i];
+            }
+            if (check != data[off + 4 + len])
+            {
+                return null;
+            }
+
+            byte cmd = data[off + 1];
+            ReadOnlySpan<byte> payload = new ReadOnlySpan<byte>(data, off + 4, len);
+            short idx = 0;
+            uint start = 0;
+            uint end = 0;
+            string text = string.Empty;
+
+            if (payload.Length >= 6)
+            {
+                idx = BitConverter.ToInt16(payload.Slice(0, 2));
+                start = BitConverter.ToUInt32(payload.Slice(2, 4));
+
+                if ((cmd == 0x15) && (payload.Length >= 10))
+                {
+                    end = BitConverter.ToUInt32(payload.Slice(6, 4));
+                }
+
+                int textOff = (cmd == 0x15) ? 10 : 6;
+                if (payload.Length > textOff)
+                {
+                    text = LyricResourceBuilder.Utf8.GetString(payload.Slice(textOff));
+                }
+            }
+
+            list.Add((cmd, idx, start, end, text));
+            off += frameLen;
+        }
+
+        return list;
+    }
+
+
     /// <summary>拿一个"当前没人监听"的端口：起一个临时监听拿到系统分配的端口号，然后立刻关掉。</summary>
     private static int FindFreePort()
     {
@@ -1229,6 +1351,8 @@ internal static class Program
         TestReconnectControl();
         Console.WriteLine();
         TestAppInfo();
+        Console.WriteLine();
+        TestLyricResource();
 
         Console.WriteLine($"\n=== 通过 {_pass} 项，失败 {_fail} 项 ===");
         return _fail == 0 ? 0 : 1;

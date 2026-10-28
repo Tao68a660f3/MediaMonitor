@@ -412,11 +412,17 @@ TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）�
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
-| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）**（共 126 项） |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）**（共 135 项） |
 | C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **143 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**） |
 | 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
 | 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |
 | 真 SMTC 探针 | `NewProtocolSelfTest.exe --tcp-smtc 127.0.0.1:9100 20` | 用真实播放器数据量"发包节奏"，验证抖动护栏 |
+
+> 歌词资源（`LyricResourceBuilder.Build`）= 整份歌词池按 Legacy 帧格式串起来的字节流，**不筛行**：
+> `[00:03.00]` 这种"有时间戳、正文与翻译都空"的行也会发一条 `0x15` 空文本。固件 `LyricWidget`
+> 只按 `t_ms` 找"最后一个不晚于当前进度的行"、自己不会主动清屏 —— 少了这条空行，间奏期间会一直
+> 挂着上一句（Legacy 链路 `PackageMaster` 一直是照发的，两条链路必须一致）。帧内 `idx` 允许有洞：
+> 固件 `legacy_lyric.c` 用递增计数写池、忽略帧内 `idx`。
 
 
 

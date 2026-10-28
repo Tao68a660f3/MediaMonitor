@@ -17,10 +17,10 @@
 
     <Version> 会同时派生 AssemblyVersion / FileVersion / InformationalVersion(= x.y.z[+git sha])，
     所以发出去的 exe 元数据与窗口标题永远一致（以前标题写 V3.0.0、exe 属性却是 1.0.0.0）。
-    临时覆盖（打包/CI）：dotnet publish -p:Version=3.0.2
+    临时覆盖（打包/CI）：dotnet publish -p:Version=&lt;三段号&gt;
   -->
   <PropertyGroup>
-    <Version>3.0.1</Version>
+    <Version>3.0.2</Version>
     <AssemblyTitle>媒体同步调试终端</AssemblyTitle>
     <Product>媒体同步调试终端</Product>
   </PropertyGroup>

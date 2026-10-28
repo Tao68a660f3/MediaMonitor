@@ -1537,10 +1537,15 @@ class MockServer:
 
         if rtype == 5:
             lines = parse_lyric_lines(data)
+            blanks = sum(1 for x in lines if (x["kind"] == "line") and (not x["text"]))
             self._set(lyrics={"size": size, "path": path, "format": fmt,
-                              "frames": count_legacy_lyric_frames(data), "lines": lines})
+                              "frames": count_legacy_lyric_frames(data), "lines": lines,
+                              "blanks": blanks})
             self.log("=== 歌词收齐：%d 字节 / %d 行（CRC32 由 C 侧校验通过）→ %s"
                      % (size, len(lines), path))
+            if blanks:
+                self.log("    其中 %d 条是空行（0x15 空文本 = 间奏清屏；固件按 t_ms 走到该行时画面留空）"
+                         % blanks)
         else:
             self._set(cover={"size": size, "path": path, "format": fmt,
                              "w": w, "h": h, "data": data})

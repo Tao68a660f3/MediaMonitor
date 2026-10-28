@@ -13,6 +13,9 @@ namespace MediaMonitor.Protocol.New.Service
     /// * 内容 = 歌词池全部行按 Legacy 帧格式序列化后的**连续字节流**：
     ///   逐字行走 `0x14`、普通行走 `0x15`（带结束时间）、有翻译就追加一行 `0x13`；
     /// * **不做任何裁剪**（`LineLimit` / `TransOccupies` 是显示排版参数，交付给 ESP32 决定）；
+    /// * **空行照发**：`[00:03.00]` 这类"有时间戳、正文与翻译都空"的行是 LRC 表示**间奏清屏**的写法，
+    ///   必须序列化成一条 `0x15` 空文本行。固件的 `LyricWidget` 只按 `t_ms` 找"最后一个不晚于当前进度的行"、
+    ///   自己不会主动清屏，丢掉空行会让间奏期间一直挂着上一句（与 Legacy 链路行为不一致）；
     /// * **强制 UTF-8**：不依赖 <c>PackageBuilder.UpdateEncoding</c> 的全局静态状态；
     /// * 时间戳（含 `[offset:N]` 与配置 Offset 的平移）已在 <see cref="LyricService"/> 解析阶段应用完毕。
     /// </summary>
@@ -26,7 +29,7 @@ namespace MediaMonitor.Protocol.New.Service
         /// </summary>
         /// <param name="lyrics">歌词服务（读取其不可变快照 <c>Lines</c>）</param>
         /// <param name="totalDuration">曲目总时长（用于末行的结束时间）</param>
-        /// <param name="lineCount">输出：实际写入的行数（含翻译行）</param>
+        /// <param name="lineCount">输出：实际写入的帧数（原文行 + 翻译行；空行也算一条原文行）</param>
         public static byte[] Build(LyricService lyrics, TimeSpan totalDuration, out int lineCount)
         {
             lineCount = 0;
@@ -41,10 +44,6 @@ namespace MediaMonitor.Protocol.New.Service
             for (int i = 0; i < lines.Count; i++)
             {
                 LyricLine line = lines[i];
-                if (line.IsEmpty)
-                {
-                    continue;
-                }
 
                 byte[] frame;
                 if ((line.Words != null) && (line.Words.Count > 0))
