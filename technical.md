@@ -32,20 +32,36 @@
 * **进度外推**：Playing 状态下按 `timeline.LastUpdatedTime + PlaybackRate` 持续外推（Chrome 等不频繁刷新 Timeline 的播放器也能得到连续进度）；进入 Playing 的瞬间用 `_resumeBasePosition/_resumeBaseTime` 作锚点，消除"暂停→恢复"时把整段暂停时长虚增进首个同步包的问题；结果再做 `[0, EndTime]` 钳位。
 * **残留清理（重要）**：若当前会话已不在 `SessionManager.GetSessions()` 中（播放器退出 / 会话被关闭），`DetachIfSessionGone()` 会执行 `DetachCurrentSession(notify: true)` —— 解绑事件、重置播放状态与锚点、**清空 `CurrentTitle` / `CurrentArtist` / `CurrentAlbum`**，并触发 `MediaCleared` 事件。
   不清场的话，三个缓存字段会一直保留上一首的值，界面与托盘会"假装还在播放"，而 `GetCurrentProgress()` 其实已经返回 `null`。
-* **上层约定**：`PackageMaster` 订阅 `MediaCleared` 后**只清上位机侧状态**（复位统计量 → `LyricService.LoadAndParse("", "")` 发布空歌词 → `Invalidate()` 清账本 → 主动触发一次 `LyricChanged(-1, 空行)` 清掉界面预览），**不向硬件下发任何清场/停止包**，硬件保留最后一帧画面。
+* **上层约定**：`PackageMaster` 订阅 `MediaCleared` 后**只清上位机侧状态**（复位统计量 → `LyricService.LoadAndParse("", "", "")` 发布空歌词 → `Invalidate()` 清账本 → 主动触发一次 `LyricChanged(-1, 空行)` 清掉界面预览），**不向硬件下发任何清场/停止包**，硬件保留最后一帧画面。
 * **清屏/复位走既有通路**：无歌曲状态下重新点一次「开始连接」，会补发一次空元数据（`0x10` 三个字段长度均为 0），硬件以该帧作为复位参考信号自行清屏 —— 见 readme 协议说明里的注记。
 
-### 1.3 LyricService：不可变快照、`[offset:N]` 与歌曲信息占位行
+### 1.3 歌词：LyricService（快照）+ LyricMatcher（元数据匹配）+ LyricParser（格式插件）
 
+* **分层**：`Services/LyricService.cs` 只做编排（校验元数据 → 找候选 → 解析 → 原子发布）；
+  `Services/Lyrics/LyricMatcher.cs` 按 Title/Artist/Album 评分；
+  `Services/Lyrics/LyricParsers.cs` 是解析器注册表 + LRC 实现。
+  **LRC 只是插件之一**：接 KRC/QRC/SRT 时实现 `ILyricParser` 并
+  `LyricParserRegistry.Shared.Register(...)` 即可，匹配器与 `LyricService` 一行不用改。
 * **不可变快照**：解析期间只在局部 `newLines` 上构建，完成后由 `PublishLyrics()` 一次性替换 `Lines` 引用并 `Generation++`。读取方（10ms 帧循环）每帧捕获一次引用，整帧基于同一实例 —— 读方无需加锁，也绝不会读到"新旧混杂"的半成品。
-* **`[offset:N]` 头标签**：`ParseHeaderOffset()` 只扫描到**首个带时间戳的行之前**（避免把正文里的 `[offset:..]` 误当标签），取出的**原值**存入 `CurrentOffsetMs`，实际平移量为 `-offset`：
+* **搜索不再依赖文件名 pattern**（`FileNamePatterns` 已删除）：
+  1. 规范化：剥掉元数据/文件名尾部混入的音频扩展名（`Song.mp3` → `Song`）、去前导音轨号（`01.` / `[01]`）、剥括号得主干（括号内容仍参与歌手判断）、NFKC 全角→半角、小写、标点折叠；
+  2. **标题是唯一硬条件**：精确 60 / 连续包含 55~50 / token 全出现 45~40 / 相似度 30~22；没有标题信号的文件直接淘汰；标题主干之外的限定词（如 `Song (Live)` 里的 `live`）命中 +4、缺失 −4，保证元数据明确是 Live 时优先选 Live 版；
+  3. 歌手：文件名或目录命中歌手变体 +25（多歌手按 `& / feat.` 拆分）；专辑：专辑目录 +20、文件名命中 +15/10、路径上下文 +8；
+  4. **没有歌词词表**：文件名里没被 Title/Artist/Album 解释的 token（`live`、`320k`、`feat`…）每个 −2（最多 −10）。录音室版因此会以 2 分之差压过 Live 版；如果目录里只有 Live 版，它仍是标题命中，照常加载；
+  5. 歌手/专辑匹配不到**只影响排序，不淘汰** —— 标题命中即可回退加载；
+  6. 模糊匹配只在没有任何精确/包含候选时启用；候选按分数从高到低逐个解析，某个文件解析出 0 行会自动落到下一个，全部失败才占位。
+* **专辑的作用**：`LyricFolder/歌手/专辑/标题.lrc` 这类结构由"专辑目录 +20 / 路径 +8"利用；SMTC 专辑为空时该维度直接跳过，不影响召回。
+* **格式插件**：`ILyricParser.Parse` 返回统一的 `LyricParseResult`（行列表 + 格式自带偏移 + 格式名）；匹配器的扫描扩展名来自 `LyricParserRegistry.Extensions`，加格式不用改扫描逻辑；`LyricService.CurrentParserName` 记录实际使用的格式，新协议日志会以 `[LRC]` / `[KRC]` 标出。
+* **`[offset:N]` 头标签**：现在属于 `LrcLyricParser` 内部实现，语义不变 —— `ParseHeaderOffset()` 只扫描到**首个带时间戳的行之前**，取出的**原值**存入 `CurrentOffsetMs`，实际平移量为 `-offset`：
   * `N < 0` → 歌词偏快（唱早了）→ 整行**延后** `|N|`；
   * `N > 0` → 歌词偏慢（唱晚了）→ 整行**提前** `N`。
   即 `新时间 = 标签时间 - offset`（例：`[offset:-2800]` + `[00:00.20]` → `00:03.00`）。
 * **平移细节**：`ApplyOffset()` 在排序前对每行（含行内逐字）整体平移；逐字与整行共用同一 delta，保证 `w.Time - line.Time` 的相对节奏不变；若某行会被推到 0ms 之前，则只把**该行**收敛到 0ms 起（否则 `(uint)` 强转会变成约 42.9 亿 ms 污染硬件）。运算全程用 `long` 的 Tick 整数，避免 `-offset` 在 int 域溢出。
-* **翻译行配对**依赖**平移前**的时间戳（同时间戳 ±50ms 视为翻译行），所以平移必须发生在解析之后。
+* **编码**：`LyricTextFile` 先认 BOM（UTF-8/UTF-16），再严格 UTF-8，失败回退 GB18030（App 启动时已注册 CodePages provider），最后才用 UTF-8 替换字符兜底 —— 老 GBK 歌词不会整片乱码。
+* **翻译行配对**依赖**平移前**的时间戳（同时间戳 ±50ms 视为翻译行），所以平移必须发生在解析之后（LRC 解析器内部）。
 * **占位歌词**：`LoadAndParse()` 的收尾统一走 `PublishLyricsOrPlaceholder()` —— 一行都没解析出来（没搜到文件 / 歌词目录不可用 / 文件里没有可解析的时间戳）且能拼出歌曲信息时，发布 **1 行** `Time = 0ms`、`Content = "歌名 - 歌手"` 的占位歌词（`IsPlaceholder = true`、`CurrentLyricPath = null`）。终点时间不写死：它就是末行，由 `GetEndTime()` 返回**曲目总时长**，因此 0ms 显示到曲尾。
-* **空属性**（`LoadAndParse("", "")`，会话消失时调用）走闸门 1 → 发布空歌词，**不**产生占位行。
+* **空属性**（`LoadAndParse("", "", "")`，会话消失时调用）走闸门 1 → 发布空歌词，**不**产生占位行。
+* **诊断**：`LyricService.LastMatch` 记录本次命中的文件/分数/原因（`title=…, artist=hit, album=dir, extras=…`），新协议日志会打印它；仅用于排查，不参与发送逻辑。
 
 ### 1.4 PackageMaster：10ms 帧循环与"账本门控"
 
@@ -412,7 +428,7 @@ TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）�
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
-| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）**（共 135 项） |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 多种命名 / 格式插件）**（共 154 项） |
 | C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **143 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**） |
 | 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
 | 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |

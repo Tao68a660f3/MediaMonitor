@@ -688,11 +688,11 @@ namespace MediaMonitor.Protocol.New.Service
         private void LoadLyricsForCurrent()
         {
             _lyrics.LyricFolder = _cfg.LyricFolder ?? "";
-            _lyrics.LoadAndParse(_smtc.CurrentTitle ?? "", _smtc.CurrentArtist ?? "");
+            _lyrics.LoadAndParse(_smtc.CurrentTitle ?? "", _smtc.CurrentArtist ?? "", _smtc.CurrentAlbum ?? "");
 
             Emit(NpLogLevel.Info, _lyrics.IsPlaceholder
                 ? $"歌词：未找到（目录 {_lyrics.LyricFolder}）"
-                : $"歌词：{Path.GetFileName(_lyrics.CurrentLyricPath)} 共 {_lyrics.Lines.Count} 行（[offset]={_lyrics.CurrentOffsetMs}ms）");
+                : $"歌词：[{_lyrics.CurrentParserName}] {Path.GetFileName(_lyrics.CurrentLyricPath)} 共 {_lyrics.Lines.Count} 行（[offset]={_lyrics.CurrentOffsetMs}ms，{_lyrics.LastMatch?.Detail}）");
         }
 
         private void PublishMediaNow()
@@ -723,7 +723,7 @@ namespace MediaMonitor.Protocol.New.Service
             }
 
             _resources?.AbortCurrent("无会话");
-            _lyrics.LoadAndParse("", "");
+            _lyrics.LoadAndParse("", "", "");
             _media?.PublishEmpty();                         // §6：空元数据 → 硬件清屏复位
             _timeline?.PublishNow();
         }
