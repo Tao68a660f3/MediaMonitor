@@ -1,28 +1,38 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
-using System.Text.RegularExpressions;
 
 namespace MediaMonitor.Services
 {
-    public class WordInfo { public TimeSpan Time { get; set; } public string Word { get; set; } = ""; }
-
-    public class LyricLine
-    {
-        public TimeSpan Time { get; set; }
-        public string Content { get; set; } = "";
-        public string Translation { get; set; } = "";
-        public List<WordInfo> Words { get; set; } = new List<WordInfo>();
-        public bool IsEmpty => string.IsNullOrEmpty(Content) && string.IsNullOrEmpty(Translation);
-    }
-
+    /// <summary>
+    /// 歌词编排器：负责"校验元数据 → 让 <see cref="LyricMatcher"/> 找候选 →
+    /// 让 <see cref="LyricParserRegistry"/> 里的解析器解析 → 原子发布快照"。
+    ///
+    /// <para><b>不包含任何具体格式的解析细节</b>（LRC/KRC… 都在 <see cref="ILyricParser"/> 实现里），
+    /// 也不依赖固定文件名 pattern：匹配只看 SMTC 的 Title / Artist / Album。</para>
+    ///
+    /// <para>公开表面与此前保持一致：<see cref="Lines"/> / <see cref="Generation"/> /
+    /// <see cref="CurrentLyricPath"/> / <see cref="CurrentOffsetMs"/> / <see cref="IsPlaceholder"/> /
+    /// <see cref="GetLine"/> / <see cref="GetEndTime"/> / <see cref="ComposeSongInfo"/>。</para>
+    /// </summary>
     public class LyricService
     {
         public string LyricFolder { get; set; } = "";
-        public string[] FileNamePatterns { get; set; } = { "{Artist} - {Title}", "{Title} - {Artist}", "{Title}" };
+
+        /// <summary>
+        /// 歌词格式解析器注册表。默认 <see cref="LyricParserRegistry.Shared"/>（只含 LRC）；
+        /// 接入 KRC 等格式时注册进去即可，扫描扩展名与解析分派都会自动跟随。
+        /// </summary>
+        public LyricParserRegistry Parsers { get; set; } = LyricParserRegistry.Shared;
+
+        /// <summary>匹配参数（递归深度、阈值、模糊开关…），有安全默认值。</summary>
+        public LyricMatcherOptions MatchOptions { get; } = new LyricMatcherOptions();
+
         public string? CurrentLyricPath { get; private set; }
+
+        /// <summary>本次歌词实际使用的格式名（如 "LRC" / "KRC"）；无歌词或占位时为空。</summary>
+        public string CurrentParserName { get; private set; } = "";
 
         /// <summary>
         /// 歌词代际号：每次原子替换歌词列表时 +1。
@@ -45,10 +55,11 @@ namespace MediaMonitor.Services
         /// </summary>
         public bool IsPlaceholder { get; private set; }
 
-        // LRC 头部 offset 标签：[offset:N]（毫秒，可带 +/-，允许空格与大小写差异）
-        // 这里只负责取出文件原值，符号语义（负值 = 歌词偏快、需延后）见 ApplyOffset
-        private static readonly Regex OffsetRegex =
-            new Regex(@"^\s*\[offset\s*:\s*(?<v>[+-]?\d+)\s*\]\s*$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        /// <summary>
+        /// 本次加载实际命中的候选（文件 / 分数 / 命中原因）。占位或未命中时为 null。
+        /// 仅供日志与排查使用，不参与发送逻辑。
+        /// </summary>
+        public LyricMatch? LastMatch { get; private set; }
 
         // --- 不可变快照机制 ---
         // Lines 永远指向一个"不再被修改"的列表实例：加载/解析期间只在局部 newLines 构建，
@@ -107,89 +118,83 @@ namespace MediaMonitor.Services
         public static string ComposeSongInfo(string? title, string? artist)
             => string.IsNullOrEmpty(artist) ? (title ?? "") : $"{title} - {artist}";
 
-        public void LoadAndParse(string title, string artist)
+        /// <summary>
+        /// 按当前曲目的 Title / Artist / Album 加载歌词。
+        ///
+        /// <para>匹配策略见 <see cref="LyricMatcher"/>：标题是唯一硬条件，歌手/专辑只影响排序；
+        /// 找不到任何标题命中的文件才发布占位歌词。候选按分数从高到低逐个尝试解析，
+        /// 某个文件解析出 0 行（坏文件/空文件）会自动落到下一个候选。</para>
+        /// </summary>
+        public void LoadAndParse(string? title, string? artist, string? album = null)
         {
-            Debug.WriteLine($"尝试载入歌词{title}-{artist}");
-            string? newPath = null;
+            Debug.WriteLine($"尝试载入歌词: {title} / {artist} / {album}");
+
             var newLines = new List<LyricLine>();
+            LastMatch = null;
+            CurrentParserName = "";
 
             // --- 闸门 1：拦截无效元数据 ---
-            if (string.IsNullOrWhiteSpace(title) || title.Length < 1)
+            if (string.IsNullOrWhiteSpace(title))
             {
-                PublishLyrics(newLines, newPath, 0);
+                PublishLyrics(newLines, null, 0);
                 return;
             }
+
             if (string.IsNullOrWhiteSpace(LyricFolder) || !Directory.Exists(LyricFolder))
             {
-                PublishLyricsOrPlaceholder(newLines, newPath, 0, title, artist);
+                PublishLyricsOrPlaceholder(newLines, null, 0, title, artist);
                 return;
             }
 
-            // 1. 原有的非法字符过滤
-            string sT = Regex.Replace(title, @"[\/?:*""<>|]", "_").Trim();
-            string sA = Regex.Replace(artist ?? "", @"[\/?:*""<>|]", "_").Trim();
+            LyricParserRegistry parsers = Parsers ?? LyricParserRegistry.Shared;
 
-            // 2. 增强清洗
-            string cT = Regex.Replace(sT, @"\.(mp3|flac|wav|m4a|ape|ogg|dsf)$", "", RegexOptions.IgnoreCase);
-
-            // --- 闸门 2：如果清洗完标题变空了（比如原标题就是 ".mp3"），立即止损 ---
-            if (string.IsNullOrWhiteSpace(cT))
+            IReadOnlyList<LyricMatch> matches;
+            try
             {
-                PublishLyricsOrPlaceholder(newLines, newPath, 0, title, artist);
+                var matcher = new LyricMatcher(MatchOptions);
+                matches = matcher.FindCandidates(LyricFolder, title, artist, album, parsers.Extensions);
+            }
+            catch (Exception ex)
+            {
+                // 网络盘/权限异常不应该让歌词链路崩掉：按"没搜到"处理
+                Debug.WriteLine($"歌词搜索失败: {ex.Message}");
+                matches = Array.Empty<LyricMatch>();
+            }
+
+            foreach (LyricMatch match in matches)
+            {
+                LyricParseResult? parsed = TryParse(match.Path, parsers);
+                if (parsed == null || parsed.Lines.Count == 0)
+                    continue;
+
+                LastMatch = match;
+                CurrentParserName = parsed.ParserName;
+                PublishLyricsOrPlaceholder(parsed.Lines, match.Path, parsed.OffsetMs, title, artist);
                 return;
             }
 
-            var files = Directory.GetFiles(LyricFolder, "*.lrc", SearchOption.TopDirectoryOnly);
+            PublishLyricsOrPlaceholder(newLines, null, 0, title, artist);
+        }
 
-            // 3. 【第一阶段】绝对精准匹配
-            foreach (var pattern in FileNamePatterns)
+        /// <summary>按扩展名找解析器并解析；格式不支持/文件损坏/读取失败都返回 null，不影响其它候选。</summary>
+        private static LyricParseResult? TryParse(string path, LyricParserRegistry parsers)
+        {
+            try
             {
-                string[] titlesToTry = { cT, sT };
-                foreach (var t in titlesToTry.Distinct().Where(x => !string.IsNullOrEmpty(x)))
+                ILyricParser? parser = parsers.Resolve(path);
+                if (parser == null)
                 {
-                    string targetName = pattern.Replace("{Artist}", sA).Replace("{Title}", t) + ".lrc";
-                    string targetNoSpace = targetName.Replace(" ", "").ToLower();
-
-                    var match = files.FirstOrDefault(f =>
-                    {
-                        string actualName = Path.GetFileName(f).Replace(" ", "").ToLower();
-                        return actualName == targetNoSpace;
-                    });
-
-                    if (match != null)
-                    {
-                        newPath = match;
-                        int offsetMs = ParseInto(newLines, newPath);
-                        PublishLyricsOrPlaceholder(newLines, newPath, offsetMs, title, artist);
-                        return;
-                    }
+                    Debug.WriteLine($"没有可解析 {Path.GetExtension(path)} 的歌词解析器: {path}");
+                    return null;
                 }
+
+                return parser.Parse(path);
             }
-
-            cT = Regex.Replace(cT, @"\s*[\(\[].*?[\)\]]\s*", "").Trim();
-
-            // 4. 【第二阶段】模糊匹配（增加非空检查，防止 Contains("")）
-            if (newPath == null && !string.IsNullOrEmpty(cT))
+            catch (Exception ex)
             {
-                newPath = files.FirstOrDefault(f =>
-                {
-                    string name = Path.GetFileNameWithoutExtension(f);
-                    // 只有当歌手名也不为空时才做双重匹配
-                    bool artistMatch = !string.IsNullOrEmpty(sA) && name.Contains(sA, StringComparison.OrdinalIgnoreCase);
-                    return artistMatch && name.Contains(cT, StringComparison.OrdinalIgnoreCase);
-                }) ?? files.FirstOrDefault(f =>
-                {
-                    string name = Path.GetFileNameWithoutExtension(f);
-                    return name.Contains(cT, StringComparison.OrdinalIgnoreCase);
-                });
+                Debug.WriteLine($"歌词解析失败（{Path.GetFileName(path)}）: {ex.Message}");
+                return null;
             }
-
-            int parsedOffsetMs = 0;
-            if (newPath != null)
-            {
-                parsedOffsetMs = ParseInto(newLines, newPath);
-            }
-            PublishLyricsOrPlaceholder(newLines, newPath, parsedOffsetMs, title, artist);
         }
 
         /// <summary>
@@ -212,7 +217,8 @@ namespace MediaMonitor.Services
         /// 占位行只写起点 0ms，终点时间交给 GetEndTime 的末行分支 = 曲目总时长，
         /// 因此占位行会从 0ms 一直显示到歌曲结束（无需在此写死终点）。
         /// </summary>
-        private void PublishLyricsOrPlaceholder(List<LyricLine> newLines, string? newPath, int offsetMs, string title, string? artist)
+        private void PublishLyricsOrPlaceholder(
+            List<LyricLine> newLines, string? newPath, int offsetMs, string? title, string? artist)
         {
             if (newLines.Count > 0)
             {
@@ -232,144 +238,6 @@ namespace MediaMonitor.Services
                 new LyricLine { Time = TimeSpan.Zero, Content = tip }
             };
             PublishLyrics(placeholder, null, 0, isPlaceholder: true);
-        }
-
-        // 在 ParseInto 方法中，确保对 Words 处理的健壮性
-        // 解析进调用方传入的目标列表（局部构建），不触碰共享字段
-        // 返回文件头部 [offset:N] 标签的原始值（毫秒，无标签或标签非法时为 0；符号语义见 ApplyOffset）
-        private int ParseInto(List<LyricLine> target, string path)
-        {
-            var raw = File.ReadAllLines(path);
-            // 宽容正则，匹配 [00:00.00] 或 <00:00.00>
-            var lRegex = new Regex(@"[\[\<](?<t>\d{2,}:\d{2}(?:\.\d{2,3})?)[\]\>](?<c>.*)$");
-            var wRegex = new Regex(@"[\[\<](?<t>\d{2,}:\d{2}\.\d{2,3})[\]\>](?<w>[^\[\<]*)");
-
-            // --- 头部 offset 标签预扫描：[offset:+/-毫秒] ---
-            int offsetMs = ParseHeaderOffset(raw, lRegex);
-
-            foreach (var line in raw)
-            {
-                var m = lRegex.Match(line.Trim());
-                if (!m.Success) continue;
-
-                if (TimeSpan.TryParse("00:" + m.Groups["t"].Value, out TimeSpan t))
-                {
-                    string contentBody = m.Groups["c"].Value.Trim();
-
-                    // 翻译行处理：如果时间戳相同且内容不含逐字标签，视为翻译
-                    var existing = target.FirstOrDefault(l => Math.Abs((l.Time - t).TotalMilliseconds) < 50);
-                    if (existing != null && !wRegex.IsMatch(contentBody))
-                    {
-                        existing.Translation = contentBody;
-                        continue;
-                    }
-
-                    var newLine = new LyricLine { Time = t };
-                    var wordMatches = wRegex.Matches(contentBody);
-
-                    if (wordMatches.Count > 0) // 逐字模式
-                    {
-                        // --- 修复首字丢失：检查第一个标签前是否有文字 ---
-                        string headText = contentBody.Substring(0, wordMatches[0].Index).Trim();
-                        if (!string.IsNullOrEmpty(headText))
-                        {
-                            // 第一个字的时间就是整行的起始时间 t (即偏移量为0)
-                            newLine.Words.Add(new WordInfo { Time = t, Word = headText });
-                        }
-
-                        foreach (Match w in wordMatches)
-                        {
-                            if (TimeSpan.TryParse("00:" + w.Groups["t"].Value, out TimeSpan wt))
-                                newLine.Words.Add(new WordInfo { Time = wt, Word = w.Groups["w"].Value });
-                        }
-                        newLine.Content = string.Join("", newLine.Words.Select(x => x.Word)).Trim();
-                    }
-                    else
-                    {
-                        // 检测 " / " 分隔符（空格-斜杠-空格），区分原文和翻译
-                        int splitIdx = contentBody.IndexOf(" / ", StringComparison.Ordinal);
-                        if (splitIdx > 0)
-                        {
-                            newLine.Content = contentBody.Substring(0, splitIdx).Trim();
-                            newLine.Translation = contentBody.Substring(splitIdx + 3).Trim();
-                        }
-                        else
-                        {
-                            newLine.Content = contentBody.Trim();
-                        }
-                    }
-
-                    target.Add(newLine);
-                }
-            }
-
-            // --- 头部 [offset:N] 标签：整体平移时间轴（新时间 = 标签时间 - offset，详见 ApplyOffset 注释）---
-            ApplyOffset(target, offsetMs);
-
-            target.Sort((a, b) => a.Time.CompareTo(b.Time));
-            return offsetMs;
-        }
-
-        /// <summary>
-        /// 预扫描歌词文件头部，取第一个有效的 [offset:N] 标签（毫秒，支持 +/-、空格与大小写）。
-        /// 只扫描到第一个带时间戳的歌词行为止，避免把正文里的 [offset:..] 误当标签；
-        /// 与 [ti:]/[ar:]/[by:] 等元数据行任意先后顺序都能正确识别。
-        /// 无标签、标签在正文中或数值非法时返回 0（即不偏移，保持原有行为）。
-        /// 返回值是文件里写的【原始】数值（不取反），真正的时间平移在 ApplyOffset 里完成。
-        /// </summary>
-        private static int ParseHeaderOffset(string[] raw, Regex lRegex)
-        {
-            foreach (var line in raw)
-            {
-                string trimmed = line.Trim().TrimStart('\uFEFF');
-                if (lRegex.IsMatch(trimmed)) break;      // 已进入歌词正文，停止扫描
-
-                var m = OffsetRegex.Match(trimmed);
-                if (m.Success && int.TryParse(m.Groups["v"].Value, out int v))
-                    return v;                            // 只认第一个有效标签
-            }
-            return 0;
-        }
-
-        /// <summary>
-        /// 应用 LRC 头部 [offset:N] 标签：把每一行（含行内逐字）的时间整体平移，使歌词与音频重新对齐。
-        ///
-        /// 符号语义（Negative = 歌词比音频"快"，即唱早了，需要整体【延后】）：
-        ///     N &lt; 0 → 歌词偏快 → 时间 +|N|（延后）
-        ///     N &gt; 0 → 歌词偏慢 → 时间 -N  （提前）
-        /// 统一写成：新时间 = 标签时间 - offset。
-        /// 例：[offset:-2800] 且首行是 [00:00.20]，结果是 00:03.00（整行延后 2.8 秒）。
-        ///
-        /// 唯一的额外保护：若某行平移后会落到 0ms 之前（说明这一行本应在曲目开始前就唱完），
-        /// 则只把【该行】的平移量收敛到"让该行正好从 0ms 起"，行内逐字共用同一平移量。
-        /// 原因：PackageBuilder 里是 (uint)startTime.TotalMilliseconds，负数会翻转成约 42.9 亿 ms
-        /// 直接污染硬件端；而逐字偏移是相对量，必须和整行共用同一平移量才不会打乱逐字节奏。
-        /// 该收敛只影响这一行，其余行仍按完整 offset 平移，整体对齐量不受影响。
-        /// </summary>
-        private static void ApplyOffset(List<LyricLine> lines, int offsetMs)
-        {
-            if (offsetMs == 0 || lines.Count == 0) return;
-
-            // 全程用 long 的 Tick 做整数运算：既没有 double 舍入误差，
-            // 也避免 -offsetMs 在 int 域溢出（[offset:-2147483648] 这类离谱值不会把符号又翻回去）
-            long shiftTicks = -(long)offsetMs * TimeSpan.TicksPerMillisecond;
-
-            foreach (var l in lines)
-            {
-                long lineTicks = l.Time.Ticks;
-
-                // 平移量默认取整轨偏移；若该行会被推到 0ms 之前，则只收敛本行到 0ms 起
-                long deltaTicks = shiftTicks;
-                if (lineTicks + deltaTicks < 0) deltaTicks = -lineTicks;
-
-                if (deltaTicks == 0) continue;
-
-                l.Time = TimeSpan.FromTicks(lineTicks + deltaTicks);
-
-                // 行内逐字走同一个 deltaTicks，保证 (w.Time - line.Time) 的相对节奏完全不变
-                foreach (var w in l.Words)
-                    w.Time = TimeSpan.FromTicks(w.Time.Ticks + deltaTicks);
-            }
         }
     }
 }

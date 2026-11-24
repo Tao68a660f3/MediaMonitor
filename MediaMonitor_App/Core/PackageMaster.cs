@@ -59,7 +59,7 @@ namespace MediaMonitor.Core
                 if (string.IsNullOrWhiteSpace(props.Title))
                     return;
 
-                _lyricService.LoadAndParse(props.Title, props.Artist);
+                _lyricService.LoadAndParse(props.Title, props.Artist, props.AlbumTitle);
                 Invalidate(); // 切歌强制清空账本
                 SendMetadata(props.Title, props.Artist, props.AlbumTitle);
 
@@ -102,7 +102,7 @@ namespace MediaMonitor.Core
                 _lastSmtcMediaSec = -1;
                 _lastSmtcWallSec = -1;
 
-                _lyricService.LoadAndParse("", "");   // 闸门 1 → 发布空歌词（不会产生占位行）
+                _lyricService.LoadAndParse("", "", "");   // 闸门 1 → 发布空歌词（不会产生占位行）
                 Invalidate();                         // 清上位机账本；恢复播放时首帧整屏重发
 
                 // ProcessTick 此时已因 prog == null 停摆，不会自己刷新界面 → 主动清掉歌词预览

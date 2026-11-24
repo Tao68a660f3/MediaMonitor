@@ -350,7 +350,7 @@ internal static class Program
             new UTF8Encoding(false));
 
         var lyrics = new LyricService { LyricFolder = lrcDir };
-        lyrics.LoadAndParse("测试歌曲", "测试歌手");
+        lyrics.LoadAndParse("测试歌曲", "测试歌手", "测试专辑");
         Console.WriteLine($"[demo] 歌词解析：{lyrics.Lines.Count} 行（文件 offset 标签={lyrics.CurrentOffsetMs}ms）");
 
         byte[] coverJpeg = MakeTestCoverJpeg(256, forceTestPattern: false);
@@ -1291,6 +1291,277 @@ internal static class Program
     }
 
 
+    /* ---------------- R17：歌词元数据匹配（标题优先 + 专辑/歌手回退 + 格式插件） ---------------- */
+
+    /// <summary>
+    /// R17：验证"不再依赖文件名 pattern"的匹配算法：
+    /// 标题是唯一硬条件；歌手/专辑只影响排序；专辑目录能压过同名不同专辑；
+    /// 元数据混入音频扩展名、全角、音轨号、紧凑中文文件名都能处理；
+    /// 自定义格式（KRC 模拟）通过 <see cref="ILyricParser"/> 注册即可被加载。
+    /// </summary>
+    private static void TestLyricMatching()
+    {
+        Console.WriteLine("R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 格式插件）");
+
+        string root = Path.Combine(Path.GetTempPath(), "np_lrc_r17_" + Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            // ---- 1. 同名多版本：精确 / 反序 / 纯标题 / Live / 错误歌手 ----
+            string exact = Path.Combine(root, "exact");
+            Directory.CreateDirectory(exact);
+            WriteLrcFile(Path.Combine(exact, "A Singer - Song.lrc"));
+            WriteLrcFile(Path.Combine(exact, "Song - A Singer.lrc"));
+            WriteLrcFile(Path.Combine(exact, "Song.lrc"));
+            WriteLrcFile(Path.Combine(exact, "A Singer - Song (Live).lrc"));
+            WriteLrcFile(Path.Combine(exact, "B Singer - Song.lrc"));
+
+            var svc = new LyricService { LyricFolder = exact };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 完整元数据：选中 A Singer 录音室版（非 Live/错误歌手/纯标题）",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Score >= 80 &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.ArtistMatched) &&
+                  svc.LastMatch.Path.EndsWith("A Singer - Song.lrc", StringComparison.OrdinalIgnoreCase) &&
+                  svc.Lines.Count == 2);
+
+            // ---- 2. 只有错误歌手：标题命中仍回退加载 ----
+            string wrongOnly = Path.Combine(root, "wrong-only");
+            Directory.CreateDirectory(wrongOnly);
+            WriteLrcFile(Path.Combine(wrongOnly, "B Singer - Song.lrc"));
+
+            svc = new LyricService { LyricFolder = wrongOnly };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 只有错误歌手文件：标题命中即回退加载（不占位）",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Path.Contains("B Singer - Song", StringComparison.OrdinalIgnoreCase));
+
+            // ---- 3. 纯标题与错误歌手并存：优先纯标题（未知歌手优于明显冲突） ----
+            string fallback = Path.Combine(root, "fallback");
+            Directory.CreateDirectory(fallback);
+            WriteLrcFile(Path.Combine(fallback, "Song.lrc"));
+            WriteLrcFile(Path.Combine(fallback, "B Singer - Song.lrc"));
+
+            svc = new LyricService { LyricFolder = fallback };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 纯标题与错误歌手并存：优先纯标题",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  string.Equals(Path.GetFileName(svc.LastMatch.Path), "Song.lrc", StringComparison.OrdinalIgnoreCase));
+
+            // ---- 4. 专辑目录：同名不同专辑 ----
+            string album = Path.Combine(root, "album");
+            Directory.CreateDirectory(Path.Combine(album, "Album X"));
+            Directory.CreateDirectory(Path.Combine(album, "Album Y"));
+            WriteLrcFile(Path.Combine(album, "Album X", "01 - Intro.lrc"));
+            WriteLrcFile(Path.Combine(album, "Album Y", "01 - Intro.lrc"));
+
+            svc = new LyricService { LyricFolder = album };
+            svc.LoadAndParse("Intro", "A Singer", "Album X");
+            Check("R17 同名不同专辑：专辑目录命中 Album X",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.AlbumMatched) &&
+                  svc.LastMatch.Path.Contains("Album X", StringComparison.OrdinalIgnoreCase) &&
+                  svc.LastMatch.Score >= 80);
+
+            svc.LoadAndParse("Intro", "A Singer", "Album Y");
+            Check("R17 换专辑元数据后命中 Album Y",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Path.Contains("Album Y", StringComparison.OrdinalIgnoreCase));
+
+            // ---- 5. 递归扫描 歌手/专辑/标题 ----
+            string nested = Path.Combine(root, "nested");
+            string nestedDir = Path.Combine(nested, "C Singer", "Album Z");
+            Directory.CreateDirectory(nestedDir);
+            WriteLrcFile(Path.Combine(nestedDir, "02 - Hidden Track.lrc"));
+
+            svc = new LyricService { LyricFolder = nested };
+            svc.LoadAndParse("Hidden Track", "C Singer", "Album Z");
+            Check("R17 递归扫描 歌手/专辑/标题 子目录（歌手+专辑+路径加分）",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Score >= 100 &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.ArtistMatched) &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.AlbumMatched));
+
+            // ---- 6. 全角字母 / 全角空格 / 全角连字符 ----
+            string unicode = Path.Combine(root, "unicode");
+            Directory.CreateDirectory(unicode);
+            WriteLrcFile(Path.Combine(unicode, "Ａ　Ｓｉｎｇｅｒ　－　Ｓｏｎｇ.lrc"));
+
+            svc = new LyricService { LyricFolder = unicode };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 全角字母/全角空格/全角连字符归一化命中",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.ArtistMatched));
+
+            // ---- 7. 前导音轨号 ----
+            string prefix = Path.Combine(root, "prefix");
+            Directory.CreateDirectory(prefix);
+            WriteLrcFile(Path.Combine(prefix, "01. Song.lrc"));
+
+            svc = new LyricService { LyricFolder = prefix };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 前导音轨号 01. 被剥离（标题精确）",
+                  !svc.IsPlaceholder && svc.LastMatch != null && svc.LastMatch.IsExactTitle);
+
+            // ---- 8. 只有 Live 版：未解释 token 只扣分，不淘汰 ----
+            string live = Path.Combine(root, "live");
+            Directory.CreateDirectory(live);
+            WriteLrcFile(Path.Combine(live, "A Singer - Song (Live).lrc"));
+
+            svc = new LyricService { LyricFolder = live };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 只有 Live 版：标题命中 + 括号内 live 只扣分 → 仍加载",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Path.Contains("(Live)", StringComparison.OrdinalIgnoreCase) &&
+                  svc.LastMatch.Score < 80);
+
+            // ---- 9. 完全搜不到：占位 ----
+            string none = Path.Combine(root, "none");
+            Directory.CreateDirectory(none);
+            WriteLrcFile(Path.Combine(none, "Other - Different.lrc"));
+
+            svc = new LyricService { LyricFolder = none };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 标题完全搜不到 → 占位（不是乱配）",
+                  svc.IsPlaceholder && svc.CurrentLyricPath == null && svc.Lines.Count == 1);
+
+            // ---- 10. 模糊回退 ----
+            string fuzzy = Path.Combine(root, "fuzzy");
+            Directory.CreateDirectory(fuzzy);
+            WriteLrcFile(Path.Combine(fuzzy, "A Singer - Songg.lrc"));
+
+            svc = new LyricService { LyricFolder = fuzzy };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 拼写偏差走模糊回退（TitleFuzzy）",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.TitleFuzzy));
+
+            // ---- 11. 自定义格式插件（KRC 模拟） ----
+            string fake = Path.Combine(root, "fake");
+            Directory.CreateDirectory(fake);
+            File.WriteAllText(Path.Combine(fake, "A Singer - Fake Song.krc"), "krc", new UTF8Encoding(false));
+
+            var krcRegistry = new LyricParserRegistry();
+            krcRegistry.Register(new FakeKrcParser());
+
+            svc = new LyricService { LyricFolder = fake, Parsers = krcRegistry };
+            svc.LoadAndParse("Fake Song", "A Singer", "");
+            Check("R17 自定义格式插件（KRC 模拟）注册后可被匹配/加载",
+                  !svc.IsPlaceholder && svc.Lines.Count == 3 &&
+                  svc.CurrentOffsetMs == 1234 &&
+                  svc.CurrentParserName == "KRC(test)" &&
+                  svc.CurrentLyricPath != null &&
+                  svc.CurrentLyricPath.EndsWith(".krc", StringComparison.OrdinalIgnoreCase));
+
+            // ---- 12. 高分坏文件解析 0 行 → 落到下一个候选 ----
+            string bad = Path.Combine(root, "bad");
+            Directory.CreateDirectory(bad);
+            File.WriteAllText(Path.Combine(bad, "A Singer - Song.lrc"), "no timestamps here", new UTF8Encoding(false));
+            WriteLrcFile(Path.Combine(bad, "Song.lrc"));
+
+            svc = new LyricService { LyricFolder = bad };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 高分坏文件解析 0 行 → 自动落到下一个候选",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  string.Equals(Path.GetFileName(svc.LastMatch.Path), "Song.lrc", StringComparison.OrdinalIgnoreCase));
+
+            // ---- 13. 多歌手变体 ----
+            string multi = Path.Combine(root, "multi");
+            Directory.CreateDirectory(multi);
+            WriteLrcFile(Path.Combine(multi, "A & B - Song.lrc"));
+
+            svc = new LyricService { LyricFolder = multi };
+            svc.LoadAndParse("Song", "A", "");
+            Check("R17 多歌手文件 A & B 命中元数据歌手 A",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.ArtistMatched));
+
+            string multi2 = Path.Combine(root, "multi2");
+            Directory.CreateDirectory(multi2);
+            WriteLrcFile(Path.Combine(multi2, "A - Song.lrc"));
+
+            svc = new LyricService { LyricFolder = multi2 };
+            svc.LoadAndParse("Song", "A & B", "");
+            Check("R17 元数据歌手 A & B 拆分变体可命中文件名 A",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.ArtistMatched));
+
+            // ---- 14. 元数据混入音频扩展名 ----
+            string polluted = Path.Combine(root, "polluted");
+            Directory.CreateDirectory(polluted);
+            WriteLrcFile(Path.Combine(polluted, "A Singer - Song.lrc"));
+
+            svc = new LyricService { LyricFolder = polluted };
+            svc.LoadAndParse("Song.mp3", "A Singer.flac", "Album.mp3");
+            Check("R17 元数据混入音频扩展名（Song.mp3 / A Singer.flac）被剥离后命中",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.ArtistMatched));
+
+            // ---- 15. 文件名双扩展名 ----
+            string doubleExt = Path.Combine(root, "double-ext");
+            Directory.CreateDirectory(doubleExt);
+            WriteLrcFile(Path.Combine(doubleExt, "A Singer - Song.mp3.lrc"));
+
+            svc = new LyricService { LyricFolder = doubleExt };
+            svc.LoadAndParse("Song", "A Singer", "");
+            Check("R17 文件名双扩展名 Song.mp3.lrc 也能命中",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.ArtistMatched) &&
+                  svc.Lines.Count == 2);
+
+            // ---- 16. 紧凑中文文件名（无分隔符） ----
+            string compact = Path.Combine(root, "compact");
+            Directory.CreateDirectory(compact);
+            WriteLrcFile(Path.Combine(compact, "测试歌手测试歌曲.lrc"));
+
+            svc = new LyricService { LyricFolder = compact };
+            svc.LoadAndParse("测试歌曲", "测试歌手", "");
+            Check("R17 紧凑中文文件名（无分隔符）也能命中",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.ArtistMatched));
+
+            // ---- 17. 元数据标题自带 (Live)：应优先 Live 版 ----
+            string liveMeta = Path.Combine(root, "live-meta");
+            Directory.CreateDirectory(liveMeta);
+            WriteLrcFile(Path.Combine(liveMeta, "A Singer - Song.lrc"));
+            WriteLrcFile(Path.Combine(liveMeta, "A Singer - Song (Live).lrc"));
+
+            svc = new LyricService { LyricFolder = liveMeta };
+            svc.LoadAndParse("Song (Live)", "A Singer", "");
+            Check("R17 元数据标题自带 (Live)：命中 Live 版（限定词对称加减分）",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Path.Contains("(Live)", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* 清理失败不影响判定 */ }
+        }
+    }
+
+    /// <summary>写一个两行的合法 LRC（R17 用）。</summary>
+    private static void WriteLrcFile(string path, string first = "第一行", string second = "第二行")
+        => File.WriteAllText(path, $"[00:00.00]{first}\n[00:01.00]{second}\n", new UTF8Encoding(false));
+
+    /// <summary>模拟未来的 KRC 解析器：证明 <see cref="ILyricParser"/> 注册后能被匹配/加载。</summary>
+    private sealed class FakeKrcParser : ILyricParser
+    {
+        public string Name => "KRC(test)";
+
+        public IReadOnlyList<string> Extensions => new[] { ".krc" };
+
+        public LyricParseResult Parse(string path) => new LyricParseResult
+        {
+            ParserName = Name,
+            OffsetMs = 1234,
+            Lines = new List<LyricLine>
+            {
+                new LyricLine { Time = TimeSpan.Zero, Content = "KRC 第一行" },
+                new LyricLine { Time = TimeSpan.FromSeconds(1), Content = "KRC 第二行", Translation = "翻译" },
+                new LyricLine { Time = TimeSpan.FromSeconds(2), Content = "KRC 第三行" },
+            },
+        };
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -1353,6 +1624,8 @@ internal static class Program
         TestAppInfo();
         Console.WriteLine();
         TestLyricResource();
+        Console.WriteLine();
+        TestLyricMatching();
 
         Console.WriteLine($"\n=== 通过 {_pass} 项，失败 {_fail} 项 ===");
         return _fail == 0 ? 0 : 1;

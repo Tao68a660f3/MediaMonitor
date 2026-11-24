@@ -620,7 +620,7 @@ namespace MediaMonitor
                 // 切换目录后立即用当前歌曲信息重新载入歌词
                 if (App.Lyrics != null && App.Smtc != null)
                 {
-                    App.Lyrics.LoadAndParse(App.Smtc.CurrentTitle, App.Smtc.CurrentArtist);
+                    App.Lyrics.LoadAndParse(App.Smtc.CurrentTitle, App.Smtc.CurrentArtist, App.Smtc.CurrentAlbum);
                     App.Master?.Invalidate(); // 强制刷新账本，重新输出当前行
                 }
             }
