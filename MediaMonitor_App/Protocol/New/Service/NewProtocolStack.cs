@@ -703,7 +703,10 @@ namespace MediaMonitor.Protocol.New.Service
                 return;                                       // 未启用新协议栈（Legacy 模式）：不重复解析歌词
             }
 
-            _resources?.AbortCurrent("切歌");               // §9.8：在途资源作废，对端会自行重发 REQUEST
+            // 不在这里 Abort：播放器会对同一首歌连发多个 MediaPropertiesChanged，
+            // 每个事件都 Abort 会把正在传的歌词/封面打断，而 mock/ESP 对同曲目重复帧
+            // 不一定重新请求，结果就是歌词停在旧内容。
+            // 旧资源由“新的 REQUEST”在 ResourceSender.HandleRequest 里 Abort（§9.7 N-13）。
             LoadLyricsForCurrent();
             PublishMediaNow();
             _timeline?.PublishNow();

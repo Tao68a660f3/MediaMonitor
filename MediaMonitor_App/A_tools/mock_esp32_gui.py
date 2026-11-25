@@ -68,7 +68,7 @@ class MockGui:
         self._pil_photo = None
         self._cover_key = None
         self._lyrics_key = None
-        self._log_lines = 0
+        self._last_event_seq = 0
 
         root.title("对端模拟器 · ESP32 / New Protocol V1.2")
         root.geometry("1200x900")
@@ -273,6 +273,7 @@ class MockGui:
             self._append_log("串口号 / 波特率不合法")
             return
 
+        self._last_event_seq = 0
         self.server = core.MockServer(
             self.dll,
             ip=self.var_ip.get().strip() or "127.0.0.1",
@@ -288,7 +289,6 @@ class MockGui:
             baud=baud,
             latency_samples=self.args.latency_samples,
             latency_interval_ms=self.args.latency_interval_ms,
-            cache_probe=self.args.cache_probe,
             quiet=True,                      # GUI 里不逐帧刷控制台
             cli=self.args.trace,             # --trace 时把事件同时打到控制台（留日志用）
             serve_forever=True)              # 断线后继续监听，方便反复联调
@@ -470,12 +470,11 @@ class MockGui:
                 self._cover_key = key
                 self._show_cover(cover)
 
-        # 事件日志（增量追加）
-        events = st["events"]
-        if len(events) > self._log_lines:
-            for line in events[self._log_lines:]:
+        # 事件日志（按序号增量追加；deque 满了/服务端重启都不会吞日志）
+        for seq, line in st["events"]:
+            if seq > self._last_event_seq:
                 self._append_log(line)
-            self._log_lines = len(events)
+                self._last_event_seq = seq
 
     def _fill_lyrics(self, lyrics):
         self.txt_lyrics.delete("1.0", "end")
@@ -590,8 +589,6 @@ def parse_args():
                     help="会话建立后自动主动测一轮延迟（本端发起、对端应答）；0 = 只在你点「测延迟」时测")
     ap.add_argument("--latency-interval-ms", type=int, default=100,
                     help="延迟测量两次 LATENCY_REQUEST 的间隔（默认 100ms）")
-    ap.add_argument("--cache-probe", action="store_true",
-                    help="V1.2：歌词/封面收齐后再请求一次，验证 ACK(NOT_MODIFIED)")
     ap.add_argument("--headless", action="store_true", help="不开窗口，只跑服务端（脚本化验证用）")
     ap.add_argument("--seconds", type=float, default=0.0, help="headless 模式跑 N 秒后打印摘要并退出")
     return ap.parse_args()
@@ -604,7 +601,6 @@ def headless_run(dll, args, caps):
                              cover_format=args.cover_format,
                              latency_samples=args.latency_samples,
                              latency_interval_ms=args.latency_interval_ms,
-                             cache_probe=args.cache_probe,
                              transport=args.transport, com_port=args.com, baud=args.baud,
                              quiet=True, cli=True, serve_forever=True)
     server.start()

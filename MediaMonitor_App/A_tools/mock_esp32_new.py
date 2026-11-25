@@ -162,6 +162,8 @@ def load_dll(path):
     dll.np_dll_res_cache_size_for.argtypes = [ctypes.c_int]
     dll.np_dll_res_cache_size_for.restype = ctypes.c_uint32
     dll.np_dll_res_cache_clear.restype = None
+    dll.np_dll_res_cache_clear_for.argtypes = [ctypes.c_int]
+    dll.np_dll_res_cache_clear_for.restype = None
 
     dll.np_dll_res_init.restype = ctypes.c_int
     dll.np_dll_res_on_frame.argtypes = [ctypes.POINTER(NpFrameOut)]
@@ -588,6 +590,7 @@ class MockServer:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._events = collections.deque(maxlen=500)
+        self._event_seq = 0                 # 事件单调序号：deque 满了会丢最旧，GUI 不能再按“下标”做增量
         self._cmds = queue.Queue()
         self._conn_seq = 0                  # 第几次连接（决定 SESSION_ID 的高 16 位）
 
@@ -626,7 +629,11 @@ class MockServer:
             self._st[key] = self._st.get(key, 0) + n
 
     def snapshot(self):
-        """给 GUI 用的状态快照（含最近日志；都是拷贝，调用方怎么改都不影响服务端）"""
+        """给 GUI 用的状态快照（含最近日志；都是拷贝，调用方怎么改都不影响服务端）
+
+        events 是 (seq, line) 列表：deque 满了会从头部丢，调用方必须按 seq 判断“哪些是新的”，
+        不能再用 list 下标（否则第 500 条之后 / 重启之后日志会被吞掉）。
+        """
         with self._lock:
             st = dict(self._st)
             st["events"] = list(self._events)
@@ -635,7 +642,8 @@ class MockServer:
     def log(self, text):
         line = "[%s] %s" % (time.strftime("%H:%M:%S"), text)
         with self._lock:
-            self._events.append(line)
+            self._event_seq += 1
+            self._events.append((self._event_seq, line))
         if self.cli:
             # ⚠ 别让日志打死服务端线程：Windows 控制台/重定向文件常见 GBK，
             # 打不出 ✓ ✗ ⚠ 这类字符会抛 UnicodeEncodeError（实测：整个 mock 线程直接挂掉，
@@ -1545,19 +1553,20 @@ class MockServer:
         self._media_key = key
         self.log("MEDIA：%s - %s（专辑 %s）%s"
                  % (title or "(空)", artist or "(空)", album or "(空)",
-                    "" if changed else "   [同曲目重复帧，不重复拉资源]"))
-        if not changed:
-            return
+                    "" if changed else "   [同曲目重复帧，仍重问一次；V1.2 缓存会吸收重复]"))
 
-        # 曲目变了（或本次会话第一次收到）→ 重新计划两种资源；队列保证"先歌词后封面"（§9.7）
+        # 不能按 (title, artist, album) 去重：三个字段都相同的“另一首曲目”是存在的。
+        # 每次都重新请求；V1.2 的 KNOWN_CRC32/NOT_MODIFIED 会把“内容没变”的吸收掉，
+        # 内容变了就正常传新资源。这样同元数据的新曲目也不会漏更新。
         if not (title or artist or album):
             self.log("空元数据（当前无媒体）→ 不请求资源，仅清屏")
+            self.dll.np_dll_res_cache_clear()      # 无媒体时本地资源视为已清空
             self._reset_res_state()
             return
 
         self._reset_res_state()
-        self._res_want("lyrics", "收到 MEDIA（新曲目）→ 自动拉歌词", active=active)
-        self._res_want("cover", "收到 MEDIA（新曲目）→ 自动拉封面", active=active)
+        self._res_want("lyrics", "收到 MEDIA（新曲目/重复帧）→ 自动拉歌词", active=active)
+        self._res_want("cover", "收到 MEDIA（新曲目/重复帧）→ 自动拉封面", active=active)
 
     def _on_timeline(self):
         self._set(timeline={
