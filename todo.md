@@ -55,14 +55,14 @@
 - [x] **抓取与缓存**：`SmtcService.CurrentThumbnail` / `OnThumbnailUpdated`（SHA256 内容去重 + 切歌/切会话时丢弃过期结果）。
 - [x] **压缩到指定分辨率**：`Tools/ArtworkProcessor.ProcessToJpeg/ProcessToPng/ProcessToRgb565`（等比填满 + 居中裁剪，输出尺寸严格等于目标，不引入新依赖）。
 - [x] **验证手段**：主界面「Show Artwork」按钮按需弹窗看 600×600 压缩结果（`UI/ArtworkPreviewWindow`）。
-- [x] **下发**：新协议 V1.1 的 `ALBUMCOVER` 资源下发已接线（尺寸/格式由对端 `REQUEST` 决定；无封面回 `FORMAT=NONE` 空资源；未就绪回 `ACK(NOT_READY)`）。
+- [x] **下发**：新协议 V1.2 的 `ALBUMCOVER` 资源下发已接线（尺寸/格式由对端 `REQUEST` 决定；无封面回 `FORMAT=NONE` 空资源；未就绪回 `ACK(NOT_READY)`；相同 CRC32 回 `ACK(NOT_MODIFIED)`）。
 
-## 📡 新协议 V1.1（`5A A5`，与 Legacy 双轨共存）
-实施计划与规范：`RLCCProject/Q_Series/Protocol/protocolImplementation.md` / `protocolDesign_1.1_final.md`。
+## 📡 新协议 V1.2（`5A A5`，与 Legacy 双轨共存）
+实施计划与规范：`RLCCProject/Q_Series/Protocol/protocolImplementation.md` / `protocolDesign_1.2.md`。
 
 - [x] **P0–P2** 准备 + 编解码层 + 会话层（C# `Protocol/New/**`；C `ref_c/**`；两端向量自检逐字节一致）
 - [x] **P3** 实时数据：MEDIA / TIMELINE / CONTROL（回控映射 0xA1/0xA2/0xA3）
-- [x] **P4** 资源传输：歌词池 + 封面（JPEG/PNG/RGB565），单资源互斥 + ABORT + 对端 `MAX_RESOURCE_SIZE` 预校验
+- [x] **P4** 资源传输：歌词池 + 封面（JPEG/PNG/RGB565），单资源互斥 + ABORT + 对端 `MAX_RESOURCE_SIZE` 预校验；**V1.2 条件 REQUEST（KNOWN_CRC32 → NOT_MODIFIED）**
 - [x] **P5** 延迟测量 + 时间轴投递层（`Sync_OnPacketAt` 对接点）
 - [x] **P6** UI 与模式切换：
     - [x] `UI/ProtocolStackView.cs`（`IProtocolStackView` + Legacy/New 两个实现）

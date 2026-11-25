@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    New Protocol V1.1 编解码层自测（实施计划 §4.2）
+    New Protocol V1.2 编解码层自测（实施计划 §4.2）
 
     * 不加入 MediaMonitor.sln，不影响正常构建；
     * 直接"链接"编解码层的源文件（而不是引用 WinExe 工程），因此不依赖 WPF；

@@ -152,21 +152,21 @@ python mock_esp32_stm32.py --ip 127.0.0.1 --port 8080    # 同机调试：上位
 
 ---
 
-## 📡 新协议 V1.1（`5A A5`）：与 Legacy 双轨共存
+## 📡 新协议 V1.2（`5A A5`）：与 Legacy 双轨共存
 
 界面上新增「协议模式」单选，两套协议栈**各自独立、互不影响**：
 
-| | Legacy（`0xAA` / `0xAB`） | New V1.1（`5A A5`） |
+| | Legacy（`0xAA` / `0xAB`） | New V1.2（`5A A5`） |
 | :--- | :--- | :--- |
 | 定位 | 已封存，仅维护 | 新硬件目标（ESP32 + USB CDC / Wi-Fi） |
 | 传输 | 串口 / UDP | 串口(USB CDC) / TCP（**ESP32 是服务端、PC 是客户端**） |
 | 配置文件 | `config.json` | `config.new.json`（公共项各存一份） |
-| 能力 | 媒体/歌词同步、按键回控、延迟测试 | + 资源下发（歌词池 / 封面 JPEG·PNG·RGB565）、会话握手与重连、对端能力协商 |
+| 能力 | 媒体/歌词同步、按键回控、延迟测试 | + 资源下发（歌词池 / 封面 JPEG·PNG·RGB565）、会话握手与重连、对端能力协商、**资源缓存协商（KNOWN_CRC32 → NOT_MODIFIED）** |
 | 时间轴 | 同步包 | `TIMELINE`（500ms 节拍，含 `HOST_TICK_MS`，供硬件端做同步算法） |
 
 * **切换规则**：切模式 = 断开当前链路 → 换配置 → （原本连着就）用新模式重连；**连接期间模式单选被禁用**（先断开再切）；
 * **协议模式本身不落盘**（启动默认 New）；
-* 规范与实施计划：`RLCCProject/Q_Series/Protocol/protocolDesign_1.1_final.md`、`protocolImplementation.md`；
+* 规范与实施计划：`RLCCProject/Q_Series/Protocol/protocolDesign_1.2.md`、`protocolImplementation.md`；
 * 实现要点与实测基线见 [technical.md](technical.md) 第 9 节。
 
 ### 连接状态的判定（重要）
@@ -204,7 +204,7 @@ python <MediaMonitor>\MediaMonitor_App\A_tools\mock_esp32_new.py --transport com
 
 > ⚠️ 模拟器是 **TCP 服务端**（ESP32 角色），上位机是客户端：**必须先启动模拟器，再点上位机连接**。
 > 走串口时没有"谁先谁后"的问题（点对点），但 **端口要配对**：上位机 `COM22` ↔ mock `COM23`（com0com 之类的虚拟串口对即可）。
-> 模拟器的默认声明：`CAPS=歌词+封面+JPEG+PNG+RGB565`（`0x1F`，三种封面格式都收得下）、最大封面边长 240、单资源上限 256 KB；
+> 模拟器的默认声明：`CAPS=歌词+封面+JPEG+PNG+RGB565+缓存协商`（`0x3F`，三种封面格式都收得下，并支持 V1.2 条件资源请求）、最大封面边长 240、单资源上限 256 KB；
 > **请求封面默认用 JPEG**（240×240 大约十几 KB，RGB565 则是固定的 115200 B —— 省带宽但真机要解码器，GUI 上可随时下拉切换格式）；
 > 收到 `MEDIA`（新曲目）后它会**自动按 §9.7 串行化拉取**：先 `LYRICS REQUEST`，收齐后再 `ALBUMCOVER REQUEST`；
 > 对端回 `ACK(NOT_READY)` 时按 §9.8 在 `200ms` 后用**新 REQUEST_ID** 重试（上限 10 次），失败原因都写进事件日志。

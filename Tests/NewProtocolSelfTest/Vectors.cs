@@ -2,7 +2,7 @@ using System;
 
 namespace NewProtocolSelfTest
 {
-    /// <summary>一条测试向量（来源：protocolDesign_1.1_final.md 附录 A，与 C 侧 np_vectors.h 同源）</summary>
+    /// <summary>一条测试向量（来源：protocolDesign_1.2.md 附录 A，与 C 侧 np_vectors.h 同源）</summary>
     internal sealed class NpVector
     {
         public string Name = "";

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-mock_esp32_gui.py —— New Protocol V1.1 的 **ESP32 模拟器（图形版）**
+mock_esp32_gui.py —— New Protocol V1.2 的 **ESP32 模拟器（图形版）**
 
 和 mock_esp32_new.py 是同一个内核（协议字节层跑 ref_c 编出来的 np_ref.dll），
 区别只在于：收到的东西不再只刷控制台，而是**解码后画在窗口里**：
@@ -70,7 +70,7 @@ class MockGui:
         self._lyrics_key = None
         self._log_lines = 0
 
-        root.title("对端模拟器 · ESP32 / New Protocol V1.1")
+        root.title("对端模拟器 · ESP32 / New Protocol V1.2")
         root.geometry("1200x900")
         root.minsize(980, 760)
 
@@ -288,6 +288,7 @@ class MockGui:
             baud=baud,
             latency_samples=self.args.latency_samples,
             latency_interval_ms=self.args.latency_interval_ms,
+            cache_probe=self.args.cache_probe,
             quiet=True,                      # GUI 里不逐帧刷控制台
             cli=self.args.trace,             # --trace 时把事件同时打到控制台（留日志用）
             serve_forever=True)              # 断线后继续监听，方便反复联调
@@ -566,7 +567,7 @@ class MockGui:
 # ---------------------------------------------------------------- 入口
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="New Protocol V1.1 ESP32 模拟器（图形版，内核 = 真 C 代码）")
+    ap = argparse.ArgumentParser(description="New Protocol V1.2 ESP32 模拟器（图形版，内核 = 真 C 代码）")
     ap.add_argument("--transport", choices=("tcp", "com"), default="tcp",
                     help="链路：tcp（默认）或 com（串口；配合 --com/--baud）")
     ap.add_argument("--ip", default="127.0.0.1")
@@ -575,7 +576,7 @@ def parse_args():
                     help="串口号（默认 COM23；要与上位机的 COM 端口**配对**）")
     ap.add_argument("--baud", type=int, default=115200, help="串口波特率（与上位机 config.new.json 一致）")
     ap.add_argument("--dll", default=core.DEFAULT_DLL)
-    ap.add_argument("--caps", default="lyrics,cover,jpeg,png,rgb565")
+    ap.add_argument("--caps", default="lyrics,cover,jpeg,png,rgb565,cache")
     ap.add_argument("--max-edge", type=int, default=240)
     ap.add_argument("--max-resource", type=int, default=262144)
     ap.add_argument("--tick-ms", type=int, default=10)
@@ -589,6 +590,8 @@ def parse_args():
                     help="会话建立后自动主动测一轮延迟（本端发起、对端应答）；0 = 只在你点「测延迟」时测")
     ap.add_argument("--latency-interval-ms", type=int, default=100,
                     help="延迟测量两次 LATENCY_REQUEST 的间隔（默认 100ms）")
+    ap.add_argument("--cache-probe", action="store_true",
+                    help="V1.2：歌词/封面收齐后再请求一次，验证 ACK(NOT_MODIFIED)")
     ap.add_argument("--headless", action="store_true", help="不开窗口，只跑服务端（脚本化验证用）")
     ap.add_argument("--seconds", type=float, default=0.0, help="headless 模式跑 N 秒后打印摘要并退出")
     return ap.parse_args()
@@ -601,6 +604,7 @@ def headless_run(dll, args, caps):
                              cover_format=args.cover_format,
                              latency_samples=args.latency_samples,
                              latency_interval_ms=args.latency_interval_ms,
+                             cache_probe=args.cache_probe,
                              transport=args.transport, com_port=args.com, baud=args.baud,
                              quiet=True, cli=True, serve_forever=True)
     server.start()

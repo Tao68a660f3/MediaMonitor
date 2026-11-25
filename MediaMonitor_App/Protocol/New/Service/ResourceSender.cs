@@ -38,7 +38,7 @@ namespace MediaMonitor.Protocol.New.Service
         private Transfer? _current;
 
         public long StatRequests, StatTransfers, StatBytes, StatAborted;
-        public long StatNotReady, StatRejected, StatCacheHits, StatAckFail, StatTooLarge;
+        public long StatNotReady, StatRejected, StatCacheHits, StatAckFail, StatTooLarge, StatNotModified;
 
         public string LastAbortReason { get; private set; } = "";
         public byte LastAckStatus { get; private set; }
@@ -90,6 +90,8 @@ namespace MediaMonitor.Protocol.New.Service
             ushort height = 0;
             byte quality = 0;
             NpResFormat format = NpResFormat.None;
+            bool hasKnownCrc32 = false;
+            uint knownCrc32 = 0;
 
             if (f.Type == NpType.AlbumCover)
             {
@@ -105,6 +107,26 @@ namespace MediaMonitor.Protocol.New.Service
                 height = NpReader.ReadU16(p[2..]);
                 format = (NpResFormat)p[4];
                 quality = p[5];
+
+                // V1.2：第 6..7B = FLAGS、第 8..11B = KNOWN_CRC32；
+                // V1.1 的 8B 请求没有这两项 → 按"无缓存"处理。
+                if (f.PayloadLen >= 12u)
+                {
+                    ushort flags = NpReader.ReadU16(p[6..]);
+                    hasKnownCrc32 = (flags & NpResRequestFlags.HasKnownCrc32) != 0;
+                    knownCrc32 = NpReader.ReadU32(p[8..]);
+                }
+            }
+            else if (f.Type == NpType.Lyrics)
+            {
+                // V1.2：FLAGS u16 + KNOWN_CRC32 u32；V1.1：空 Payload。
+                if (f.PayloadLen >= 6u)
+                {
+                    ReadOnlySpan<byte> p = f.Payload.Span;
+                    ushort flags = NpReader.ReadU16(p);
+                    hasKnownCrc32 = (flags & NpResRequestFlags.HasKnownCrc32) != 0;
+                    knownCrc32 = NpReader.ReadU32(p[2..]);
+                }
             }
 
             NpResourceData? data = _provider(f.Type, width, height, format, quality);
@@ -125,6 +147,16 @@ namespace MediaMonitor.Protocol.New.Service
                 LastRejectDetail = (uint)data.Data.Length;
                 _session.SendAck(f.Sequence, f.RequestId, (byte)NpAckStatus.Rejected);
                 _session.SendError(NpErrCode.ResourceFail, f.RequestId, (uint)data.Data.Length);
+                return;
+            }
+
+            // V1.2 条件资源请求（§9.3）：ESP32 已有同 CRC32 的缓存 → 只回 NOT_MODIFIED，
+            // 不进入 BEGIN/DATA/END。空资源同样适用（CRC32=0），避免重复走空资源传输状态机。
+            if (hasKnownCrc32 && data.Crc32 == knownCrc32)
+            {
+                StatNotModified++;
+                LastAckStatus = (byte)NpAckStatus.NotModified;
+                _session.SendAck(f.Sequence, f.RequestId, (byte)NpAckStatus.NotModified);
                 return;
             }
 

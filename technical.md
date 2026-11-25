@@ -294,9 +294,9 @@ void HandleLatencyPing(uint8_t target_id, uint32_t t1_ms)
 
 ---
 
-## 9. 新协议 V1.1（`5A A5`）与「协议模式」双轨
+## 9. 新协议 V1.2（`5A A5`）与「协议模式」双轨
 
-规范与落地计划在另一个仓库：`RLCCProject/Q_Series/Protocol/protocolDesign_1.1_final.md`（规范）、`protocolImplementation.md`（实施计划）。
+规范与落地计划在另一个仓库：`RLCCProject/Q_Series/Protocol/protocolDesign_1.2.md`（规范）、`protocolImplementation.md`（实施计划）。
 
 ### 9.1 分层与依赖方向（Legacy 零侵入）
 
@@ -333,6 +333,23 @@ UI/ProtocolStackView.cs  ← 主窗口只认这个接口（当前模式 → 一�
 
 2. **发包节奏要有硬护栏**
    `TimelinePump.MinGapMs = clamp(intervalMs/4, 50, 250)`：**任何**路径（包括"切歌/Seek/播放态变化"的即时帧）都不得击穿这个下限。数据源（SMTC / 播放器）可能抖动，护栏保证对端永远看不到"每 20ms 一帧"。诊断用分因计数：`StatSentDue` / `StatSentPlayingChange` / `StatSentSeek`（正常长连应以 `Due` 为主）。
+
+### 9.5 V1.2 资源缓存协商（条件 REQUEST + `NOT_MODIFIED`）
+
+* **协商**：HELLO/HELLO_ACK 的 `CAPS.RESOURCE_CACHE`（bit5）由两端各自声明；任一端没有该位 → 退回 V1.1 完整传输。
+* **REQUEST**：ESP32 在资源请求里带 `FLAGS u16` + `KNOWN_CRC32 u32`（歌词 6 B；封面 12 B），
+  `FLAGS.bit0 = HAS_KNOWN_CRC32`。封面缓存键必须同时匹配 `FORMAT / WIDTH / HEIGHT / QUALITY`。
+* **PC 响应**：`ResourceSender` 先生成当前资源并拿到 `NpResourceData.Crc32`；
+  * 有 `KNOWN_CRC32` 且与当前 CRC32 相同 → 回 **`ACK(NOT_MODIFIED)`（0x06）**，**不进入 BEGIN/DATA/END**；
+  * 空资源也是 `CRC32 = 0`，同样走 `NOT_MODIFIED`（不再重复传空资源）；
+  * 不同 → 正常 `ACK(OK) + BEGIN/DATA/END`。
+* **为什么不是 BEGIN ACK**：§5.6 约定表里资源 `BEGIN` 的 `ACK_REQUIRED = 0`，V1.1-21 又规定"位为 0 不得回 ACK"；
+  旧 §9.3 的"接收方对 BEGIN 回 ACK 表示缓存命中"与这两条冲突，C 参考实现也从未实现。
+  现在把缓存命中收敛成"对 REQUEST 的 ACK 状态"，不新增帧、不改 ACK 位规则。
+* **C 参考 / mock**：`np_dll` 按资源类型分槽缓存（歌词/封面各一份元数据），只有对端声明 `RESOURCE_CACHE` 时才带 `KNOWN_CRC32`；
+  `--cache-probe` 会在歌词/封面收齐后再请求一次，用于验证 `NOT_MODIFIED`。
+* **PC 自测**：R19 覆盖"相同 CRC 不传资源 / 不同 CRC 正常传 / 空资源 CRC32=0 / 歌词 / V1.1 短 REQUEST"。
+* **V1.1 基线**：`MediaMonitor_App/A_tools/v1_1_baseline/` 保留了旧 mock + 旧 DLL，用于验证新 PC 对旧 ESP32 的兼容性。
 
 ### 9.5 帧分发链（`NewProtocolStack.OnFrame`，顺序不能换）
 
@@ -430,8 +447,8 @@ TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）�
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
-| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 多种命名 / 格式插件）** + **R18 封面状态机（换曲同步失效 / 同字节封面仍通知 / 过期读取丢弃）**（共 161 项） |
-| C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **143 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**） |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 多种命名 / 格式插件）** + **R18 封面状态机（换曲同步失效 / 同字节封面仍通知 / 过期读取丢弃）** + **R19 条件资源请求（KNOWN_CRC32 → NOT_MODIFIED，含空资源）**（共 168 项） |
+| C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **150 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**、**V1.2 条件 REQUEST/NOT_MODIFIED R11**）；`build_dll.bat` 的 `np_dll_selftest` 另含**按资源类型分槽的缓存**检查 |
 | 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
 | 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |
 | 真 SMTC 探针 | `NewProtocolSelfTest.exe --tcp-smtc 127.0.0.1:9100 20` | 用真实播放器数据量"发包节奏"，验证抖动护栏 |

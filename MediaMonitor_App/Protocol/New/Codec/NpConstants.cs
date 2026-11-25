@@ -1,9 +1,9 @@
 namespace MediaMonitor.Protocol.New.Codec
 {
     /// <summary>
-    /// New Protocol V1.1 的常量与枚举。
-    /// 规范：protocolDesign_1.1_final.md —— §1.1 TYPE / §2 帧格式 / §3 FLAGS /
-    /// §5.1 SYSTEM CODE / §5.6 ACK STATUS / §5.7 ERROR / §11.1 资源格式。
+    /// New Protocol V1.2 的常量与枚举。
+    /// 规范：protocolDesign_1.2.md —— §1.1 TYPE / §2 帧格式 / §3 FLAGS /
+    /// §5.1 SYSTEM CODE / §5.6 ACK STATUS / §5.7 ERROR / §9.2 资源 REQUEST / §11.1 资源格式。
     ///
     /// ⚠ 上限必须与 C 侧（ref_c/include/np_config.h）保持一致，改动需两端同步。
     /// </summary>
@@ -97,7 +97,7 @@ namespace MediaMonitor.Protocol.New.Codec
         public const byte Previous = 0x03;
     }
 
-    /// <summary>ACK STATUS（§5.6）</summary>
+    /// <summary>ACK STATUS（§5.6；V1.2 增加 NOT_MODIFIED）</summary>
     public enum NpAckStatus : byte
     {
         Ok = 0x00,
@@ -105,7 +105,8 @@ namespace MediaMonitor.Protocol.New.Codec
         Invalid = 0x02,
         Busy = 0x03,
         Error = 0x04,
-        NotReady = 0x05
+        NotReady = 0x05,
+        NotModified = 0x06
     }
 
     /// <summary>ERROR 码（§5.7）</summary>
@@ -130,7 +131,7 @@ namespace MediaMonitor.Protocol.New.Codec
         Rgb565 = 0x10   // 2B/像素，低字节在前
     }
 
-    /// <summary>能力位（§5.2 CAPS）</summary>
+    /// <summary>能力位（§5.2 CAPS；V1.2 增加 RESOURCE_CACHE）</summary>
     public static class NpCapsBits
     {
         public const uint Lyrics = 1u << 0;
@@ -138,5 +139,15 @@ namespace MediaMonitor.Protocol.New.Codec
         public const uint Jpeg = 1u << 2;
         public const uint Png = 1u << 3;
         public const uint Rgb565 = 1u << 4;
+
+        /// <summary>支持条件资源请求（REQUEST 带 KNOWN_CRC32 / 可回 ACK(NOT_MODIFIED)）</summary>
+        public const uint ResourceCache = 1u << 5;
+    }
+
+    /// <summary>资源 REQUEST 的 FLAGS（§9.2，V1.2）</summary>
+    public static class NpResRequestFlags
+    {
+        /// <summary>bit0：KNOWN_CRC32 有效（ESP32 已有参数匹配的缓存）</summary>
+        public const ushort HasKnownCrc32 = 0x0001;
     }
 }

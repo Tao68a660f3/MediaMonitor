@@ -9,7 +9,7 @@ namespace MediaMonitor.Core
     /// <summary>
     /// 协议模式（**运行期选择，不落盘**）。
     ///
-    /// <para><b>New</b> = 新协议（`5A A5`，规范 `protocolDesign_1.1_final.md`）；
+    /// <para><b>New</b> = 新协议（`5A A5`，规范 `protocolDesign_1.2.md`）；
     /// <b>Legacy</b> = 现有 `0xAA/0xAB`（已封存，只维护不改动）。</para>
     /// <para>启动默认 New；两种模式各自读写自己的配置文件（`config.new.json` / `config.json`），
     /// 切模式时"断开链路 → 重新注入该模式配置 → 重连"。</para>

@@ -113,7 +113,8 @@ namespace MediaMonitor.Protocol.New.Service
             _scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
             _localCaps = localCaps ?? new NpCaps
             {
-                Caps = NpCapsBits.Lyrics | NpCapsBits.AlbumCover | NpCapsBits.Jpeg | NpCapsBits.Png | NpCapsBits.Rgb565,
+                Caps = NpCapsBits.Lyrics | NpCapsBits.AlbumCover | NpCapsBits.Jpeg | NpCapsBits.Png |
+                       NpCapsBits.Rgb565 | NpCapsBits.ResourceCache,
                 MaxImageEdge = 1024,
                 MaxResourceSize = 1024 * 1024
             };

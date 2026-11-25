@@ -1,6 +1,6 @@
 ﻿# -*- coding: utf-8 -*-
 """
-mock_esp32_new.py —— New Protocol V1.1 的 ESP32 模拟器（TCP Server）
+mock_esp32_new.py —— New Protocol V1.2 的 ESP32 模拟器（TCP Server）
 
 特点：**协议字节层直接跑 ref_c 编出来的 np_ref.dll**（ctypes 调用），
       所以这台"假 ESP32"用的是与真固件同一份 C 代码；Python 只负责 socket 与打印。
@@ -57,7 +57,7 @@ RES_NAMES = {1: "REQUEST", 2: "BEGIN", 3: "DATA", 4: "END", 5: "ABORT"}
 CTRL_NAMES = {1: "PLAY_PAUSE", 2: "NEXT", 3: "PREVIOUS"}
 MEDIA_NAMES = {1: "METADATA"}
 TIMELINE_NAMES = {1: "STATE"}
-CAP_BITS = {"lyrics": 1, "cover": 2, "jpeg": 4, "png": 8, "rgb565": 16}
+CAP_BITS = {"lyrics": 1, "cover": 2, "jpeg": 4, "png": 8, "rgb565": 16, "cache": 32}
 
 STATE_NAMES = {0: "IDLE", 1: "HANDSHAKE", 2: "NEGOTIATING", 3: "WAIT_SESSION_START", 4: "ACTIVE"}
 
@@ -73,8 +73,10 @@ ACK_INVALID = 0x02
 ACK_BUSY = 0x03
 ACK_ERROR = 0x04
 ACK_NOT_READY = 0x05
+ACK_NOT_MODIFIED = 0x06
 ACK_STATUS_NAMES = {ACK_OK: "OK", ACK_REJECTED: "REJECTED", ACK_INVALID: "INVALID",
-                    ACK_BUSY: "BUSY", ACK_ERROR: "ERROR", ACK_NOT_READY: "NOT_READY"}
+                    ACK_BUSY: "BUSY", ACK_ERROR: "ERROR", ACK_NOT_READY: "NOT_READY",
+                    ACK_NOT_MODIFIED: "NOT_MODIFIED"}
 
 # FLAGS（规范 §3）
 NP_FLAG_ACK_REQUIRED = 0x01        # 「要不要回 ACK」的唯一判据（§5.6 约定表，V1.1-21）
@@ -142,8 +144,24 @@ def load_dll(path):
     dll.np_dll_send_control.argtypes = [ctypes.c_int]
     dll.np_dll_send_control.restype = ctypes.c_int
     dll.np_dll_send_request_lyrics.restype = ctypes.c_int
+    dll.np_dll_send_request_lyrics_ex.argtypes = [ctypes.c_int, ctypes.c_uint32]
+    dll.np_dll_send_request_lyrics_ex.restype = ctypes.c_int
     dll.np_dll_send_request_cover.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.np_dll_send_request_cover.restype = ctypes.c_int
+
+    # V1.2：对端 CAPS / 资源缓存
+    dll.np_dll_set_peer_caps.argtypes = [ctypes.c_uint32]
+    dll.np_dll_set_peer_caps.restype = None
+    dll.np_dll_res_cache_valid.restype = ctypes.c_int
+    dll.np_dll_res_cache_valid_for.argtypes = [ctypes.c_int]
+    dll.np_dll_res_cache_valid_for.restype = ctypes.c_int
+    dll.np_dll_res_cache_crc.restype = ctypes.c_uint32
+    dll.np_dll_res_cache_crc_for.argtypes = [ctypes.c_int]
+    dll.np_dll_res_cache_crc_for.restype = ctypes.c_uint32
+    dll.np_dll_res_cache_size.restype = ctypes.c_uint32
+    dll.np_dll_res_cache_size_for.argtypes = [ctypes.c_int]
+    dll.np_dll_res_cache_size_for.restype = ctypes.c_uint32
+    dll.np_dll_res_cache_clear.restype = None
 
     dll.np_dll_res_init.restype = ctypes.c_int
     dll.np_dll_res_on_frame.argtypes = [ctypes.POINTER(NpFrameOut)]
@@ -534,11 +552,12 @@ class MockServer:
         这里把 tick 打包成 `(第几次连接 << 16) | 连接内毫秒`（规范 §2.5：每次会话必须换新 ID）。
     """
 
-    def __init__(self, dll, ip="127.0.0.1", port=9100, caps=0x1F, max_edge=240,
+    def __init__(self, dll, ip="127.0.0.1", port=9100, caps=0x3F, max_edge=240,
                  max_resource=262144, tick_ms=10, art_dir="art_recv", cover_format=0x10,
                  control_every=0.0, exit_after_active=False, run_seconds=0.0,
                  latency_samples=0, latency_interval_ms=100,
                  transport="tcp", com_port="COM23", baud=115200,
+                 cache_probe=False,
                  quiet=False, cli=False, serve_forever=False, on_event=None):
         self.dll = dll
         self.ip = ip
@@ -557,6 +576,8 @@ class MockServer:
         self.run_seconds = run_seconds
         self.latency_samples = latency_samples              # >0 = 会话建立后自动测一轮（0 = 只等人点）
         self.latency_interval_ms = latency_interval_ms
+        self.cache_probe = cache_probe                      # V1.2：资源收齐后再请求一次，验证 NOT_MODIFIED
+        self._peer_caps = 0
         self.quiet = quiet
         self.cli = cli                      # True = 同时打印到控制台（保持 CLI 行为）
         self.serve_forever = serve_forever
@@ -852,6 +873,8 @@ class MockServer:
         self._delivered = 0
         self._media_key = None
         self._last_sid = 0
+        self._peer_caps = 0
+        self._cache_probe_done = False
         self._reset_res_state()
         self._reset_lat_state()
         last_state = None
@@ -1023,8 +1046,18 @@ class MockServer:
                         and (self._res_result["rid"] == f.request_id):
                     acked = self._ack_if_needed(f, self._res_result["status"], "资源 END（空资源）")
 
+            elif (f.type == 1) and (f.code == 0x02):
+                # V1.2：记下对端 CAPS，C 侧据此决定 REQUEST 里是否带 KNOWN_CRC32
+                payload = bytes(f.payload[:f.payload_len])
+                if len(payload) >= 4:
+                    caps = _be32(payload, 0)
+                    self._peer_caps = caps
+                    self.dll.np_dll_set_peer_caps(caps)
+                    self.log("HELLO_ACK：对端 CAPS=0x%08X（RESOURCE_CACHE=%s）"
+                             % (caps, "是" if (caps & CAP_BITS["cache"]) else "否"))
+
             elif (f.type == 1) and (f.code == 0x05):
-                self._on_ack(f)                            # ACK(NOT_READY/BUSY) → 换新 rid 重试（§9.8）
+                self._on_ack(f)                            # ACK(NOT_READY/BUSY/NOT_MODIFIED) 处理
 
             elif (f.type == 1) and (f.code == 0x06):
                 payload = bytes(f.payload[:f.payload_len])
@@ -1152,12 +1185,19 @@ class MockServer:
         rid = self.dll.np_dll_last_rid()
         now = time.monotonic()
         retry = self._res["retry"][kind]
+        cache_note = ""
+        cache_type = 5 if kind == "lyrics" else 6
+        if ((self._peer_caps & CAP_BITS["cache"]) != 0) and self.dll.np_dll_res_cache_valid_for(cache_type):
+            cache_note = "，本地缓存 CRC=0x%08X size=%d" % (
+                self.dll.np_dll_res_cache_crc_for(cache_type),
+                self.dll.np_dll_res_cache_size_for(cache_type))
         self._res["inflight"] = {"kind": kind, "rid": rid, "phase": "等 ACK",
                                  "sent": now, "deadline": now}
         extra = (" %dx%d fmt=0x%02X" % (self.max_edge, self.max_edge, self.cover_format)
                  if kind == "cover" else "")
-        self.log("-> %s REQUEST%s rid=%d（%s%s）"
+        self.log("-> %s REQUEST%s rid=%d（%s%s%s）"
                  % (kind.upper(), extra, rid, why,
+                    cache_note,
                     "，第 %d/%d 次" % (retry, RES_MAX_RETRY) if retry else ""))
         self._res_push_state()
 
@@ -1211,6 +1251,12 @@ class MockServer:
         r["done"][kind] = "已收齐"
         if (infl is not None) and (infl["kind"] == kind):
             r["inflight"] = None
+        if (self.cache_probe and (not self._cache_probe_done) and
+                ("lyrics" in r["done"]) and ("cover" in r["done"])):
+            self._cache_probe_done = True
+            self.log("缓存探针：同一份歌词/封面再请求一次（预期 ACK(NOT_MODIFIED)）")
+            self._res_want("lyrics", "缓存探针", active=True)
+            self._res_want("cover", "缓存探针", active=True)
         self._res_push_state()
         self._res_pump(True)
 
@@ -1316,6 +1362,13 @@ class MockServer:
             infl["phase"] = "收数据"
             infl["sent"] = time.monotonic()
             self.log("ACK(OK) %s rid=%d → 等 BEGIN/DATA/END" % (kind, infl["rid"]))
+        elif status == ACK_NOT_MODIFIED:
+            # V1.2：PC 当前资源 CRC32 与 KNOWN_CRC32 相同 → 保留本地缓存，不再传 BEGIN/DATA/END
+            r["retry"][kind] = 0
+            r["inflight"] = None
+            r["done"][kind] = "缓存命中（NOT_MODIFIED）"
+            self.log("ACK(NOT_MODIFIED) %s rid=%d → 内容未变，保留本地缓存（不传资源）"
+                     % (kind, infl["rid"]))
         elif status in (ACK_NOT_READY, ACK_BUSY):
             r["retry"][kind] += 1
             if r["retry"][kind] > RES_MAX_RETRY:
@@ -1577,7 +1630,7 @@ def setup_utf8_console():
 
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="New Protocol V1.1 ESP32 模拟器（协议层跑 np_ref.dll）")
+    ap = argparse.ArgumentParser(description="New Protocol V1.2 ESP32 模拟器（协议层跑 np_ref.dll）")
     ap.add_argument("--transport", choices=("tcp", "com"), default="tcp",
                     help="链路：tcp（默认，上位机填「传输=TCP」）或 com（串口，上位机填「传输=COM」）")
     ap.add_argument("--ip", default="127.0.0.1")
@@ -1586,8 +1639,8 @@ def parse_args():
                     help="串口号（默认 COM23；要填与上位机「COM 端口」**配对**的那一端）")
     ap.add_argument("--baud", type=int, default=115200, help="串口波特率（与上位机 config.new.json 一致）")
     ap.add_argument("--dll", default=DEFAULT_DLL)
-    ap.add_argument("--caps", default="lyrics,cover,jpeg,png,rgb565",
-                    help="逗号分隔：lyrics,cover,jpeg,png,rgb565（默认全给：模拟器这三种封面格式都收得下）")
+    ap.add_argument("--caps", default="lyrics,cover,jpeg,png,rgb565,cache",
+                    help="逗号分隔：lyrics,cover,jpeg,png,rgb565,cache（默认全给；cache=V1.2 条件资源请求）")
     ap.add_argument("--max-edge", type=int, default=240, help="HELLO 里声明能接受的最大封面边长")
     ap.add_argument("--max-resource", type=int, default=262144, help="能接收的最大资源字节数（写进 HELLO）")
     ap.add_argument("--tick-ms", type=int, default=10, help="主循环周期")
@@ -1603,6 +1656,8 @@ def parse_args():
                     help="会话建立后自动主动测一轮延迟（本端发起、对端应答）；0 = 不自动测")
     ap.add_argument("--latency-interval-ms", type=int, default=100,
                     help="延迟测量两次 LATENCY_REQUEST 的间隔（默认 100ms）")
+    ap.add_argument("--cache-probe", action="store_true",
+                    help="V1.2：歌词/封面收齐后再请求一次，验证 ACK(NOT_MODIFIED)（不传资源）")
     ap.add_argument("--quiet", action="store_true", help="不逐帧打印")
     return ap.parse_args()
 
@@ -1632,6 +1687,7 @@ def main():
                         exit_after_active=args.exit_after_active, run_seconds=args.run_seconds,
                         latency_samples=args.latency_samples,
                         latency_interval_ms=args.latency_interval_ms,
+                        cache_probe=args.cache_probe,
                         transport=args.transport, com_port=args.com, baud=args.baud,
                         quiet=args.quiet, cli=True, serve_forever=False)
     server.start()

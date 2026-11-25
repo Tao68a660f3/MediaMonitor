@@ -19,7 +19,7 @@ using MediaMonitor.Tools;
 using NewProtocolSelfTest;
 
 /// <summary>
-/// New Protocol V1.1 编解码层自测（实施计划 §4.2）。
+/// New Protocol V1.2 编解码层自测（实施计划 §4.2）。
 /// 与 C 侧 ref_c/tests/np_selftest.c 使用同一批附录 A 向量：
 /// 两侧都 PASS 且编码结果逐字节相同，才说明"大端 / CRC 参数 / CRC 覆盖范围"三件事没写错。
 /// </summary>
@@ -1538,6 +1538,100 @@ internal static class Program
         }
     }
 
+    /* ---------------- R19：V1.2 条件资源请求（KNOWN_CRC32 / NOT_MODIFIED） ---------------- */
+
+    /// <summary>
+    /// R19：验证 §9.2/§9.3 的缓存协商：
+    /// REQUEST 带 `HAS_KNOWN_CRC32` 且与当前资源 CRC32 相同 → 只回 `ACK(NOT_MODIFIED)`，不传 BEGIN/DATA/END；
+    /// 不同 → 正常传输；空资源（CRC32=0）同样走 NOT_MODIFIED；V1.1 短 REQUEST 不受影响。
+    /// </summary>
+    private static void TestResourceNotModified()
+    {
+        Console.WriteLine("R19 条件资源请求：相同 CRC 回 NOT_MODIFIED（不传资源）");
+
+        byte[] coverBytes = { 0xAA, 0xBB, 0xCC, 0xDD };
+        uint coverCrc = Crc32Ieee.Compute(coverBytes);
+        var cover = new NpResourceData(coverCrc, coverBytes, (byte)NpResFormat.Jpeg, 240, 240);
+
+        byte[] EmptyBytes = Array.Empty<byte>();
+        var emptyCover = new NpResourceData(Crc32Ieee.Compute(EmptyBytes), EmptyBytes, (byte)NpResFormat.None, 0, 0);
+
+        byte[] CoverRequest(uint knownCrc, bool includeKnown = true)
+        {
+            byte[] pay = new byte[includeKnown ? 12 : 8];
+            NpWriter.WriteU16(pay, 240);
+            NpWriter.WriteU16(pay.AsSpan(2), 240);
+            pay[4] = (byte)NpResFormat.Jpeg;
+            pay[5] = 0;
+            if (includeKnown)
+            {
+                NpWriter.WriteU16(pay.AsSpan(6), NpResRequestFlags.HasKnownCrc32);
+                NpWriter.WriteU32(pay.AsSpan(8), knownCrc);
+            }
+            return pay;
+        }
+
+        byte[] LyricsRequest(uint knownCrc)
+        {
+            byte[] pay = new byte[6];
+            NpWriter.WriteU16(pay, NpResRequestFlags.HasKnownCrc32);
+            NpWriter.WriteU32(pay.AsSpan(2), knownCrc);
+            return pay;
+        }
+
+        (List<NpFrame> Frames, ResourceSender Sender) Run(
+            NpResourceData resource, byte type, byte[] requestPayload)
+        {
+            var transport = new RecordingTransport();
+            using var scheduler = new NewSendScheduler(transport, frameIntervalMs: 5);
+            scheduler.Start();
+            using var session = new SessionManager(scheduler);
+            var sender = new ResourceSender(session, (t, w, h, f, q) => resource, chunkSize: 64);
+
+            sender.OnFrame(MakeFrame(type, NpResCode.Request, requestPayload, 10, 0x0000002A, 100, NpFlag.AckRequired));
+            scheduler.WaitDrainedAsync(500).GetAwaiter().GetResult();
+            return (DecodeAll(transport), sender);
+        }
+
+        var same = Run(cover, NpType.AlbumCover, CoverRequest(coverCrc));
+        Check("R19 相同 CRC：只回 ACK(NOT_MODIFIED)，没有 BEGIN/DATA/END",
+              same.Frames.Count == 1 &&
+              same.Frames[0].Type == NpType.System && same.Frames[0].Code == NpSysCode.Ack &&
+              same.Frames[0].Payload.Span[4] == (byte)NpAckStatus.NotModified &&
+              !same.Frames.Any(f => f.Code == NpResCode.Begin || f.Code == NpResCode.Data || f.Code == NpResCode.End));
+        Check("R19 相同 CRC：StatNotModified=1、StatTransfers=0",
+              same.Sender.StatNotModified == 1 && same.Sender.StatTransfers == 0);
+
+        var different = Run(cover, NpType.AlbumCover, CoverRequest(coverCrc ^ 0xFFFFFFFFu));
+        Check("R19 不同 CRC：ACK(OK) + BEGIN + DATA + END 正常传输",
+              HasAnd(different.Frames, f => f.Type == NpType.System && f.Code == NpSysCode.Ack,
+                     f => f.Payload.Span[4] == (byte)NpAckStatus.Ok) &&
+              different.Frames.Any(f => f.Code == NpResCode.Begin) &&
+              different.Frames.Any(f => f.Code == NpResCode.Data) &&
+              different.Frames.Any(f => f.Code == NpResCode.End));
+        Check("R19 不同 CRC：StatNotModified=0、StatTransfers=1",
+              different.Sender.StatNotModified == 0 && different.Sender.StatTransfers == 1);
+
+        var empty = Run(emptyCover, NpType.AlbumCover, CoverRequest(0u));
+        Check("R19 空资源 CRC32=0：同样回 NOT_MODIFIED，不重复走空资源传输",
+              empty.Frames.Count == 1 &&
+              empty.Frames[0].Payload.Span[4] == (byte)NpAckStatus.NotModified &&
+              !empty.Frames.Any(f => f.Code == NpResCode.Begin || f.Code == NpResCode.End) &&
+              empty.Sender.StatNotModified == 1);
+
+        var lyrics = Run(cover, NpType.Lyrics, LyricsRequest(coverCrc));
+        Check("R19 歌词 REQUEST 也支持 KNOWN_CRC32 → NOT_MODIFIED",
+              lyrics.Frames.Count == 1 &&
+              lyrics.Frames[0].Payload.Span[4] == (byte)NpAckStatus.NotModified &&
+              lyrics.Sender.StatNotModified == 1);
+
+        var legacy = Run(cover, NpType.AlbumCover, CoverRequest(coverCrc, includeKnown: false));
+        Check("R19 V1.1 的 8B 封面 REQUEST（无 KNOWN_CRC32）仍正常传输",
+              legacy.Frames.Any(f => f.Code == NpResCode.Begin) &&
+              legacy.Frames.Any(f => f.Code == NpResCode.End) &&
+              legacy.Sender.StatTransfers == 1 && legacy.Sender.StatNotModified == 0);
+    }
+
     /* ---------------- R18：封面状态机（切歌后封面不变仍需就绪） ---------------- */
 
     /// <summary>
@@ -1637,7 +1731,7 @@ internal static class Program
             return Task.Run(() => SmtcTimelineProbe(args[1], secs)).GetAwaiter().GetResult();
         }
 
-        Console.WriteLine("=== New Protocol V1.1  C# 编解码层自测 ===");
+        Console.WriteLine("=== New Protocol V1.2  C# 编解码层自测 ===");
         Console.WriteLine($"HeaderLenFixed={NpConstants.HeaderLenFixed}  MaxHeaderLen={NpConstants.MaxHeaderLen}  " +
                           $"MaxPayloadLen={NpConstants.MaxPayloadLen}  MaxFrameLen={NpConstants.MaxFrameLen}\n");
 
@@ -1672,6 +1766,8 @@ internal static class Program
         TestLyricMatching();
         Console.WriteLine();
         TestThumbnailState();
+        Console.WriteLine();
+        TestResourceNotModified();
 
         Console.WriteLine($"\n=== 通过 {_pass} 项，失败 {_fail} 项 ===");
         return _fail == 0 ? 0 : 1;
