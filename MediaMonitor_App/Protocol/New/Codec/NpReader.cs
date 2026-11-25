@@ -19,5 +19,16 @@ namespace MediaMonitor.Protocol.New.Codec
             if (src.Length < 4) throw new ArgumentOutOfRangeException(nameof(src));
             return ((uint)src[0] << 24) | ((uint)src[1] << 16) | ((uint)src[2] << 8) | src[3];
         }
+
+        public static ulong ReadU64(ReadOnlySpan<byte> src)
+        {
+            if (src.Length < 8) throw new ArgumentOutOfRangeException(nameof(src));
+            ulong v = 0;
+            for (int i = 0; i < 8; i++)
+            {
+                v = (v << 8) | src[i];
+            }
+            return v;
+        }
     }
 }

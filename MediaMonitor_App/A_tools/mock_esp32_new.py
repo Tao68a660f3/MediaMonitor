@@ -144,7 +144,7 @@ def load_dll(path):
     dll.np_dll_send_control.argtypes = [ctypes.c_int]
     dll.np_dll_send_control.restype = ctypes.c_int
     dll.np_dll_send_request_lyrics.restype = ctypes.c_int
-    dll.np_dll_send_request_lyrics_ex.argtypes = [ctypes.c_int, ctypes.c_uint32]
+    dll.np_dll_send_request_lyrics_ex.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint8)]
     dll.np_dll_send_request_lyrics_ex.restype = ctypes.c_int
     dll.np_dll_send_request_cover.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
     dll.np_dll_send_request_cover.restype = ctypes.c_int
@@ -155,12 +155,19 @@ def load_dll(path):
     dll.np_dll_res_cache_valid.restype = ctypes.c_int
     dll.np_dll_res_cache_valid_for.argtypes = [ctypes.c_int]
     dll.np_dll_res_cache_valid_for.restype = ctypes.c_int
-    dll.np_dll_res_cache_crc.restype = ctypes.c_uint32
     dll.np_dll_res_cache_crc_for.argtypes = [ctypes.c_int]
     dll.np_dll_res_cache_crc_for.restype = ctypes.c_uint32
     dll.np_dll_res_cache_size.restype = ctypes.c_uint32
     dll.np_dll_res_cache_size_for.argtypes = [ctypes.c_int]
     dll.np_dll_res_cache_size_for.restype = ctypes.c_uint32
+    dll.np_dll_res_cache_sha64_for.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_uint8)]
+    dll.np_dll_res_cache_sha64_for.restype = ctypes.c_int
+    dll.np_dll_res_cache_data_for.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_uint32)]
+    dll.np_dll_res_cache_data_for.restype = ctypes.c_int
+    dll.np_dll_res_cache_copy_for.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+    dll.np_dll_res_cache_copy_for.restype = ctypes.c_int
+    dll.np_dll_res_cache_bind.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+    dll.np_dll_res_cache_bind.restype = ctypes.c_int
     dll.np_dll_res_cache_clear.restype = None
     dll.np_dll_res_cache_clear_for.argtypes = [ctypes.c_int]
     dll.np_dll_res_cache_clear_for.restype = None
@@ -1066,7 +1073,7 @@ class MockServer:
                     acked = self._ack_if_needed(f, self._res_result["status"], "资源 END（空资源）")
 
             elif (f.type == 1) and (f.code == 0x02):
-                # V1.2：记下对端 CAPS，C 侧据此决定 REQUEST 里是否带 KNOWN_CRC32
+                # V1.2：记下对端 CAPS，C 侧据此决定 REQUEST 里是否带 KNOWN_SHA64
                 payload = bytes(f.payload[:f.payload_len])
                 if len(payload) >= 4:
                     caps = _be32(payload, 0)
@@ -1206,10 +1213,15 @@ class MockServer:
         retry = self._res["retry"][kind]
         cache_note = ""
         cache_type = 5 if kind == "lyrics" else 6
-        if ((self._peer_caps & CAP_BITS["cache"]) != 0) and self.dll.np_dll_res_cache_valid_for(cache_type):
-            cache_note = "，本地缓存 CRC=0x%08X size=%d" % (
-                self.dll.np_dll_res_cache_crc_for(cache_type),
-                self.dll.np_dll_res_cache_size_for(cache_type))
+        if (self._peer_caps & CAP_BITS["cache"]) != 0:
+            if self.dll.np_dll_res_cache_valid_for(cache_type):
+                sha = (ctypes.c_uint8 * 8)()
+                if self.dll.np_dll_res_cache_sha64_for(cache_type, sha):
+                    cache_note = "，本地缓存 SHA64=%s size=%d" % (
+                        bytes(sha).hex().upper(),
+                        self.dll.np_dll_res_cache_size_for(cache_type))
+            else:
+                cache_note = "，未带 KNOWN_SHA64：本地缓存槽为空"
         self._res["inflight"] = {"kind": kind, "rid": rid, "phase": "等 ACK",
                                  "sent": now, "deadline": now}
         extra = (" %dx%d fmt=0x%02X" % (self.max_edge, self.max_edge, self.cover_format)
@@ -1283,7 +1295,7 @@ class MockServer:
     def _res_maybe_refresh(self):
         """MEDIA 在资源在途时合并成一次“排空后刷新”：等当前队列清空再按最新 MEDIA 重问。
 
-        这样第一份资源能正常 DONE（缓存建立），第二次请求才会带 KNOWN_CRC32；
+        这样第一份资源能正常 DONE（缓存建立），第二次请求才会带 KNOWN_SHA64；
         如果一收到重复 MEDIA 就 Reset/重排，接收器会从旧 rid 切到新 rid，
         旧 rid 的 END 被 §9.7 丢弃、缓存也来不及建立，结果就是整份重传 + “没有处理层”警告。
         """
@@ -1401,7 +1413,7 @@ class MockServer:
             infl["sent"] = time.monotonic()
             self.log("ACK(OK) %s rid=%d → 等 BEGIN/DATA/END" % (kind, infl["rid"]))
         elif status == ACK_NOT_MODIFIED:
-            # V1.2：PC 当前资源 CRC32 与 KNOWN_CRC32 相同 → 保留本地缓存，不再传 BEGIN/DATA/END
+            # V1.2：PC 当前资源 SHA64 与 KNOWN_SHA64 相同 → 保留本地缓存，不再传 BEGIN/DATA/END
             r["retry"][kind] = 0
             r["inflight"] = None
             r["done"][kind] = "缓存命中（NOT_MODIFIED）"
@@ -1633,6 +1645,13 @@ class MockServer:
         data = bytes(buf.raw[:n])
 
         kind = "lyrics" if rtype == 5 else "cover"
+        cache_sha = (ctypes.c_uint8 * 8)()
+        if self.dll.np_dll_res_cache_sha64_for(rtype, cache_sha):
+            self.log("--- 缓存槽 %s：valid=1 SHA64=%s size=%d"
+                     % (kind, bytes(cache_sha).hex().upper(),
+                        self.dll.np_dll_res_cache_size_for(rtype)))
+        else:
+            self.log("--- 缓存槽 %s：valid=0（BEGIN 未带 SHA64 或缓存缓冲不足）" % kind)
         path = os.path.join(self.art_dir, "%s.%s" % (kind, FMT_EXT.get(fmt, "bin")))
         try:
             os.makedirs(self.art_dir, exist_ok=True)
@@ -1693,7 +1712,7 @@ def parse_args():
     ap.add_argument("--baud", type=int, default=115200, help="串口波特率（与上位机 config.new.json 一致）")
     ap.add_argument("--dll", default=DEFAULT_DLL)
     ap.add_argument("--caps", default="lyrics,cover,jpeg,png,rgb565,cache",
-                    help="逗号分隔：lyrics,cover,jpeg,png,rgb565,cache（默认全给；cache=V1.2 条件资源请求）")
+                    help="逗号分隔：lyrics,cover,jpeg,png,rgb565,cache（默认全给；cache=V1.2 条件资源请求/SHA64）")
     ap.add_argument("--max-edge", type=int, default=240, help="HELLO 里声明能接受的最大封面边长")
     ap.add_argument("--max-resource", type=int, default=262144, help="能接收的最大资源字节数（写进 HELLO）")
     ap.add_argument("--tick-ms", type=int, default=10, help="主循环周期")

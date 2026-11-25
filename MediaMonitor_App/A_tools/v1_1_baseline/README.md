@@ -16,5 +16,5 @@ python mock_esp32_gui.py --port 9100
 兼容性验证建议：
 
 1. 用本目录的旧 mock + 旧 DLL 连接新版 PC：应能正常握手、请求歌词/封面；
-2. 旧 ESP32 不会发送 V1.2 的 `KNOWN_CRC32`，新版 PC 必须按 V1.1 完整传输；
-3. 旧 ESP32 也不会处理 `ACK(NOT_MODIFIED)`，所以新版 PC 只有在收到 `HAS_KNOWN_CRC32` 时才允许回它。
+2. 旧 ESP32 不会发送 V1.2 的 `KNOWN_SHA64`，新版 PC 必须按 V1.1 完整传输；
+3. 旧 ESP32 也不会处理 `ACK(NOT_MODIFIED)`，所以新版 PC 只有在收到 `HAS_KNOWN_SHA64` 时才允许回它。

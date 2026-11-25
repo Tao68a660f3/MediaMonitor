@@ -140,14 +140,18 @@ namespace MediaMonitor.Protocol.New.Codec
         public const uint Png = 1u << 3;
         public const uint Rgb565 = 1u << 4;
 
-        /// <summary>支持条件资源请求（REQUEST 带 KNOWN_CRC32 / 可回 ACK(NOT_MODIFIED)）</summary>
+        /// <summary>支持条件资源请求（REQUEST 带 KNOWN_SHA64 / 可回 ACK(NOT_MODIFIED)）</summary>
         public const uint ResourceCache = 1u << 5;
     }
 
     /// <summary>资源 REQUEST 的 FLAGS（§9.2，V1.2）</summary>
     public static class NpResRequestFlags
     {
-        /// <summary>bit0：KNOWN_CRC32 有效（ESP32 已有参数匹配的缓存）</summary>
-        public const ushort HasKnownCrc32 = 0x0001;
+        /// <summary>
+        /// bit0：KNOWN_SHA64 有效。
+        /// SHA64 = SHA-256(完整资源字节) 的前 8 字节（大端），只用于资源身份；
+        /// 传输完整性仍由 BEGIN/DATA/END 的 CRC32 保证。
+        /// </summary>
+        public const ushort HasKnownSha64 = 0x0001;
     }
 }

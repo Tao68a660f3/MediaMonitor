@@ -457,7 +457,7 @@ internal static class Program
         Console.WriteLine("[demo] 已推送 MEDIA + 启动 TIMELINE；等待对端（mock）拉取歌词与封面...");
 
         // 同曲目重复 MEDIA：故意在第一份资源还在传时再发一次，
-        // 验证 mock 不会 Reset/重排，而是等排空后重问；第二次请求应命中 KNOWN_CRC32 → ACK(NOT_MODIFIED)。
+        // 验证 mock 不会 Reset/重排，而是等排空后重问；第二次请求应命中 KNOWN_SHA64 → ACK(NOT_MODIFIED)。
         await Task.Delay(20);
         media.Publish("测试歌曲", "测试歌手", "测试专辑");
         Console.WriteLine("[demo] 已推送同曲目重复 MEDIA（验证缓存命中）...");
@@ -1544,54 +1544,65 @@ internal static class Program
         }
     }
 
-    /* ---------------- R19：V1.2 条件资源请求（KNOWN_CRC32 / NOT_MODIFIED） ---------------- */
+    /* ---------------- R19：V1.2 条件资源请求（KNOWN_SHA64 / NOT_MODIFIED） ---------------- */
 
     /// <summary>
     /// R19：验证 §9.2/§9.3 的缓存协商：
-    /// REQUEST 带 `HAS_KNOWN_CRC32` 且与当前资源 CRC32 相同 → 只回 `ACK(NOT_MODIFIED)`，不传 BEGIN/DATA/END；
-    /// 不同 → 正常传输；空资源（CRC32=0）同样走 NOT_MODIFIED；V1.1 短 REQUEST 不受影响。
+    /// REQUEST 带 `HAS_KNOWN_SHA64` 且与当前资源 SHA64 相同 → 只回 `ACK(NOT_MODIFIED)`，不传 BEGIN/DATA/END；
+    /// 不同 → 正常传输，且 BEGIN 末尾追加同一个 SHA64；空资源同样走 NOT_MODIFIED；V1.1 短 REQUEST 不受影响。
     /// </summary>
     private static void TestResourceNotModified()
     {
-        Console.WriteLine("R19 条件资源请求：相同 CRC 回 NOT_MODIFIED（不传资源）");
+        Console.WriteLine("R19 条件资源请求：相同 SHA64 回 NOT_MODIFIED（不传资源）");
 
         byte[] coverBytes = { 0xAA, 0xBB, 0xCC, 0xDD };
-        uint coverCrc = Crc32Ieee.Compute(coverBytes);
-        var cover = new NpResourceData(coverCrc, coverBytes, (byte)NpResFormat.Jpeg, 240, 240);
+        ulong coverSha = ResourceSha64.Compute(coverBytes);
+        var cover = new NpResourceData(Crc32Ieee.Compute(coverBytes), coverBytes, (byte)NpResFormat.Jpeg, 240, 240);
 
-        byte[] EmptyBytes = Array.Empty<byte>();
-        var emptyCover = new NpResourceData(Crc32Ieee.Compute(EmptyBytes), EmptyBytes, (byte)NpResFormat.None, 0, 0);
+        byte[] emptyBytes = Array.Empty<byte>();
+        ulong emptySha = ResourceSha64.Compute(emptyBytes);
+        var emptyCover = new NpResourceData(Crc32Ieee.Compute(emptyBytes), emptyBytes, (byte)NpResFormat.None, 0, 0);
 
-        byte[] CoverRequest(uint knownCrc, bool includeKnown = true)
+        byte[] CoverRequest(ulong knownSha, bool includeKnown = true)
         {
-            byte[] pay = new byte[includeKnown ? 12 : 8];
+            byte[] pay = new byte[includeKnown ? 18 : 8];
             NpWriter.WriteU16(pay, 240);
             NpWriter.WriteU16(pay.AsSpan(2), 240);
             pay[4] = (byte)NpResFormat.Jpeg;
             pay[5] = 0;
             if (includeKnown)
             {
-                NpWriter.WriteU16(pay.AsSpan(6), NpResRequestFlags.HasKnownCrc32);
-                NpWriter.WriteU32(pay.AsSpan(8), knownCrc);
+                NpWriter.WriteU16(pay.AsSpan(6), NpResRequestFlags.HasKnownSha64);
+                NpWriter.WriteU64(pay.AsSpan(8), knownSha);
             }
             return pay;
         }
 
-        byte[] LyricsRequest(uint knownCrc)
+        byte[] LyricsRequest(ulong knownSha)
         {
-            byte[] pay = new byte[6];
-            NpWriter.WriteU16(pay, NpResRequestFlags.HasKnownCrc32);
-            NpWriter.WriteU32(pay.AsSpan(2), knownCrc);
+            byte[] pay = new byte[10];
+            NpWriter.WriteU16(pay, NpResRequestFlags.HasKnownSha64);
+            NpWriter.WriteU64(pay.AsSpan(2), knownSha);
             return pay;
         }
 
         (List<NpFrame> Frames, ResourceSender Sender) Run(
-            NpResourceData resource, byte type, byte[] requestPayload)
+            NpResourceData resource, byte type, byte[] requestPayload, bool remoteCache = true)
         {
             var transport = new RecordingTransport();
             using var scheduler = new NewSendScheduler(transport, frameIntervalMs: 5);
             scheduler.Start();
             using var session = new SessionManager(scheduler);
+            if (remoteCache)
+            {
+                var caps = new NpCaps
+                {
+                    Caps = NpCapsBits.ResourceCache,
+                    MaxImageEdge = 1024,
+                    MaxResourceSize = 1024 * 1024
+                };
+                session.OnFrame(MakeFrame(NpType.System, NpSysCode.HelloAck, caps.ToPayload(), 1, 0, 0));
+            }
             var sender = new ResourceSender(session, (t, w, h, f, q) => resource, chunkSize: 64);
 
             sender.OnFrame(MakeFrame(type, NpResCode.Request, requestPayload, 10, 0x0000002A, 100, NpFlag.AckRequired));
@@ -1599,40 +1610,45 @@ internal static class Program
             return (DecodeAll(transport), sender);
         }
 
-        var same = Run(cover, NpType.AlbumCover, CoverRequest(coverCrc));
-        Check("R19 相同 CRC：只回 ACK(NOT_MODIFIED)，没有 BEGIN/DATA/END",
+        var same = Run(cover, NpType.AlbumCover, CoverRequest(coverSha));
+        Check("R19 相同 SHA64：只回 ACK(NOT_MODIFIED)，没有 BEGIN/DATA/END",
               same.Frames.Count == 1 &&
               same.Frames[0].Type == NpType.System && same.Frames[0].Code == NpSysCode.Ack &&
               same.Frames[0].Payload.Span[4] == (byte)NpAckStatus.NotModified &&
               !same.Frames.Any(f => f.Code == NpResCode.Begin || f.Code == NpResCode.Data || f.Code == NpResCode.End));
-        Check("R19 相同 CRC：StatNotModified=1、StatTransfers=0",
+        Check("R19 相同 SHA64：StatNotModified=1、StatTransfers=0",
               same.Sender.StatNotModified == 1 && same.Sender.StatTransfers == 0);
 
-        var different = Run(cover, NpType.AlbumCover, CoverRequest(coverCrc ^ 0xFFFFFFFFu));
-        Check("R19 不同 CRC：ACK(OK) + BEGIN + DATA + END 正常传输",
+        var different = Run(cover, NpType.AlbumCover, CoverRequest(coverSha ^ 0xFFFFFFFFFFFFFFFFUL));
+        Check("R19 不同 SHA64：ACK(OK) + BEGIN + DATA + END 正常传输",
               HasAnd(different.Frames, f => f.Type == NpType.System && f.Code == NpSysCode.Ack,
                      f => f.Payload.Span[4] == (byte)NpAckStatus.Ok) &&
               different.Frames.Any(f => f.Code == NpResCode.Begin) &&
               different.Frames.Any(f => f.Code == NpResCode.Data) &&
               different.Frames.Any(f => f.Code == NpResCode.End));
-        Check("R19 不同 CRC：StatNotModified=0、StatTransfers=1",
+        Check("R19 不同 SHA64：StatNotModified=0、StatTransfers=1",
               different.Sender.StatNotModified == 0 && different.Sender.StatTransfers == 1);
 
-        var empty = Run(emptyCover, NpType.AlbumCover, CoverRequest(0u));
-        Check("R19 空资源 CRC32=0：同样回 NOT_MODIFIED，不重复走空资源传输",
+        NpFrame begin = different.Frames.First(f => f.Code == NpResCode.Begin);
+        Check("R19 BEGIN 追加 SHA64：封面 13+8=21B，值与当前资源一致",
+              begin.PayloadLen == 21u &&
+              NpReader.ReadU64(begin.Payload.Span[13..]) == coverSha);
+
+        var empty = Run(emptyCover, NpType.AlbumCover, CoverRequest(emptySha));
+        Check("R19 空资源 SHA64：同样回 NOT_MODIFIED，不重复走空资源传输",
               empty.Frames.Count == 1 &&
               empty.Frames[0].Payload.Span[4] == (byte)NpAckStatus.NotModified &&
               !empty.Frames.Any(f => f.Code == NpResCode.Begin || f.Code == NpResCode.End) &&
               empty.Sender.StatNotModified == 1);
 
-        var lyrics = Run(cover, NpType.Lyrics, LyricsRequest(coverCrc));
-        Check("R19 歌词 REQUEST 也支持 KNOWN_CRC32 → NOT_MODIFIED",
+        var lyrics = Run(cover, NpType.Lyrics, LyricsRequest(coverSha));
+        Check("R19 歌词 REQUEST 也支持 KNOWN_SHA64 → NOT_MODIFIED",
               lyrics.Frames.Count == 1 &&
               lyrics.Frames[0].Payload.Span[4] == (byte)NpAckStatus.NotModified &&
               lyrics.Sender.StatNotModified == 1);
 
-        var legacy = Run(cover, NpType.AlbumCover, CoverRequest(coverCrc, includeKnown: false));
-        Check("R19 V1.1 的 8B 封面 REQUEST（无 KNOWN_CRC32）仍正常传输",
+        var legacy = Run(cover, NpType.AlbumCover, CoverRequest(0, includeKnown: false), remoteCache: false);
+        Check("R19 V1.1 的 8B 封面 REQUEST（无 KNOWN_SHA64）仍正常传输",
               legacy.Frames.Any(f => f.Code == NpResCode.Begin) &&
               legacy.Frames.Any(f => f.Code == NpResCode.End) &&
               legacy.Sender.StatTransfers == 1 && legacy.Sender.StatNotModified == 0);

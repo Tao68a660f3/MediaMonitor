@@ -19,5 +19,17 @@ namespace MediaMonitor.Protocol.New.Codec
             dest[2] = (byte)(value >> 8);
             dest[3] = (byte)value;
         }
+
+        public static void WriteU64(Span<byte> dest, ulong value)
+        {
+            dest[0] = (byte)(value >> 56);
+            dest[1] = (byte)(value >> 48);
+            dest[2] = (byte)(value >> 40);
+            dest[3] = (byte)(value >> 32);
+            dest[4] = (byte)(value >> 24);
+            dest[5] = (byte)(value >> 16);
+            dest[6] = (byte)(value >> 8);
+            dest[7] = (byte)value;
+        }
     }
 }

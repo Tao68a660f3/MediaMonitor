@@ -27,6 +27,7 @@ namespace MediaMonitor.Protocol.New.Service
             public byte Type;
             public uint RequestId;
             public NpResourceData Data = null!;
+            public ulong Sha64;
             public uint BeginSeq;
             public uint EndSeq;
         }
@@ -90,8 +91,8 @@ namespace MediaMonitor.Protocol.New.Service
             ushort height = 0;
             byte quality = 0;
             NpResFormat format = NpResFormat.None;
-            bool hasKnownCrc32 = false;
-            uint knownCrc32 = 0;
+            bool hasKnownSha64 = false;
+            ulong knownSha64 = 0;
 
             if (f.Type == NpType.AlbumCover)
             {
@@ -108,24 +109,42 @@ namespace MediaMonitor.Protocol.New.Service
                 format = (NpResFormat)p[4];
                 quality = p[5];
 
-                // V1.2：第 6..7B = FLAGS、第 8..11B = KNOWN_CRC32；
+                // V1.2：第 6..7B = FLAGS、第 8..15B = KNOWN_SHA64；
                 // V1.1 的 8B 请求没有这两项 → 按"无缓存"处理。
-                if (f.PayloadLen >= 12u)
+                if (f.PayloadLen >= 10u)
                 {
                     ushort flags = NpReader.ReadU16(p[6..]);
-                    hasKnownCrc32 = (flags & NpResRequestFlags.HasKnownCrc32) != 0;
-                    knownCrc32 = NpReader.ReadU32(p[8..]);
+                    if ((flags & NpResRequestFlags.HasKnownSha64) != 0)
+                    {
+                        if (f.PayloadLen < 18u)
+                        {
+                            StatRejected++;
+                            _session.SendAck(f.Sequence, f.RequestId, (byte)NpAckStatus.Invalid);
+                            return;
+                        }
+                        hasKnownSha64 = true;
+                        knownSha64 = NpReader.ReadU64(p[8..]);
+                    }
                 }
             }
             else if (f.Type == NpType.Lyrics)
             {
-                // V1.2：FLAGS u16 + KNOWN_CRC32 u32；V1.1：空 Payload。
-                if (f.PayloadLen >= 6u)
+                // V1.2：FLAGS u16 + KNOWN_SHA64 u64；V1.1：空 Payload。
+                if (f.PayloadLen >= 2u)
                 {
                     ReadOnlySpan<byte> p = f.Payload.Span;
                     ushort flags = NpReader.ReadU16(p);
-                    hasKnownCrc32 = (flags & NpResRequestFlags.HasKnownCrc32) != 0;
-                    knownCrc32 = NpReader.ReadU32(p[2..]);
+                    if ((flags & NpResRequestFlags.HasKnownSha64) != 0)
+                    {
+                        if (f.PayloadLen < 10u)
+                        {
+                            StatRejected++;
+                            _session.SendAck(f.Sequence, f.RequestId, (byte)NpAckStatus.Invalid);
+                            return;
+                        }
+                        hasKnownSha64 = true;
+                        knownSha64 = NpReader.ReadU64(p[2..]);
+                    }
                 }
             }
 
@@ -150,9 +169,10 @@ namespace MediaMonitor.Protocol.New.Service
                 return;
             }
 
-            // V1.2 条件资源请求（§9.3）：ESP32 已有同 CRC32 的缓存 → 只回 NOT_MODIFIED，
-            // 不进入 BEGIN/DATA/END。空资源同样适用（CRC32=0），避免重复走空资源传输状态机。
-            if (hasKnownCrc32 && data.Crc32 == knownCrc32)
+            // V1.2 条件资源请求（§9.3）：ESP32 已有同 SHA64 的缓存 → 只回 NOT_MODIFIED，
+            // 不进入 BEGIN/DATA/END。空资源同样适用（空串 SHA64 固定），避免重复走空资源传输状态机。
+            ulong currentSha64 = ResourceSha64.Compute(data.Data);
+            if (hasKnownSha64 && currentSha64 == knownSha64)
             {
                 StatNotModified++;
                 LastAckStatus = (byte)NpAckStatus.NotModified;
@@ -160,7 +180,7 @@ namespace MediaMonitor.Protocol.New.Service
                 return;
             }
 
-            var t = new Transfer { Type = f.Type, RequestId = f.RequestId, Data = data };
+            var t = new Transfer { Type = f.Type, RequestId = f.RequestId, Data = data, Sha64 = currentSha64 };
             _current = t;
 
             _session.SendAck(f.Sequence, f.RequestId, (byte)NpAckStatus.Ok);   // 先接受请求
@@ -233,7 +253,9 @@ namespace MediaMonitor.Protocol.New.Service
         private uint SendBegin(Transfer t)
         {
             bool isCover = t.Type == NpType.AlbumCover;
-            byte[] pay = new byte[isCover ? 13 : 8];
+            bool withSha64 = _session.RemoteCaps?.Has(NpCapsBits.ResourceCache) == true;
+            int baseLen = isCover ? 13 : 8;
+            byte[] pay = new byte[withSha64 ? baseLen + 8 : baseLen];
 
             NpWriter.WriteU32(pay, t.Data.Crc32);
             NpWriter.WriteU32(pay.AsSpan(4), (uint)t.Data.Data.Length);
@@ -243,6 +265,11 @@ namespace MediaMonitor.Protocol.New.Service
                 pay[8] = t.Data.Format;
                 NpWriter.WriteU16(pay.AsSpan(9), t.Data.Width);
                 NpWriter.WriteU16(pay.AsSpan(11), t.Data.Height);
+            }
+
+            if (withSha64)
+            {
+                NpWriter.WriteU64(pay.AsSpan(baseLen), t.Sha64);
             }
 
             return _session.SendResourceFrame(t.Type, NpResCode.Begin, t.RequestId, pay, 0);

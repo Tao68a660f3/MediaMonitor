@@ -337,18 +337,24 @@ UI/ProtocolStackView.cs  ← 主窗口只认这个接口（当前模式 → 一�
 ### 9.5 V1.2 资源缓存协商（条件 REQUEST + `NOT_MODIFIED`）
 
 * **协商**：HELLO/HELLO_ACK 的 `CAPS.RESOURCE_CACHE`（bit5）由两端各自声明；任一端没有该位 → 退回 V1.1 完整传输。
-* **REQUEST**：ESP32 在资源请求里带 `FLAGS u16` + `KNOWN_CRC32 u32`（歌词 6 B；封面 12 B），
-  `FLAGS.bit0 = HAS_KNOWN_CRC32`。封面缓存键必须同时匹配 `FORMAT / WIDTH / HEIGHT / QUALITY`。
-* **PC 响应**：`ResourceSender` 先生成当前资源并拿到 `NpResourceData.Crc32`；
-  * 有 `KNOWN_CRC32` 且与当前 CRC32 相同 → 回 **`ACK(NOT_MODIFIED)`（0x06）**，**不进入 BEGIN/DATA/END**；
-  * 空资源也是 `CRC32 = 0`，同样走 `NOT_MODIFIED`（不再重复传空资源）；
-  * 不同 → 正常 `ACK(OK) + BEGIN/DATA/END`。
-* **为什么不是 BEGIN ACK**：§5.6 约定表里资源 `BEGIN` 的 `ACK_REQUIRED = 0`，V1.1-21 又规定"位为 0 不得回 ACK"；
-  旧 §9.3 的"接收方对 BEGIN 回 ACK 表示缓存命中"与这两条冲突，C 参考实现也从未实现。
-  现在把缓存命中收敛成"对 REQUEST 的 ACK 状态"，不新增帧、不改 ACK 位规则。
-* **C 参考 / mock**：`np_dll` 按资源类型分槽缓存（歌词/封面各一份元数据），只有对端声明 `RESOURCE_CACHE` 时才带 `KNOWN_CRC32`；
-  `--cache-probe` 会在歌词/封面收齐后再请求一次，用于验证 `NOT_MODIFIED`。
-* **PC 自测**：R19 覆盖"相同 CRC 不传资源 / 不同 CRC 正常传 / 空资源 CRC32=0 / 歌词 / V1.1 短 REQUEST"。
+* **身份**：`SHA64 = SHA-256(完整资源字节) 的前 8 字节（大端）`；CRC32 **只做传输校验**，不参与“是否同一份资源”的判断。
+* **REQUEST**：ESP32 在资源请求里带 `FLAGS u16` + `KNOWN_SHA64[8]`（歌词 10 B；封面 18 B），
+  `FLAGS.bit0 = HAS_KNOWN_SHA64`。封面缓存键必须同时匹配 `FORMAT / WIDTH / HEIGHT / QUALITY`。
+* **PC 响应**：`ResourceSender` 生成当前资源后计算 SHA64：
+  * 有 `KNOWN_SHA64` 且与当前 SHA64 相同 → 回 **`ACK(NOT_MODIFIED)`（0x06）**，**不进入 BEGIN/DATA/END**；
+  * 空资源也计算 SHA256(“”) 的 SHA64，同样走 `NOT_MODIFIED`；
+  * 不同 → 正常 `ACK(OK) + BEGIN/DATA/END`，并在 BEGIN 末尾追加同一个 SHA64
+    （歌词 16 B；封面 21 B；未协商 cache 时保持 V1.1 的 8/13 B）。
+* **C 侧缓存**：`np_dll` 按资源类型分槽保存 **SHA64 + 原始资源字节**（参考 DLL 默认复制；固件可用
+  `np_dll_res_cache_bind()` 绑定 PSRAM）。只有对端声明 `RESOURCE_CACHE` 且缓存参数匹配时才带 `KNOWN_SHA64`；
+  CRC32 仍由 `np_resource_rx` 校验。
+* **缓存失效边界**：`HAS_KNOWN_SHA64=1` 只代表“ESP32 此刻仍实际持有该资源”；应用一旦清空/覆盖歌词或封面，
+  必须 `np_dll_res_cache_clear_for(type)`。原始数据由应用持有时，必须活到下一条资源 DONE 或清除。
+* **为什么不是 BEGIN ACK**：§5.6 约定表里资源 `BEGIN` 的 `ACK_REQUIRED = 0`，V1.1-21 又规定“位为 0 不得回 ACK”；
+  旧 §9.3 的“接收方对 BEGIN 回 ACK 表示缓存命中”与这两条冲突，C 参考实现也从未实现。
+  现在把缓存命中收敛成“对 REQUEST 的 ACK 状态”，不新增帧、不改 ACK 位规则。
+* **PC 自测**：R19 覆盖“相同 SHA64 不传资源 / 不同 SHA64 正常传（BEGIN 带 SHA64）/ 空资源 / 歌词 / V1.1 短 REQUEST”。
+* **C 自检**：R11 覆盖 10/18 B REQUEST、16/21 B BEGIN SHA64；`np_dll_selftest` 覆盖“SHA64 + 原始数据”分槽缓存。
 * **V1.1 基线**：`MediaMonitor_App/A_tools/v1_1_baseline/` 保留了旧 mock + 旧 DLL，用于验证新 PC 对旧 ESP32 的兼容性。
 * **重复 MEDIA 与资源排队**：PC **不在 `OnMediaUpdated` 里 Abort**（播放器会对同一首歌连发多个属性事件，逐个 Abort 会打断正在传的歌词/封面）；
   旧资源由新的 `REQUEST` 在 `ResourceSender.HandleRequest` 里 Abort（§9.7 N-13）。
@@ -357,7 +363,7 @@ UI/ProtocolStackView.cs  ← 主窗口只认这个接口（当前模式 → 一�
   内容没变 → `NOT_MODIFIED`；同元数据但内容变了的新曲目 → 正常传新资源。
 * **Abort 的发送顺序**：`ResourceSender.AbortCurrent` 先 `CancelPendingResources()` 清掉 Resource 队列里尚未发出的旧 DATA/END，
   再用 **System 优先级**发 ABORT；否则 ABORT 会排在旧 DATA/END 后面，新 REQUEST 已开始、旧 rid 的 END 还在到达（接收方只能按 §9.7 丢弃并告警）。
-* **缓存失效边界**：`HAS_KNOWN_CRC32=1` 只代表"ESP32 此刻仍实际持有该资源"；应用一旦清空/覆盖歌词或封面，
+* **缓存失效边界**：`HAS_KNOWN_SHA64=1` 只代表“ESP32 此刻仍实际持有该资源”；应用一旦清空/覆盖歌词或封面，
   必须使对应缓存失效（C API：`np_dll_res_cache_clear_for(type)`），否则 PC 可能回 `NOT_MODIFIED` 而屏幕上已无资源。
 * **GUI 日志**：`MockServer._events` 是 `deque(maxlen=500)`，事件带单调 `seq`；GUI 按 `seq` 增量追加，
   deque 截断或服务端重启都不会吞日志（以前按 list 下标，500 条后/重启后会停止显示）。
@@ -458,8 +464,8 @@ TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）�
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
-| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 多种命名 / 格式插件）** + **R18 封面状态机（换曲同步失效 / 同字节封面仍通知 / 过期读取丢弃）** + **R19 条件资源请求（KNOWN_CRC32 → NOT_MODIFIED，含空资源）**（共 168 项） |
-| C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **150 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**、**V1.2 条件 REQUEST/NOT_MODIFIED R11**）；`build_dll.bat` 的 `np_dll_selftest` 另含**按资源类型分槽的缓存**检查 |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 多种命名 / 格式插件）** + **R18 封面状态机（换曲同步失效 / 同字节封面仍通知 / 过期读取丢弃）** + **R19 条件资源请求（KNOWN_SHA64 → NOT_MODIFIED，含空资源与 BEGIN SHA64）**（共 169 项） |
+| C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **150 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**、**V1.2 条件 REQUEST/NOT_MODIFIED R11**）；`build_dll.bat` 的 `np_dll_selftest` 另含**按资源类型分槽的 SHA64 + 原始数据缓存**检查 |
 | 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
 | 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |
 | 真 SMTC 探针 | `NewProtocolSelfTest.exe --tcp-smtc 127.0.0.1:9100 20` | 用真实播放器数据量"发包节奏"，验证抖动护栏 |
