@@ -1538,6 +1538,50 @@ internal static class Program
         }
     }
 
+    /* ---------------- R18：封面状态机（切歌后封面不变仍需就绪） ---------------- */
+
+    /// <summary>
+    /// R18：验证 <see cref="ThumbnailState"/> 解决的两类问题：
+    /// 1) 切歌后封面字节与上一首相同 → 仍必须重新就绪并通知（不能按旧哈希去重挡掉）；
+    /// 2) 同曲目重复事件 / 读取期间切歌 → 保持就绪或丢弃过期结果，不能回 NOT_READY。
+    /// </summary>
+    private static void TestThumbnailState()
+    {
+        Console.WriteLine("R18 封面状态机（切歌后封面不变仍需就绪）");
+
+        var state = new ThumbnailState();
+        Check("R18 初始：未就绪且无数据", !state.Ready && !state.TryGet(out _));
+
+        bool current = true;
+        byte[] cover = { 0x11, 0x22, 0x33 };
+        Check("R18 首曲读完：就绪 + 有数据 + 通知上层",
+              state.TrySetIfCurrent(() => current, cover, "hashA", out bool notify1) &&
+              notify1 && state.Ready && state.TryGet(out byte[]? got1) && ReferenceEquals(got1, cover));
+
+        Check("R18 同曲目同字节重复：保持就绪，不重复通知",
+              state.TrySetIfCurrent(() => current, cover, "hashA", out bool notify2) &&
+              !notify2 && state.Ready && state.TryGet(out byte[]? got2) && ReferenceEquals(got2, cover));
+
+        state.Reset();
+        Check("R18 切歌瞬间：立刻未就绪并清空旧图", !state.Ready && !state.TryGet(out _));
+
+        Check("R18 切歌后封面字节不变：仍通知上层（不能按旧哈希去重挡掉）",
+              state.TrySetIfCurrent(() => current, cover, "hashA", out bool notify3) &&
+              notify3 && state.Ready && state.TryGet(out byte[]? got3) && ReferenceEquals(got3, cover));
+
+        state.Reset();
+        current = false;
+        byte[] stale = { 0x44 };
+        Check("R18 过期读取结果（读取期间切歌）：丢弃且不把状态写成就绪",
+              !state.TrySetIfCurrent(() => current, stale, "hashB", out _) &&
+              !state.Ready && !state.TryGet(out _));
+
+        current = true;
+        Check("R18 无封面结论：就绪 + data=null（按 §11 回空资源，不是 NOT_READY）",
+              state.TrySetIfCurrent(() => current, null, null, out bool notify4) &&
+              notify4 && state.Ready && state.TryGet(out byte[]? none) && none == null);
+    }
+
     /// <summary>写一个两行的合法 LRC（R17 用）。</summary>
     private static void WriteLrcFile(string path, string first = "第一行", string second = "第二行")
         => File.WriteAllText(path, $"[00:00.00]{first}\n[00:01.00]{second}\n", new UTF8Encoding(false));
@@ -1626,6 +1670,8 @@ internal static class Program
         TestLyricResource();
         Console.WriteLine();
         TestLyricMatching();
+        Console.WriteLine();
+        TestThumbnailState();
 
         Console.WriteLine($"\n=== 通过 {_pass} 项，失败 {_fail} 项 ===");
         return _fail == 0 ? 0 : 1;

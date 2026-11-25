@@ -32,6 +32,8 @@
 * **进度外推**：Playing 状态下按 `timeline.LastUpdatedTime + PlaybackRate` 持续外推（Chrome 等不频繁刷新 Timeline 的播放器也能得到连续进度）；进入 Playing 的瞬间用 `_resumeBasePosition/_resumeBaseTime` 作锚点，消除"暂停→恢复"时把整段暂停时长虚增进首个同步包的问题；结果再做 `[0, EndTime]` 钳位。
 * **残留清理（重要）**：若当前会话已不在 `SessionManager.GetSessions()` 中（播放器退出 / 会话被关闭），`DetachIfSessionGone()` 会执行 `DetachCurrentSession(notify: true)` —— 解绑事件、重置播放状态与锚点、**清空 `CurrentTitle` / `CurrentArtist` / `CurrentAlbum`**，并触发 `MediaCleared` 事件。
   不清场的话，三个缓存字段会一直保留上一首的值，界面与托盘会"假装还在播放"，而 `GetCurrentProgress()` 其实已经返回 `null`。
+* **封面状态（`ThumbnailState`）**：换曲时**同步** `Reset()`（`ready=false` / `data=null` / 摘要=null），新曲目读取完成前资源层只回 `ACK(NOT_READY)`；读取结果在锁内校验 `sender/seq` 后原子写入，读取期间切歌的旧结果直接丢弃。`TryGetThumbnailForCurrentTrack()` 是唯一判据：`false` = 还没读，`true + null` = 确实无封面（§11 空资源），`true + bytes` = 正常资源。
+  过去 `NewProtocolStack` 另维护 `_thumbEventForTrack`，在"会话建立 / 同曲目重复 MediaPropertiesChanged / 切歌后封面字节不变"时会被清零，而 `SmtcService` 又按哈希去重不再触发 `OnThumbnailUpdated` —— 结果封面其实已可用，资源层却一直回 `NOT_READY`（表现：连接后要切一次歌才出封面）。现在删除了这个重复状态，只保留 `SmtcService` 一份。
 * **上层约定**：`PackageMaster` 订阅 `MediaCleared` 后**只清上位机侧状态**（复位统计量 → `LyricService.LoadAndParse("", "", "")` 发布空歌词 → `Invalidate()` 清账本 → 主动触发一次 `LyricChanged(-1, 空行)` 清掉界面预览），**不向硬件下发任何清场/停止包**，硬件保留最后一帧画面。
 * **清屏/复位走既有通路**：无歌曲状态下重新点一次「开始连接」，会补发一次空元数据（`0x10` 三个字段长度均为 0），硬件以该帧作为复位参考信号自行清屏 —— 见 readme 协议说明里的注记。
 
@@ -428,7 +430,7 @@ TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）�
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
-| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 多种命名 / 格式插件）**（共 154 项） |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 多种命名 / 格式插件）** + **R18 封面状态机（换曲同步失效 / 同字节封面仍通知 / 过期读取丢弃）**（共 161 项） |
 | C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **143 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**） |
 | 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
 | 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |

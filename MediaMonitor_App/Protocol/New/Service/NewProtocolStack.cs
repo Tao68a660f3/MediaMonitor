@@ -46,7 +46,6 @@ namespace MediaMonitor.Protocol.New.Service
         private bool _wantConnect;
         private bool _disposed;
         private bool _tearingDown;             // 主动拆链路标志：抑制传输层回抛的"断线"事件
-        private bool _thumbEventForTrack;      // 当前曲目是否已经有过封面事件（用于区分"没封面"与"还没读出来"）
         private ProtocolState _lastSessionState = ProtocolState.Idle;   // 用于区分"状态跃迁"与"同状态重复通知"
 
         /* ---- 连接 / 重试：重试次数与退避都定义在 NpReconnectPolicy 里 ---- */
@@ -651,7 +650,6 @@ namespace MediaMonitor.Protocol.New.Service
             {
                 case ProtocolState.Active:
                     Emit(NpLogLevel.Info, $"会话建立：SESSION_ID=0x{_session?.SessionId:X8}（时间轴 {_cfg.SyncIntervalMs}ms）");
-                    _thumbEventForTrack = false;
                     LoadLyricsForCurrent();
                     PublishMediaNow();                        // §6：会话建立后补推一次元数据
                     _timeline?.PublishNow();                  // §7：先补发当前进度…
@@ -700,8 +698,6 @@ namespace MediaMonitor.Protocol.New.Service
 
         private void OnMediaUpdated(GlobalSystemMediaTransportControlsSessionMediaProperties props)
         {
-            _thumbEventForTrack = false;
-
             if (!_wantConnect)
             {
                 return;                                       // 未启用新协议栈（Legacy 模式）：不重复解析歌词
@@ -715,8 +711,6 @@ namespace MediaMonitor.Protocol.New.Service
 
         private void OnMediaCleared()
         {
-            _thumbEventForTrack = false;
-
             if (!_wantConnect)
             {
                 return;
@@ -738,9 +732,7 @@ namespace MediaMonitor.Protocol.New.Service
 
         private void OnThumbnailUpdated(byte[]? raw)
         {
-            // 有事件就说明"读过了"：null 才是真的没封面（此时按 §11 发**空资源 FORMAT=0x00**，而不是 NOT_READY）
-            _thumbEventForTrack = true;
-
+            // 封面状态由 SmtcService.ThumbnailState 统一维护；这里只做日志。
             if (_wantConnect)
             {
                 Emit(NpLogLevel.Info, (raw == null)
@@ -768,12 +760,14 @@ namespace MediaMonitor.Protocol.New.Service
                 return null;                                  // 未知资源类型 → NOT_READY（保持与 C 侧一致）
             }
 
-            if (!_thumbEventForTrack)
+            // 封面状态由 SmtcService 统一维护：false = 还没读完（§9.8 NOT_READY）；
+            // true + thumbnail==null = 确实没有封面（§11 空资源）；true + bytes = 正常资源。
+            if (!_smtc.TryGetThumbnailForCurrentTrack(out byte[]? thumbnail))
             {
                 return null;                                  // NOT_READY：SMTC 还没读完封面，对端换新 REQUEST_ID 重试
             }
 
-            NpResourceData? art = ArtworkResourceBuilder.Build(_smtc.CurrentThumbnail, width, height, format, quality, out string? err);
+            NpResourceData? art = ArtworkResourceBuilder.Build(thumbnail, width, height, format, quality, out string? err);
             if (art == null)
             {
                 Emit(NpLogLevel.Error, $"封面构造失败：{err}");

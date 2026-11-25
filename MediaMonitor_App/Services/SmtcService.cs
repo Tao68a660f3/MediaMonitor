@@ -31,13 +31,25 @@ namespace MediaMonitor.Services
         public string? CurrentAlbum { get; private set; }
 
         /// <summary>
-        /// 当前曲目的封面「原始字节」（SMTC 直出，未做任何缩放/重编码）；null = 无封面或当前无会话。
+        /// 当前曲目的封面「原始字节」（SMTC 直出，未做任何缩放/重编码）；
+        /// null = 无封面 / 还没读完 / 当前无会话。
         ///
         /// <para>本类只负责<b>抓取 + 在内存里存着</b>：要压缩到指定分辨率请用 <c>Tools/ArtworkProcessor</c>，
         /// 将来新协议下发也直接从这里取，不必再动抓取层。</para>
         /// <para>注意：当前的 0xAA/0xAB 协议属于 legacy，<b>不会</b>用到这个字段。</para>
         /// </summary>
-        public byte[]? CurrentThumbnail { get; private set; }
+        public byte[]? CurrentThumbnail => _thumbState.Data;
+
+        /// <summary>当前曲目的封面是否已经读取完成（含"确实没有封面"）。仅供诊断/日志。</summary>
+        public bool ThumbnailReadyForCurrentTrack => _thumbState.Ready;
+
+        /// <summary>
+        /// 原子读取"当前曲目的封面读取结果"：
+        /// <para>true = 已读完；<paramref name="data"/> 为 null 表示**确实没有封面**（应按 §11 回空资源 FORMAT=0x00）；</para>
+        /// <para>false = 还没读完（应按 §9.8 回 ACK(NOT_READY)，等对端用新 REQUEST_ID 重试）。</para>
+        /// 与换曲共用同一把锁，保证不会出现"就绪=true 但拿到上一首封面"或"刚切歌仍回旧图"。
+        /// </summary>
+        public bool TryGetThumbnailForCurrentTrack(out byte[]? data) => _thumbState.TryGet(out data);
 
         private GlobalSystemMediaTransportControlsSessionManager? _manager;
         private GlobalSystemMediaTransportControlsSession? _currentSession;
@@ -59,15 +71,11 @@ namespace MediaMonitor.Services
         // 只有"最后一次触发的事件"序号最新才允许生效，旧事件的延迟完成直接丢弃。
         private long _mediaUpdateSeq = 0;
 
-        // 封面内容摘要（SHA256 十六进制）：SMTC 在同一首歌上会反复发 MediaPropertiesChanged，
-        // 用它去重，避免重复解码、重复通知；切会话时连同缓存一起清掉，保证新会话首帧一定生效。
-        private string? _thumbHash;
-        /// <summary>
-        /// 是否已经把"当前曲目有/无封面"这件事通知过上层。
-        /// 必须与 `_thumbHash` 一起参与去重：单靠 hash 会把"无封面（null）"的首个事件也挡掉
-        /// —— 上层就永远等不到通知，只能一直回 `ACK(NOT_READY)`（实测踩过：mock 重试 10 次放弃）。
-        /// </summary>
-        private bool _thumbNotified;
+        // 当前曲目的封面状态：曲目切换、读取完成、同曲目去重、数据/就绪的原子切换都在这里。
+        // 过去 SmtcService 用 _thumbHash/_thumbNotified、NewProtocolStack 再维护一个 _thumbEventForTrack，
+        // 两边状态在"切歌 + 同字节封面 + 系统连发多个 MediaPropertiesChanged"时会不同步，
+        // 表现为封面其实已经可用，资源层却一直回 ACK(NOT_READY)。现在只保留这一个事实源。
+        private readonly ThumbnailState _thumbState = new ThumbnailState();
 
         public event Action<GlobalSystemMediaTransportControlsSessionPlaybackStatus>? PlaybackChanged;
         public Action<GlobalSystemMediaTransportControlsSessionMediaProperties>? OnMediaUpdated;
@@ -150,10 +158,9 @@ namespace MediaMonitor.Services
             CurrentArtist = null;
             CurrentAlbum = null;
 
-            // 封面缓存同理（不触发 OnThumbnailUpdated：会话消失按既有约定不下发、不提示）
-            CurrentThumbnail = null;
-            _thumbHash = null;
-            _thumbNotified = false;      // 下次会话的首个封面事件必须能发出去
+            // 封面状态同理：清空数据/就绪/去重（下一次会话的首个封面事件必须能发出去）。
+            // 不触发 OnThumbnailUpdated：会话消失按既有约定不下发、不提示。
+            _thumbState.Reset();
 
             if (notify && hadSession)
                 MediaCleared?.Invoke();
@@ -274,12 +281,15 @@ namespace MediaMonitor.Services
                     if (string.IsNullOrEmpty(props.Title))
                         return;
 
-                    // 是否换曲：换曲时封面去重状态要清零 —— 否则"新曲目封面字节与上一首相同"
-                    // （同专辑/同封面）会被哈希去重挡掉，上层等不到 OnThumbnailUpdated，
-                    // 对端请求封面时只能一直收到 ACK(NOT_READY)（实测踩过）。
+                    // 是否换曲：换曲时**同步**让旧封面失效（ready=false / data=null / 去重清零），
+                    // 新曲目的封面读取完成后才重新就绪；即使新旧封面字节完全相同，
+                    // 也不能沿用上一首的"已通知/已就绪"状态（规范 §9.8 / §11.2）。
                     bool trackChanged = (CurrentTitle != props.Title)
                                      || (CurrentArtist != props.Artist)
                                      || (CurrentAlbum != props.AlbumTitle);
+
+                    if (trackChanged)
+                        _thumbState.Reset();
 
                     CurrentTitle = props.Title; // 赋值
                     CurrentArtist = props.Artist; // 赋值
@@ -288,7 +298,7 @@ namespace MediaMonitor.Services
 
                     // 封面走独立异步支线：不阻塞元数据/歌词路径；
                     // 内部自带 try/catch 与 sender/seq 校验，不会产生未观察异常、也不会让旧封面盖新封面。
-                    _ = UpdateThumbnailAsync(sender, props.Thumbnail, seq, trackChanged);
+                    _ = UpdateThumbnailAsync(sender, props.Thumbnail, seq);
                 }
             }
             catch (Exception ex)
@@ -299,23 +309,22 @@ namespace MediaMonitor.Services
         }
 
         /// <summary>
-        /// 读取 SMTC 封面原始字节并缓存到 <see cref="CurrentThumbnail"/>（不做缩放/重编码，压缩交给 Tools/ArtworkProcessor）。
+        /// 读取 SMTC 封面原始字节并写入当前曲目的封面状态（不做缩放/重编码，压缩交给 Tools/ArtworkProcessor）。
         ///
-        /// <para>三点防护与既有元数据路径完全同构：</para>
+        /// <para>三点防护：</para>
         /// <list type="bullet">
         /// <item>整段 try/catch：会话消亡（播放器退出/切歌瞬间）OpenReadAsync 会抛 COMException(0x80030070)；</item>
-        /// <item>await 完成后再校验 sender + seq：切歌/切会话瞬间系统会连发多个事件，
+        /// <item><b>在状态锁内</b>校验 sender + seq：切歌/切会话瞬间系统会连发多个事件，
         /// 且完成顺序不保证与触发顺序一致，旧事件的延迟完成必须丢弃；</item>
-        /// <item>内容摘要去重：同一首歌反复触发 MediaPropertiesChanged（Chrome 尤甚）时不重复处理、不重复通知。
-        /// <b>但去重只针对"同一曲目内的重复事件"</b>：每个曲目的**首个**事件必须发出去（哪怕结果是"无封面"），
-        /// 否则上层无法区分"这首没封面"（应按 §11 发空资源）与"还没读出来"（回 ACK(NOT_READY)）。</item>
+        /// <item>内容摘要去重：同一首歌反复触发 MediaPropertiesChanged（Chrome 尤甚）时不重复通知。
+        /// <b>但换曲时 <see cref="ThumbnailState.Reset"/> 已同步清掉就绪标记</b>，所以
+        /// "新曲目封面字节与上一首相同"仍会通知（规范 §9.8-3 / §11.2 要求区分"没读出来"与"就是没有"）。</item>
         /// </list>
         /// </summary>
         private async Task UpdateThumbnailAsync(
             GlobalSystemMediaTransportControlsSession sender,
             IRandomAccessStreamReference? reference,
-            long seq,
-            bool trackChanged)
+            long seq)
         {
             byte[]? raw = null;
 
@@ -340,29 +349,19 @@ namespace MediaMonitor.Services
                 System.Diagnostics.Debug.WriteLine($"SMTC 封面读取失败: {ex.Message}");
             }
 
-            // 过期结果：会话已切换，或已有更新的属性事件发出 → 直接丢弃
-            if (sender != _currentSession || seq != Volatile.Read(ref _mediaUpdateSeq))
-                return;
-
-            if (trackChanged)
-            {
-                // 换曲：去重状态清零（否则"与上一首封面字节相同"的新曲目会被当成重复事件挡掉）
-                _thumbHash = null;
-                _thumbNotified = false;
-            }
-
             string? hash = raw == null ? null : Convert.ToHexString(SHA256.HashData(raw));
 
-            // 去重只针对"同一曲目内的重复事件"：_thumbNotified 保证**每个曲目的首个事件一定发出去**
-            // —— 哪怕 raw == null（= 这首真的没封面）。少这一条，上层就永远等不到通知，
-            // 只能一直回 ACK(NOT_READY)（规范 §11 要求"无封面"用空资源 FORMAT=0x00 表达）。
-            if (_thumbNotified && (hash == _thumbHash))
-                return;
+            // 在状态锁内再次校验 sender/seq：避免"读取期间刚好切歌"时把旧曲目封面
+            // 写成新曲目的就绪状态。同曲目同字节只通知一次；换曲后的首个结果一定通知。
+            bool accepted = _thumbState.TrySetIfCurrent(
+                () => sender == _currentSession && seq == Volatile.Read(ref _mediaUpdateSeq),
+                raw, hash, out bool notify);
 
-            _thumbHash = hash;
-            _thumbNotified = true;
-            CurrentThumbnail = raw;
-            OnThumbnailUpdated?.Invoke(raw);
+            if (!accepted)
+                return;   // 过期结果：会话已切换 / 已有更新的属性事件发出
+
+            if (notify)
+                OnThumbnailUpdated?.Invoke(raw);
         }
 
         /// <summary>
@@ -446,6 +445,82 @@ namespace MediaMonitor.Services
                 );
             }
             catch { return null; }
+        }
+    }
+
+    /// <summary>
+    /// 当前曲目的封面状态（<see cref="SmtcService"/> 内部使用）：
+    /// 统一管理"是否读完 / 原始字节 / 内容摘要"，并用一把锁保证读方看到的
+    /// <c>ready</c> 与 <c>data</c> 永远属于同一曲目。
+    ///
+    /// <para>换曲时 <see cref="Reset"/> 必须**同步**执行（在发送 MEDIA 之前）：
+    /// 新曲目封面读取完成前，资源层只能回 <c>ACK(NOT_READY)</c>；
+    /// 读完后即使字节与上一首完全相同，也会因 <c>ready=false</c> 而重新通知一次，
+    /// 不会被"同曲目同字节"去重挡掉（规范 §9.8-3 / §11.2）。</para>
+    /// </summary>
+    internal sealed class ThumbnailState
+    {
+        private readonly object _gate = new object();
+
+        private bool _ready;
+        private string? _hash;
+        private byte[]? _data;
+
+        public bool Ready
+        {
+            get { lock (_gate) return _ready; }
+        }
+
+        public byte[]? Data
+        {
+            get { lock (_gate) return _data; }
+        }
+
+        /// <summary>换曲 / 会话消失：旧封面立即失效，等待下一次读取结果。</summary>
+        public void Reset()
+        {
+            lock (_gate)
+            {
+                _ready = false;
+                _hash = null;
+                _data = null;
+            }
+        }
+
+        /// <summary>原子读取：<c>true</c> = 已读完（<paramref name="data"/> 为 null 表示确实无封面）；<c>false</c> = 还没读完。</summary>
+        public bool TryGet(out byte[]? data)
+        {
+            lock (_gate)
+            {
+                data = _data;
+                return _ready;
+            }
+        }
+
+        /// <summary>
+        /// 写入一次读取结果。字符串 <paramref name="hash"/> 用于"同一曲目内相同字节"去重。
+        /// <paramref name="stillCurrent"/> 在锁内执行，调用方在这里校验 sender/seq，
+        /// 保证"读取期间切歌"的旧结果不会写成新曲目的就绪状态。
+        /// 返回 false = 结果已过期，调用方丢弃；<paramref name="notify"/> = 是否需要通知上层。
+        /// </summary>
+        public bool TrySetIfCurrent(Func<bool> stillCurrent, byte[]? data, string? hash, out bool notify)
+        {
+            lock (_gate)
+            {
+                notify = false;
+
+                if (!stillCurrent())
+                    return false;
+
+                if (_ready && string.Equals(hash, _hash, StringComparison.Ordinal))
+                    return true;                       // 同曲目同字节：保持就绪，不重复通知
+
+                _data = data;
+                _hash = hash;
+                _ready = true;
+                notify = true;
+                return true;
+            }
         }
     }
 }
