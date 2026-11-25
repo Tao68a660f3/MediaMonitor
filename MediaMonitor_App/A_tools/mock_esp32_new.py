@@ -1201,6 +1201,8 @@ class MockServer:
         """真正发一条 REQUEST；rid 由 C 侧分配（每次调用都是新 rid）"""
         if why is None:
             why = self._res["reasons"].pop(kind, "首次")
+        else:
+            self._res["reasons"].pop(kind, None)
         if kind == "lyrics":
             queued = self.dll.np_dll_send_request_lyrics()
         else:

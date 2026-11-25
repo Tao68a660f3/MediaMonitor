@@ -28,7 +28,6 @@ namespace MediaMonitor.Protocol.New.Service
             public uint RequestId;
             public NpResourceData Data = null!;
             public ulong Sha64;
-            public uint BeginSeq;
             public uint EndSeq;
         }
 
@@ -39,7 +38,7 @@ namespace MediaMonitor.Protocol.New.Service
         private Transfer? _current;
 
         public long StatRequests, StatTransfers, StatBytes, StatAborted;
-        public long StatNotReady, StatRejected, StatCacheHits, StatAckFail, StatTooLarge, StatNotModified;
+        public long StatNotReady, StatRejected, StatAckFail, StatTooLarge, StatNotModified;
 
         public string LastAbortReason { get; private set; } = "";
         public byte LastAckStatus { get; private set; }
@@ -185,7 +184,7 @@ namespace MediaMonitor.Protocol.New.Service
 
             _session.SendAck(f.Sequence, f.RequestId, (byte)NpAckStatus.Ok);   // 先接受请求
 
-            t.BeginSeq = SendBegin(t);
+            SendBegin(t);
 
             int total = data.Data.Length;
             int off = 0;
@@ -222,14 +221,8 @@ namespace MediaMonitor.Protocol.New.Service
                     StatAckFail++;          // 对端报错（校验失败等）→ 上层可决定重传或提示
                 }
             }
-            else if ((acked == t.BeginSeq) && (status == (byte)NpAckStatus.Ok))
-            {
-                // 对端缓存命中（规范 §9.3）：可提前结束本次传输。
-                // 注意：V1.x 发送端不等待 BEGIN 的 ACK 就开始发 DATA，因此这里**省不了带宽**，
-                // 只省掉对端后续的处理；下位机把缓存命中做得更早即可自然受益。
-                StatCacheHits++;
-                _current = null;
-            }
+            // 规范 §5.6：资源 BEGIN 不置 ACK_REQUIRED，必须回 ACK 的只有 END。
+            // 因此这里不再处理“BEGIN 的 ACK”；收到不属于 END_SEQ 的 ACK 直接忽略。
         }
 
         /// <summary>中止当前资源传输（切歌 / 资源过期）：发 ABORT，对端应丢弃其缓存</summary>
@@ -250,7 +243,7 @@ namespace MediaMonitor.Protocol.New.Service
 
         /* ---------------- 分片构造 ---------------- */
 
-        private uint SendBegin(Transfer t)
+        private void SendBegin(Transfer t)
         {
             bool isCover = t.Type == NpType.AlbumCover;
             bool withSha64 = _session.RemoteCaps?.Has(NpCapsBits.ResourceCache) == true;
@@ -272,7 +265,7 @@ namespace MediaMonitor.Protocol.New.Service
                 NpWriter.WriteU64(pay.AsSpan(baseLen), t.Sha64);
             }
 
-            return _session.SendResourceFrame(t.Type, NpResCode.Begin, t.RequestId, pay, 0);
+            _session.SendResourceFrame(t.Type, NpResCode.Begin, t.RequestId, pay, 0);
         }
 
         private void SendData(Transfer t, int offset, int length)
