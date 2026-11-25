@@ -1146,6 +1146,7 @@ class MockServer:
             "inflight": None,                 # {"kind","rid","phase","sent","deadline"}
             "retry": {"lyrics": 0, "cover": 0},
             "done": {},                       # kind → "已收齐" / "放弃：原因"
+            "reasons": {},                    # kind → 本次排队原因（日志用，不代表协议状态）
             "last_ack": "",
         }
         self._res_result = None               # 最近一份资源的处理结果 {"rid","status"}，供 END 帧回 ACK 用
@@ -1182,6 +1183,7 @@ class MockServer:
             return                                     # 已经排上 / 在途 → 不重复插队
 
         r["queue"].append(kind)
+        r["reasons"][kind] = reason
         self.log("计划请求 %s（%s）%s"
                  % (kind, reason,
                     "；当前在途 %s，串行排队" % r["inflight"]["kind"] if r["inflight"] else ""))
@@ -1195,8 +1197,10 @@ class MockServer:
             return
         self._res_send(r["queue"].pop(0))
 
-    def _res_send(self, kind, why="首次"):
+    def _res_send(self, kind, why=None):
         """真正发一条 REQUEST；rid 由 C 侧分配（每次调用都是新 rid）"""
+        if why is None:
+            why = self._res["reasons"].pop(kind, "首次")
         if kind == "lyrics":
             queued = self.dll.np_dll_send_request_lyrics()
         else:
@@ -1206,6 +1210,7 @@ class MockServer:
         if not queued:
             self.log("⚠ %s REQUEST 入队失败（会话未建立 / 发送队列满）" % kind)
             self._res["queue"].insert(0, kind)         # 放回队首，下个 tick 再试
+            self._res["reasons"][kind] = why
             return
 
         rid = self.dll.np_dll_last_rid()
@@ -1342,6 +1347,7 @@ class MockServer:
         if kind in r["queue"]:
             r["queue"].remove(kind)
         r["queue"].insert(0, kind)
+        r["reasons"][kind] = "%s 后重来" % why
         self._res_push_state()
         self._res_pump(True)
 
@@ -1620,6 +1626,9 @@ class MockServer:
             return
 
         self._res_refresh_pending = False
+        # 这里不主动清 C 缓存：SHA64 是“内容身份”，不是“曲目身份”。
+        # 新曲目请求仍可能带上一曲的 SHA64；PC 会用“当前曲目资源的 SHA64”比较：
+        # 不同 → 整份传（歌词通常如此），相同 → NOT_MODIFIED（同专辑封面常见）。
         self._reset_res_state()
         self._res_want("lyrics", "收到 MEDIA（新曲目/重复帧）→ 自动拉歌词", active=active)
         self._res_want("cover", "收到 MEDIA（新曲目/重复帧）→ 自动拉封面", active=active)
