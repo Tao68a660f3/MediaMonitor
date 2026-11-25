@@ -378,7 +378,7 @@ namespace MediaMonitor.Protocol.New.Service
         }
 
         private uint SendRaw(uint sid, uint rid, byte flags, byte type, byte code,
-                             byte[]? payload, bool needAck)
+                             byte[]? payload, bool needAck, NpPriority? priorityOverride = null)
         {
             // 规范 §5.6（V1.1-21）：需要对方回 ACK 的帧必须置 FLAGS.ACK_REQUIRED。
             // 注意两者语义不同、不能互相推导：ACK_REQUIRED = 对方要不要回；
@@ -409,7 +409,7 @@ namespace MediaMonitor.Protocol.New.Service
                 return 0;
             }
 
-            _scheduler.Enqueue(PriorityOf(type), bytes);
+            _scheduler.Enqueue(priorityOverride ?? PriorityOf(type), bytes);
 
             if (needAck)
             {
@@ -425,6 +425,18 @@ namespace MediaMonitor.Protocol.New.Service
         /// </summary>
         public uint SendResourceFrame(byte type, byte code, uint requestId, byte[]? payload, byte flags)
             => SendRaw(SessionId, requestId, flags, type, code, payload, false);
+
+        /// <summary>
+        /// 撤销旧资源：先清掉 Resource 队列里尚未发出的 DATA/END，再用 System 优先级把 ABORT 插到前面。
+        /// 不这样做的话，ABORT 会和旧 DATA/END 一起排在 Resource 队列尾部，
+        /// 新 REQUEST 已经开始、旧 rid 的 END 还在到达（接收方只能按 §9.7 丢弃并告警）。
+        /// </summary>
+        public void CancelPendingResources()
+            => _scheduler.Clear(NpPriority.Resource);
+
+        /// <summary>资源 ABORT 以 System 优先级发送（不要求 ACK）。</summary>
+        public uint SendResourceAbort(byte type, uint requestId)
+            => SendRaw(SessionId, requestId, 0, type, NpResCode.Abort, null, false, NpPriority.System);
 
         private void StoreSlot(uint seq, uint sid, uint rid, byte flags, byte type, byte code, byte[] payload)
         {

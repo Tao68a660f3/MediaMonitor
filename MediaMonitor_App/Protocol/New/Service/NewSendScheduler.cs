@@ -73,6 +73,22 @@ namespace MediaMonitor.Protocol.New.Service
             _signal.Release();
         }
 
+        /// <summary>
+        /// 丢弃某个优先级队列里尚未发出的帧。
+        /// 用途：新 REQUEST 作废旧资源时，旧 DATA/END 可能还排在 Resource 队列里；
+        /// 必须先清掉它们，再发 ABORT，否则旧帧会在新资源之后继续到达（§9.7 的旧 rid 尾巴）。
+        /// </summary>
+        public int Clear(NpPriority priority)
+        {
+            lock (_gate)
+            {
+                Queue<byte[]> q = _queues[(int)priority];
+                int n = q.Count;
+                q.Clear();
+                return n;
+            }
+        }
+
         public int PendingCount
         {
             get

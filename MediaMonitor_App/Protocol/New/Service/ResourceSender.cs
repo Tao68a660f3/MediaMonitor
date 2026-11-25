@@ -222,7 +222,8 @@ namespace MediaMonitor.Protocol.New.Service
             }
 
             _current = null;
-            _session.SendResourceFrame(t.Type, NpResCode.Abort, t.RequestId, null, 0);
+            _session.CancelPendingResources();               // 丢掉旧 transfer 尚未发出的 DATA/END
+            _session.SendResourceAbort(t.Type, t.RequestId); // ABORT 用 System 优先级插到前面
             StatAborted++;
             LastAbortReason = reason;
         }

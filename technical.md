@@ -352,8 +352,11 @@ UI/ProtocolStackView.cs  ← 主窗口只认这个接口（当前模式 → 一�
 * **V1.1 基线**：`MediaMonitor_App/A_tools/v1_1_baseline/` 保留了旧 mock + 旧 DLL，用于验证新 PC 对旧 ESP32 的兼容性。
 * **重复 MEDIA 与资源排队**：PC **不在 `OnMediaUpdated` 里 Abort**（播放器会对同一首歌连发多个属性事件，逐个 Abort 会打断正在传的歌词/封面）；
   旧资源由新的 `REQUEST` 在 `ResourceSender.HandleRequest` 里 Abort（§9.7 N-13）。
-  mock 也**不再按 `(title, artist, album)` 去重 MEDIA**（不同曲目可能三个字段完全相同），每次 MEDIA 都重新请求；
-  V1.2 缓存会把"内容没变"吸收成 `NOT_MODIFIED`，同时保证"同元数据的新曲目"也不会漏更新。
+  mock **不再按 `(title, artist, album)` 做永久去重**（不同曲目可能三个字段完全相同）；但资源在途时不会 Reset/重排，
+  而是记一个“排空后刷新”，先让当前传输完成（缓存建立），排空后再按最新 MEDIA 重问：
+  内容没变 → `NOT_MODIFIED`；同元数据但内容变了的新曲目 → 正常传新资源。
+* **Abort 的发送顺序**：`ResourceSender.AbortCurrent` 先 `CancelPendingResources()` 清掉 Resource 队列里尚未发出的旧 DATA/END，
+  再用 **System 优先级**发 ABORT；否则 ABORT 会排在旧 DATA/END 后面，新 REQUEST 已开始、旧 rid 的 END 还在到达（接收方只能按 §9.7 丢弃并告警）。
 * **缓存失效边界**：`HAS_KNOWN_CRC32=1` 只代表"ESP32 此刻仍实际持有该资源"；应用一旦清空/覆盖歌词或封面，
   必须使对应缓存失效（C API：`np_dll_res_cache_clear_for(type)`），否则 PC 可能回 `NOT_MODIFIED` 而屏幕上已无资源。
 * **GUI 日志**：`MockServer._events` 是 `deque(maxlen=500)`，事件带单调 `seq`；GUI 按 `seq` 增量追加，

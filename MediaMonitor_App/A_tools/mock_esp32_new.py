@@ -883,6 +883,7 @@ class MockServer:
         self._last_sid = 0
         self._peer_caps = 0
         self._cache_probe_done = False
+        self._res_refresh_pending = False
         self._reset_res_state()
         self._reset_lat_state()
         last_state = None
@@ -1018,9 +1019,19 @@ class MockServer:
             # "要不要回"由位决定，"回什么 STATUS"由处理结果决定 —— 下面谁处理了谁回。
             need_ack = (f.flags & NP_FLAG_ACK_REQUIRED) != 0
             acked = False
+            suppress_missing_ack = False
 
             if f.type in (5, 6):
                 ev = self.dll.np_dll_res_on_frame(ctypes.byref(f))
+                if (ev == 0) and (f.code == 0x04):
+                    infl = self._res["inflight"]
+                    is_empty_done = (self._res_result is not None) and \
+                                     (self._res_result["rid"] == f.request_id)
+                    if (not is_empty_done) and ((infl is None) or (f.request_id != infl["rid"])):
+                        self.log("旧 rid=%d 的 %s END 静默丢弃（§9.7；当前在途 %s）"
+                                 % (f.request_id, KIND_NAMES.get(f.type, f.type),
+                                    ("%s rid=%d" % (infl["kind"], infl["rid"])) if infl else "无"))
+                        suppress_missing_ack = True
                 if ev == 1:
                     self.log("资源 BEGIN（%s rid=%d）" % (KIND_NAMES.get(f.type, f.type), f.request_id))
                     self._res_activity(f)
@@ -1113,7 +1124,7 @@ class MockServer:
 
             # 安全网（§5.6 约定表）：置了 ACK_REQUIRED 却没有处理层回 ACK 的帧，明确报出来 ——
             # 否则对端会一直等 ACK 到超时，而日志里什么都看不到（这正是"END 漏 ACK"当初的样子）。
-            if need_ack and (not acked):
+            if need_ack and (not acked) and (not suppress_missing_ack):
                 self.log("⚠ T=0x%02X C=0x%02X 置了 ACK_REQUIRED 但本端没有对应处理层 → 未回 ACK"
                          "（收到该帧的一方本应回 ACK）" % (f.type, f.code))
 
@@ -1267,6 +1278,25 @@ class MockServer:
             self._res_want("cover", "缓存探针", active=True)
         self._res_push_state()
         self._res_pump(True)
+        self._res_maybe_refresh()
+
+    def _res_maybe_refresh(self):
+        """MEDIA 在资源在途时合并成一次“排空后刷新”：等当前队列清空再按最新 MEDIA 重问。
+
+        这样第一份资源能正常 DONE（缓存建立），第二次请求才会带 KNOWN_CRC32；
+        如果一收到重复 MEDIA 就 Reset/重排，接收器会从旧 rid 切到新 rid，
+        旧 rid 的 END 被 §9.7 丢弃、缓存也来不及建立，结果就是整份重传 + “没有处理层”警告。
+        """
+        if not self._res_refresh_pending:
+            return
+        r = self._res
+        if (r["inflight"] is not None) or r["queue"]:
+            return
+        self._res_refresh_pending = False
+        self.log("资源队列已排空 → 按最新 MEDIA 重问一次（内容未变应回 NOT_MODIFIED）")
+        self._reset_res_state()
+        self._res_want("lyrics", "MEDIA 刷新", active=True)
+        self._res_want("cover", "MEDIA 刷新", active=True)
 
     def _res_retry_after_loss(self, rtype, rid, why):
         """§9.6 / §9.7：资源没了（ABORT / 校验失败）→ 用新的 REQUEST_ID 重新 REQUEST。
@@ -1397,6 +1427,7 @@ class MockServer:
         self._res_push_state()
         if r["inflight"] is None:
             self._res_pump(True)
+        self._res_maybe_refresh()
 
     # ---- 内部：延迟测量（规范 §14 / §15；本端也能当发起方）----
 
@@ -1556,14 +1587,27 @@ class MockServer:
                     "" if changed else "   [同曲目重复帧，仍重问一次；V1.2 缓存会吸收重复]"))
 
         # 不能按 (title, artist, album) 去重：三个字段都相同的“另一首曲目”是存在的。
-        # 每次都重新请求；V1.2 的 KNOWN_CRC32/NOT_MODIFIED 会把“内容没变”的吸收掉，
-        # 内容变了就正常传新资源。这样同元数据的新曲目也不会漏更新。
+        # 但资源在途时也不能立刻 Reset/重排：那会把接收器从 rid=17 切到 rid=18，
+        # 旧 rid 的 END 到达时按 §9.7 被丢弃，缓存也来不及建立（于是又整份传一次）。
+        # 策略：
+        #   * 元数据明显变了（changed）→ 立即作废旧资源，优先拉新曲目；
+        #   * 元数据相同且资源在途 → 记一个“排空后刷新”，先让当前传输完成（缓存建立），
+        #     排空后再按最新 MEDIA 重问；内容没变就会命中 NOT_MODIFIED。
         if not (title or artist or album):
             self.log("空元数据（当前无媒体）→ 不请求资源，仅清屏")
+            self._res_refresh_pending = False
             self.dll.np_dll_res_cache_clear()      # 无媒体时本地资源视为已清空
             self._reset_res_state()
             return
 
+        r = self._res
+        busy = (r["inflight"] is not None) or bool(r["queue"])
+        if busy and (not changed):
+            self._res_refresh_pending = True
+            self.log("MEDIA 同曲目重复帧：资源在途，等排空后再重问（不打断当前传输）")
+            return
+
+        self._res_refresh_pending = False
         self._reset_res_state()
         self._res_want("lyrics", "收到 MEDIA（新曲目/重复帧）→ 自动拉歌词", active=active)
         self._res_want("cover", "收到 MEDIA（新曲目/重复帧）→ 自动拉封面", active=active)

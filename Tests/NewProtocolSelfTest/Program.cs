@@ -456,7 +456,13 @@ internal static class Program
         pump.Start();
         Console.WriteLine("[demo] 已推送 MEDIA + 启动 TIMELINE；等待对端（mock）拉取歌词与封面...");
 
-        await Task.Delay(12000);
+        // 同曲目重复 MEDIA：故意在第一份资源还在传时再发一次，
+        // 验证 mock 不会 Reset/重排，而是等排空后重问；第二次请求应命中 KNOWN_CRC32 → ACK(NOT_MODIFIED)。
+        await Task.Delay(20);
+        media.Publish("测试歌曲", "测试歌手", "测试专辑");
+        Console.WriteLine("[demo] 已推送同曲目重复 MEDIA（验证缓存命中）...");
+
+        await Task.Delay(11700);
 
         // 切歌：元数据更新 + 时间轴立即补发；若还有资源在途则 ABORT（规范 §9.7 / N-13）
         resources.AbortCurrent("切歌：资源作废");
