@@ -1554,6 +1554,10 @@ internal static class Program
     private static void TestResourceNotModified()
     {
         Console.WriteLine("R19 条件资源请求：相同 SHA64 回 NOT_MODIFIED（不传资源）");
+        Check("R19 SHA64(\"\") == E3B0C44298FC1C14（SHA-256 前 8 字节）",
+              ResourceSha64.Compute(Array.Empty<byte>()) == 0xE3B0C44298FC1C14UL);
+        Check("R19 SHA64(\"abc\") == BA7816BF8F01CFEA",
+              ResourceSha64.Compute(Encoding.ASCII.GetBytes("abc")) == 0xBA7816BF8F01CFEAUL);
 
         byte[] coverBytes = { 0xAA, 0xBB, 0xCC, 0xDD };
         ulong coverSha = ResourceSha64.Compute(coverBytes);

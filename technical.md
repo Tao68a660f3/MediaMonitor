@@ -464,7 +464,7 @@ TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）�
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
-| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 多种命名 / 格式插件）** + **R18 封面状态机（换曲同步失效 / 同字节封面仍通知 / 过期读取丢弃）** + **R19 条件资源请求（KNOWN_SHA64 → NOT_MODIFIED，含空资源与 BEGIN SHA64）**（共 169 项） |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 多种命名 / 格式插件）** + **R18 封面状态机（换曲同步失效 / 同字节封面仍通知 / 过期读取丢弃）** + **R19 条件资源请求（KNOWN_SHA64 → NOT_MODIFIED，含空资源与 BEGIN SHA64）**（共 171 项） |
 | C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **150 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**、**V1.2 条件 REQUEST/NOT_MODIFIED R11**）；`build_dll.bat` 的 `np_dll_selftest` 另含**按资源类型分槽的 SHA64 + 原始数据缓存**检查 |
 | 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
 | 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |
