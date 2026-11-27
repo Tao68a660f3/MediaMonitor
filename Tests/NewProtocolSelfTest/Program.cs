@@ -1302,6 +1302,7 @@ internal static class Program
     /// <summary>
     /// R17：验证"不再依赖文件名 pattern"的匹配算法：
     /// 标题是唯一硬条件；歌手/专辑只影响排序；专辑目录能压过同名不同专辑；
+    /// 歌手/专辑按桶统计完整字段出现次数，同值重复按几何衰减；
     /// 元数据混入音频扩展名、全角、音轨号、紧凑中文文件名都能处理；
     /// 自定义格式（KRC 模拟）通过 <see cref="ILyricParser"/> 注册即可被加载。
     /// </summary>
@@ -1374,6 +1375,44 @@ internal static class Program
                   !svc.IsPlaceholder && svc.LastMatch != null &&
                   svc.LastMatch.Path.Contains("Album Y", StringComparison.OrdinalIgnoreCase));
 
+            // ---- 4b. Album == Title：artist-album-title 的独立专辑命中更多 ----
+            string albumTitle = Path.Combine(root, "album-title");
+            Directory.CreateDirectory(albumTitle);
+            WriteLrcFile(Path.Combine(albumTitle, "游鸿明-狂悲狂喜.lrc"));
+            WriteLrcFile(Path.Combine(albumTitle, "游鸿明-狂悲狂喜-狂悲狂喜.lrc"));
+
+            svc = new LyricService { LyricFolder = albumTitle };
+            svc.LoadAndParse("狂悲狂喜", "游鸿明", "狂悲狂喜");
+            Check("R17 Album==Title：artist-album-title 优先于 artist-title",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  string.Equals(Path.GetFileName(svc.LastMatch.Path),
+                                "游鸿明-狂悲狂喜-狂悲狂喜.lrc",
+                                StringComparison.OrdinalIgnoreCase));
+
+            // ---- 4c. 只有 artist-title 时，唯一一次同名片段仍算 Album 命中，不能淘汰 ----
+            string albumTitleOnly = Path.Combine(root, "album-title-only");
+            Directory.CreateDirectory(albumTitleOnly);
+            WriteLrcFile(Path.Combine(albumTitleOnly, "游鸿明-狂悲狂喜.lrc"));
+
+            svc = new LyricService { LyricFolder = albumTitleOnly };
+            svc.LoadAndParse("狂悲狂喜", "游鸿明", "狂悲狂喜");
+            Check("R17 Album==Title 且只有 artist-title：仍能加载且有 AlbumMatched",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  svc.LastMatch.Flags.HasFlag(LyricMatchFlags.AlbumMatched));
+
+            // ---- 4d. 重复 artist 不是噪声：重复完整歌手名应获得递减奖励 ----
+            string repeatArtist = Path.Combine(root, "repeat-artist");
+            Directory.CreateDirectory(repeatArtist);
+            WriteLrcFile(Path.Combine(repeatArtist, "游鸿明-狂悲狂喜.lrc"));
+            WriteLrcFile(Path.Combine(repeatArtist, "游鸿明-游鸿明-游鸿明-狂悲狂喜.lrc"));
+
+            svc = new LyricService { LyricFolder = repeatArtist };
+            svc.LoadAndParse("狂悲狂喜", "游鸿明", "狂悲狂喜");
+            Check("R17 重复完整歌手名不是噪声：Artist-Artist-Artist-Title 优先",
+                  !svc.IsPlaceholder && svc.LastMatch != null &&
+                  string.Equals(Path.GetFileName(svc.LastMatch.Path),
+                                "游鸿明-游鸿明-游鸿明-狂悲狂喜.lrc",
+                                StringComparison.OrdinalIgnoreCase));
             // ---- 5. 递归扫描 歌手/专辑/标题 ----
             string nested = Path.Combine(root, "nested");
             string nestedDir = Path.Combine(nested, "C Singer", "Album Z");

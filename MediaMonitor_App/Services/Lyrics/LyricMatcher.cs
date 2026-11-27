@@ -195,6 +195,7 @@ namespace MediaMonitor.Services
     /// <list type="number">
     /// <item><b>标题是唯一硬条件</b>：标题没有任何信号的文件直接淘汰；</item>
     /// <item>歌手 / 专辑只影响排序：完全匹配不到时退化为"标题命中"，而不是放弃；</item>
+    /// <item>歌手 / 专辑按“桶”统计完整字段出现次数；同一桶内同名值重复按 1/2、1/4… 几何衰减，标题只做硬锚点；</item>
     /// <item><b>不做任何歌词词表</b>：文件名里多出来的 `(Live)`、`[320k]`、`feat` 等，
     /// 统一按"没有被 Title/Artist/Album 解释的 token"参与覆盖率扣分；</item>
     /// <item>模糊匹配只在没有任何精确/包含候选时启用，作为最后兜底。</item>
@@ -443,7 +444,7 @@ namespace MediaMonitor.Services
                 return null;
             }
 
-            // ---------- 歌手：只加分，匹配不到不淘汰 ----------
+            // ---------- 歌手：只加分，匹配不到不淘汰；同值重复按几何衰减 ----------
             int artistScore = 0;
             bool artistMatched = query.ArtistVariants.Length > 0 &&
                 (MatchesArtist(stemFull, stemFullTokens, query.ArtistVariants) ||
@@ -461,34 +462,39 @@ namespace MediaMonitor.Services
                 artistScore = 20;
             }
 
+            int artistHits = CountArtistHits(stemFull, stemFullTokens, query);
+            int artistRepeat = RepeatBonus(artistScore, artistHits);
+            artistScore += artistRepeat;
+
             if (artistMatched) flags |= LyricMatchFlags.ArtistMatched;
 
-            // ---------- 专辑：目录 20 / 文件名 15 / token 全出现 10 ----------
+            // ---------- 专辑：基础分 + 同值重复几何衰减 ----------
             int albumScore = 0;
             bool albumMatched = false;
             bool albumInPath = false;
+            int albumHits = CountAlbumHits(stemCore, stemCoreTokens, query);
+            int albumRepeat = 0;
 
             if (query.AlbumTokens.Length > 0)
             {
-                if (segments.Any(s => string.Equals(s, query.AlbumCore, StringComparison.Ordinal) ||
-                                      LyricTextNormalizer.ContainsSequence(
-                                          LyricTextNormalizer.Tokens(s), query.AlbumTokens)))
+                albumInPath = segments.Any(s => string.Equals(s, query.AlbumCore, StringComparison.Ordinal) ||
+                                                LyricTextNormalizer.ContainsSequence(
+                                                    LyricTextNormalizer.Tokens(s), query.AlbumTokens));
+
+                if (albumInPath)
                 {
                     albumMatched = true;
-                    albumInPath = true;
                     albumScore = 20;
                 }
-                else if (query.AlbumCore.Length >= 2 &&
-                         stemCore.Contains(query.AlbumCore, StringComparison.Ordinal))
+
+                if (albumHits > 0)
                 {
                     albumMatched = true;
-                    albumScore = 15;
+                    albumScore = albumScore == 0 ? 15 : albumScore + 5; // 目录 + 文件名独立证据
                 }
-                else if (query.AlbumTokens.All(t => stemCoreTokens.Contains(t)))
-                {
-                    albumMatched = true;
-                    albumScore = 10;
-                }
+
+                albumRepeat = RepeatBonus(15, albumHits);
+                albumScore += albumRepeat;
             }
 
             if (albumMatched) flags |= LyricMatchFlags.AlbumMatched;
@@ -518,8 +524,8 @@ namespace MediaMonitor.Services
             if (score < _options.MinimumScore) return null;
 
             string detail =
-                $"title={TitleKind(flags)}, artist={(artistMatched ? "hit" : "-")}, " +
-                $"album={(albumMatched ? (albumInPath ? "dir" : "name") : "-")}, " +
+                $"title={TitleKind(flags)}, artist={(artistMatched ? "hit" : "-")}(hits={artistHits},repeat={artistRepeat}), " +
+                $"album={(albumMatched ? (albumInPath ? "dir" : "name") : "-")}(hits={albumHits},repeat={albumRepeat}), " +
                 $"detail={detailScore}, extras={fullExtras.Length}, pathBonus={pathBonus}";
 
             return new LyricMatch
@@ -529,6 +535,109 @@ namespace MediaMonitor.Services
                 Flags = flags,
                 Detail = detail,
             };
+        }
+
+        /// <summary>专辑完整值在文件名中的出现次数；同一值重复出现才触发几何奖励。</summary>
+        private static int CountAlbumHits(string stemCore, string[] stemTokens, Query query)
+        {
+            if (query.AlbumTokens.Length == 0) return 0;
+
+            int hits = CountOccurrences(stemTokens, query.AlbumTokens);
+            if (hits == 0)
+            {
+                string compact = query.AlbumCore.Replace(" ", "");
+                if (compact.Length >= 2 && LyricTextNormalizer.IsCjk(compact))
+                {
+                    hits = CountSubstringOccurrences(stemCore, compact);
+                }
+            }
+            return hits;
+        }
+
+        /// <summary>歌手完整值在文件名中的最大出现次数（多歌手变体取最匹配的一个，避免变体相加）。</summary>
+        private static int CountArtistHits(string stemFull, string[] stemTokens, Query query)
+        {
+            int best = 0;
+            foreach (string variant in query.ArtistVariants)
+            {
+                string[] tokens = LyricTextNormalizer.Tokens(variant);
+                if (tokens.Length == 0) continue;
+
+                int hits = CountOccurrences(stemTokens, tokens);
+                if (hits == 0 && variant.Length >= 2 && LyricTextNormalizer.IsCjk(variant))
+                {
+                    hits = CountSubstringOccurrences(stemFull, variant);
+                }
+                if (hits > best) best = hits;
+            }
+            return best;
+        }
+
+        /// <summary>非重叠统计完整 token 序列出现次数（多词字段算一次）。</summary>
+        private static int CountOccurrences(string[] haystack, string[] needle)
+        {
+            if (needle.Length == 0 || haystack.Length < needle.Length) return 0;
+
+            int count = 0;
+            int i = 0;
+            while (i <= haystack.Length - needle.Length)
+            {
+                bool match = true;
+                for (int j = 0; j < needle.Length; j++)
+                {
+                    if (!string.Equals(haystack[i + j], needle[j], StringComparison.Ordinal))
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+
+                if (match)
+                {
+                    count++;
+                    i += needle.Length;
+                }
+                else
+                {
+                    i++;
+                }
+            }
+            return count;
+        }
+
+        /// <summary>非重叠统计紧凑 CJK 子串出现次数。</summary>
+        private static int CountSubstringOccurrences(string text, string needle)
+        {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0;
+
+            int count = 0;
+            int start = 0;
+            while (start <= text.Length - needle.Length)
+            {
+                int found = text.IndexOf(needle, start, StringComparison.Ordinal);
+                if (found < 0) break;
+                count++;
+                start = found + needle.Length;
+            }
+            return count;
+        }
+
+        /// <summary>
+        /// 第 1 次命中拿完整 base；同一值第 2 次 +base/2、第 3 次 +base/4……
+        /// 等比收敛到 2×base；额外奖励限制为不超过 base。
+        /// </summary>
+        private static int RepeatBonus(int baseScore, int hits)
+        {
+            if (baseScore <= 0 || hits <= 1) return 0;
+
+            int bonus = 0;
+            int add = baseScore / 2;
+            for (int n = 1; n < hits && add > 0; n++)
+            {
+                bonus += add;
+                add /= 2;
+            }
+            return Math.Min(bonus, baseScore);
         }
 
         /// <summary>标题是否作为连续 token / CJK 子串出现在文件名主干里。</summary>
