@@ -73,7 +73,7 @@
 
 * **帧循环**（`_frameInterval = 10ms`）：取 SMTC 进度 → `UpdateStatistics()` → 原子捕获 `Lines` 快照 → `cIdx = FindLastIndex(Time <= position)` → 触发 `LyricChanged` → 按 `SyncIntervalMs`（或 Seek / 切歌）发 `0x11` → `HandleOutput()` 发歌词行。
 * **账本门控（差分增量）**：视野槽位 `targetSlots` 与已发账本 `_syncedSlots` 求差集，只发新槽位；`Invalidate()` 清账本并把 `_lastProcessedCIdx` 置 `-2` 强制下一帧整屏重发；歌词代际号 `Generation` 变化（切歌/换歌）同样失效账本。
-* **`0x15` 的结束时间是账本门控的**：`GetEndTime()` 中间行取下一行开始时间，末行取曲目总时长（不合理时兜底 `+5s`）。因此 `UpdateStatistics()` 里加了「曲目总时长变化 ≥1s 即 `Invalidate()`」——否则切歌瞬间 SMTC 还没报出 EndTime 时发出去的兜底值（`+5s`）会一直留在硬件上，导致末行/占位行提前清屏。
+* **`0x15` 的结束时间是账本门控的**：`GetEndTime()` 中间行取下一行开始时间，末行取曲目总时长（不合理时兜底 `+5s`）。因此 `UpdateStatistics()` 只在「**最后一行普通歌词(0x15) 已经在账本里** 且总时长变化 ≥1s」时 `Invalidate()` 整屏重发（屏幕是滚动窗口，改内容必须重发）；中间行/0x14/0x13 不依赖总时长，全屏逐字时不会重发。
 * **发送路径**：业务包走 `TransportManager.Send()`（入队 + 节流），探测帧走 `SendImmediate()`（直发）。
 
 ---

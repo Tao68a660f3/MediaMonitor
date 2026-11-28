@@ -395,14 +395,55 @@ namespace MediaMonitor.Core
             _lastSmtcMediaSec = info.Position.TotalSeconds;
             _lastSmtcWallSec = nowWall;
 
-            // 0x15 的结束时间是账本门控的：曲目总时长变化后必须失效重发，
-            // 否则末行/占位行会被硬件按旧的结束时间（兜底 +5s）提前清屏
+            // 总时长只影响“最后一行普通歌词(0x15)”的结束时间；
+            // 只有它已经发送过（在账本里）时才需要清账本重发。
             double newTotalSeconds = info.Duration.TotalSeconds;
             if (Math.Abs(newTotalSeconds - _totalSeconds) >= 1.0)
-                Invalidate();
+            {
+                InvalidateLedgerIfLastLineEndTimeChanged();
+            }
             _totalSeconds = newTotalSeconds;
 
             _isPlaying = (info.Status == PlaybackState.Playing);
+        }
+
+        /// <summary>
+        /// 曲目总时长只影响“最后一行普通歌词（0x15）”的结束时间；
+        /// 只有它已经发送过（在账本里）时才需要修正。
+        ///
+        /// <para>屏幕是“收到一行新的就丢掉一行旧的”的滚动窗口，不能只补发这一行来改内容；
+        /// 账本一旦需要变化就清空整屏重发（这是允许的）。
+        /// 最后一行是逐字行(0x14)时不依赖总时长，什么都不做。</para>
+        /// </summary>
+        private void InvalidateLedgerIfLastLineEndTimeChanged()
+        {
+            if (!Config.IsAdvancedMode)
+            {
+                return;                         // 文本模式没有 0x15 结束时间
+            }
+
+            var lines = _lyricService.Lines;
+            if (lines.Count == 0)
+            {
+                return;
+            }
+
+            int last = lines.Count - 1;
+            if (lines[last].Words.Count > 0)
+            {
+                return;                         // 最后一行是 0x14，没有结束时间
+            }
+
+            bool sent;
+            lock (_syncLock)
+            {
+                sent = _syncedSlots.Contains($"{last}_0x15");
+            }
+
+            if (sent)
+            {
+                Invalidate();                   // 清账本 + _lastProcessedCIdx=-2，整屏重发
+            }
         }
 
         private void SendSyncPacket(double currentMs)
