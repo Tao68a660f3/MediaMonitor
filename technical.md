@@ -28,14 +28,16 @@
 
 ### 1.2 SmtcService：会话管理、进度外推与"残留信息"清理
 
-* **切会话**：`SelectSession()` 先解绑旧会话的三个事件（`MediaPropertiesChanged` / `TimelinePropertiesChanged` / `PlaybackInfoChanged`）并把 `_mediaUpdateSeq` 自增，让旧会话所有在途的 async 回调失效；随后绑定新会话并**立即触发一次**属性读取，避免等到下一次系统事件才刷新。
-* **进度外推**：Playing 状态下按 `timeline.LastUpdatedTime + PlaybackRate` 持续外推（Chrome 等不频繁刷新 Timeline 的播放器也能得到连续进度）；进入 Playing 的瞬间用 `_resumeBasePosition/_resumeBaseTime` 作锚点，消除"暂停→恢复"时把整段暂停时长虚增进首个同步包的问题；结果再做 `[0, EndTime]` 钳位。
-* **残留清理（重要）**：若当前会话已不在 `SessionManager.GetSessions()` 中（播放器退出 / 会话被关闭），`DetachIfSessionGone()` 会执行 `DetachCurrentSession(notify: true)` —— 解绑事件、重置播放状态与锚点、**清空 `CurrentTitle` / `CurrentArtist` / `CurrentAlbum`**，并触发 `MediaCleared` 事件。
-  不清场的话，三个缓存字段会一直保留上一首的值，界面与托盘会"假装还在播放"，而 `GetCurrentProgress()` 其实已经返回 `null`。
-* **封面状态（`ThumbnailState`）**：换曲时**同步** `Reset()`（`ready=false` / `data=null` / 摘要=null），新曲目读取完成前资源层只回 `ACK(NOT_READY)`；读取结果在锁内校验 `sender/seq` 后原子写入，读取期间切歌的旧结果直接丢弃。`TryGetThumbnailForCurrentTrack()` 是唯一判据：`false` = 还没读，`true + null` = 确实无封面（§11 空资源），`true + bytes` = 正常资源。
-  过去 `NewProtocolStack` 另维护 `_thumbEventForTrack`，在"会话建立 / 同曲目重复 MediaPropertiesChanged / 切歌后封面字节不变"时会被清零，而 `SmtcService` 又按哈希去重不再触发 `OnThumbnailUpdated` —— 结果封面其实已可用，资源层却一直回 `NOT_READY`（表现：连接后要切一次歌才出封面）。现在删除了这个重复状态，只保留 `SmtcService` 一份。
+* **会话同步（事件 + 去抖 + 对账）**：`SessionsChanged` 只置脏，250ms 去抖后 `ReconcileSessions()` 重新 `GetSessions()` 并与上次快照 diff；UI 定时器每秒再调一次对账兜底。只有快照真的变化才触发 `SessionsListChanged`，`GetSessions()` 返回缓存快照（UI 不再直接跨进程查询）。这样即使事件回调时刻的快照还没反映增删，也会在下一轮自动纠正，解决“关闭播放器后偶尔残留 / 新开播放器偶尔不显示”。
+* **媒体事件排序（`MediaUpdateGate`）**：每次读取先确认 `sender == _currentSession` 再取号；只有“真正应用”的事件才推进已应用水位，切歌过渡期的空 Title 事件、旧会话的在途回调都不推进。封面等旁支结果只接受与当前水位相同的事件；切会话/会话消失时 `InvalidateAll()` 让全部在途读取失效。**不能用“最后发出的序号”作判据**——空事件/旧会话事件会把同曲目有效读取作废（表现：切歌后标题不更新、封面长期 `NOT_READY`）。
+* **空会话 / 无媒体**：选中一个没有标题的会话时**立即**清空元数据与封面并触发 `MediaCleared`（不再显示上一首）；运行期收到空 Title 事件则先等 350ms 去抖，确认期间没有更新的非空事件后才清场（避免切歌过渡闪屏）。`MediaCleared` 只在上层确实持有媒体时触发一次。
+* **切会话**：`SelectSession()` 先解绑旧会话的事件（`MediaPropertiesChanged` / `PlaybackInfoChanged`）并让在途读取失效，再绑定新会话，然后**在线程池上**立即读取一次属性（不捕获 WPF 同步上下文，避免歌词目录扫描/封面解码卡 UI）。
+* **进度外推**：Playing 状态下按 `timeline.LastUpdatedTime + PlaybackRate` 持续外推（Chrome 等不频繁刷新 Timeline 的播放器也能得到连续进度）；进入 Playing 的瞬间用 `_resumeBasePosition/_resumeBaseTime` 作锚点，消除“暂停→恢复”时把整段暂停时长虚增进首个同步包的问题。时长取 `EndTime - StartTime`，仅在时长已知（>0）时才把位置钳位到 `EndTime`，直播/网页源 `EndTime=0` 时不会把进度钉在 0。
+* **残留清理（重要）**：若当前会话已不在最新会话快照中（播放器退出 / 会话被关闭），`ReconcileSessions()` 会执行解绑 → 重置播放状态与锚点 → **清空 `CurrentTitle` / `CurrentArtist` / `CurrentAlbum`** → 触发 `MediaCleared`。不清场的话，三个缓存字段会一直保留上一首的值，界面与托盘会“假装还在播放”，而 `GetCurrentProgress()` 其实已经返回 `null`。
+* **封面状态（`ThumbnailState`）**：换曲时**同步** `Reset()`（`ready=false` / `data=null` / 摘要=null），新曲目读取完成前资源层只回 `ACK(NOT_READY)`；读取结果在锁内校验 `sender/事件水位` 后原子写入。`TryGetThumbnailForCurrentTrack()` 是唯一判据：`false` = 还没读，`true + null` = 确实无封面（§11 空资源），`true + bytes` = 正常资源。**读取失败 ≠ 没有封面**：`OpenReadAsync` 抛异常时做 2 次短重试，仍失败就保持 not-ready（不谎报“本曲无封面”）；只有 `reference == null` / 流为空才写 `ready + null`。
 * **上层约定**：`PackageMaster` 订阅 `MediaCleared` 后**只清上位机侧状态**（复位统计量 → `LyricService.LoadAndParse("", "", "")` 发布空歌词 → `Invalidate()` 清账本 → 主动触发一次 `LyricChanged(-1, 空行)` 清掉界面预览），**不向硬件下发任何清场/停止包**，硬件保留最后一帧画面。
-* **清屏/复位走既有通路**：无歌曲状态下重新点一次「开始连接」，会补发一次空元数据（`0x10` 三个字段长度均为 0），硬件以该帧作为复位参考信号自行清屏 —— 见 readme 协议说明里的注记。
+* **清屏/复位走既有通路**：新协议 `NewProtocolStack.OnMediaCleared` 会 `AbortCurrent` + 发空元数据（三字段全 0）请硬件复位；Legacy 仍是“无歌曲状态下重新点一次「开始连接」补发空元数据” —— 见 readme 协议说明里的注记。
+* **媒体源下拉框**：`ItemsSource` 只绑定一次（`ObservableCollection<SessionListEntry>`），之后按会话身份原地增删/改状态文本，保留用户选择；只有“原本没有选择”时才自动选第一个，绝不因为别的会话出现/消失而改媒体源。`HideClosedSessions`（默认 true，两份配置同步写）控制是否隐藏 `PlaybackStatus=Closed` 的会话，**当前选中的会话永远保留**；暂停/停止不会被隐藏。
 
 ### 1.3 歌词：LyricService（快照）+ LyricMatcher（元数据匹配）+ LyricParser（格式插件）
 
@@ -464,7 +466,7 @@ TCP 端到端：`REQUEST=4 传输=4 ABORT=0`（两首曲目 × 歌词+封面）�
 
 | 工程 | 命令 | 覆盖 |
 | :--- | :--- | :--- |
-| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 桶计数与几何重复奖励 / 格式插件）** + **R18 封面状态机（换曲同步失效 / 同字节封面仍通知 / 过期读取丢弃）** + **R19 条件资源请求（KNOWN_SHA64 → NOT_MODIFIED，含空资源与 BEGIN SHA64）**（共 174 项） |
+| C# 编解码 + 配置容错 | `dotnet run -c Debug`（`Tests/NewProtocolSelfTest`） | R1–R9 向量/粘包/重同步/RGB565 + **R10 同步偏移** + **R11 配置逐项容错** + **R12 ACK 位驱动** + **R13 无封面空资源** + **R14 连接有界重试 / 可取消 / 不开第二条连接** + **R15 版本号单一来源（`AppInfo`，含"元数据坏了也不拖垮启动"）** + **R16 歌词资源空行照发（含空行的 LRC：帧数 / idx / start-end / 翻译 / 每帧 XOR 自检）** + **R17 歌词元数据匹配（标题优先回退 / 专辑目录 / 桶计数与几何重复奖励 / 格式插件）** + **R18 封面状态机（换曲同步失效 / 同字节封面仍通知 / 过期读取丢弃）** + **R19 条件资源请求（KNOWN_SHA64 → NOT_MODIFIED，含空资源与 BEGIN SHA64）** + **R20 媒体事件排序闸门（空事件/旧会话不误杀有效读取、清场水位、切会话失效）**（共 189 项） |
 | C 参考实现 | `ref_c/tests/build_msvc.bat` | C 自检 **150 项**（含资源接收 R8、时间轴投递 R9/R10、延迟发起端 R10b、**ACK 位驱动 R7b**、**V1.2 条件 REQUEST/NOT_MODIFIED R11**）；`build_dll.bat` 的 `np_dll_selftest` 另含**按资源类型分槽的 SHA64 + 原始数据缓存**检查 |
 | 端到端（TCP） | `NewProtocolSelfTest.exe --tcp 127.0.0.1:9100` + `mock_esp32_new.py` | P3/P4/P5 验收（实时数据 + 资源 + 回控 + 延迟）一次跑完 |
 | 端到端（COM） | `NewProtocolSelfTest.exe --com COM22 115200` + `mock_esp32_new.py --transport com --com COM23` | 同上（走真串口对，如 com0com 的 COM22↔COM23） |

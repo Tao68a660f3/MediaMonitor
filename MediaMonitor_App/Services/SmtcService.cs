@@ -4,6 +4,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using Windows.Foundation;
 using Windows.Media.Control;
 using Windows.Storage.Streams;
 
@@ -51,302 +52,772 @@ namespace MediaMonitor.Services
         /// </summary>
         public bool TryGetThumbnailForCurrentTrack(out byte[]? data) => _thumbState.TryGet(out data);
 
-        private GlobalSystemMediaTransportControlsSessionManager? _manager;
-        private GlobalSystemMediaTransportControlsSession? _currentSession;
-        private GlobalSystemMediaTransportControlsSessionTimelineProperties? _lastTimeline;
+        // ========== 会话同步（事件 → 去抖 → 重新取快照 → diff） ==========
+        // SessionsChanged 只表示"列表变了"，不保证此刻 GetSessions() 已经反映最终结果；
+        // 所以这里不直接把它当成新快照，而是 250ms 去抖后重新取，并由 UI 每秒对账兜底。
+        private const int SessionSyncDebounceMs = 250;
 
-        // --- 暂停→恢复播放的锚点 ---
+        private readonly object _sessionGate = new object();
+        private readonly Timer _sessionSyncTimer;               // 去抖定时器（构造时创建，Dispose 时释放）
+        private int _sessionSyncPending;                        // 0/1：已有一次待执行的同步
+        private GlobalSystemMediaTransportControlsSessionManager? _manager;
+        private TypedEventHandler<GlobalSystemMediaTransportControlsSessionManager, SessionsChangedEventArgs>?
+            _sessionsChangedHandler;                            // 保存委托，Dispose 时精确摘除
+        private GlobalSystemMediaTransportControlsSession? _currentSession;
+
+        /// <summary>
+        /// 最近一次 <c>TimelinePropertiesChanged</c> 拿到的时间轴快照。
+        /// <para>SMTC 的 Timeline/Playback 是事件源，两次事件之间 <c>GetTimelineProperties()</c>
+        /// 返回的也是同一份锚点；因此 <see cref="GetCurrentProgress"/> 优先读这里，
+        /// 避免 10ms/100ms 循环重复发起跨进程调用。</para>
+        /// </summary>
+        private GlobalSystemMediaTransportControlsSessionTimelineProperties? _lastTimeline;
+        private IReadOnlyList<GlobalSystemMediaTransportControlsSession> _lastSessions =
+            Array.Empty<GlobalSystemMediaTransportControlsSession>();
+        private bool _disposed;
+
+        // --- 暂停→恢复播放的锚点（统一由 _sessionGate 保护） ---
         // Chrome 等浏览器在恢复播放瞬间只触发 PlaybackInfoChanged（状态→Playing），
         // 但 Timeline/LastUpdatedTime 仍停留在暂停时刻。若不设锚点，
         // GetCurrentProgress 会按 LastUpdatedTime 外推，把整个暂停时长虚增进首个同步包。
-        // 因此用"进入 Playing 的事件瞬间"作为新外推基准，直到系统 Timeline 刷新到锚点之后。
         private GlobalSystemMediaTransportControlsSessionPlaybackStatus _lastStatus =
             GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed;
         private TimeSpan _resumeBasePosition;
         private DateTimeOffset _resumeBaseTime;
-        private bool _resumeAnchorValid = false;
+        private bool _resumeAnchorValid;
 
-        // 媒体属性更新序号：切歌/切会话瞬间系统会连发多个 MediaPropertiesChanged，
-        // 且 async void 中 await 的完成顺序不保证与触发顺序一致。
-        // 只有"最后一次触发的事件"序号最新才允许生效，旧事件的延迟完成直接丢弃。
-        private long _mediaUpdateSeq = 0;
+        // --- 媒体事件排序 / 封面状态 ---
+        // 事件序号只用来排序：空属性事件（切歌过渡）不推进"已应用水位"，
+        // 旧会话的在途回调在取号之前就被 sender 校验挡掉，因此不会误杀有效读取。
+        private readonly MediaUpdateGate _mediaGate = new MediaUpdateGate();
 
         // 当前曲目的封面状态：曲目切换、读取完成、同曲目去重、数据/就绪的原子切换都在这里。
-        // 过去 SmtcService 用 _thumbHash/_thumbNotified、NewProtocolStack 再维护一个 _thumbEventForTrack，
-        // 两边状态在"切歌 + 同字节封面 + 系统连发多个 MediaPropertiesChanged"时会不同步，
-        // 表现为封面其实已经可用，资源层却一直回 ACK(NOT_READY)。现在只保留这一个事实源。
+        // 只保留这一个事实源（历史上 NewProtocolStack 另有一份，导致 NOT_READY 假死）。
         private readonly ThumbnailState _thumbState = new ThumbnailState();
 
+        /// <summary>空属性事件先等一小段时间再清场：避免切歌过渡期的空事件造成无谓闪屏。</summary>
+        private const int EmptyMediaGraceMs = 350;
+
+        /// <summary>封面读取失败的有限重试（切歌瞬间 COMException 很常见）。</summary>
+        private const int ThumbnailReadRetries = 2;
+        private const int ThumbnailRetryDelayMs = 300;
+
+        /// <summary>上层（PackageMaster / NewProtocolStack）当前是否持有媒体：决定要不要发 <see cref="MediaCleared"/>。</summary>
+        private bool _mediaNotified;
+
         public event Action<GlobalSystemMediaTransportControlsSessionPlaybackStatus>? PlaybackChanged;
-        public Action<GlobalSystemMediaTransportControlsSessionMediaProperties>? OnMediaUpdated;
+
+        /// <summary>
+        /// 当前曲目（Title / Artist / Album）发生变化。
+        /// <para>同一首歌反复触发 MediaPropertiesChanged 时**不会**重复触发（避免每次重扫歌词目录、
+        /// 重发 MEDIA/时间轴）；封面旁支仍会照常读取，变化时通过 <see cref="OnThumbnailUpdated"/> 通知。</para>
+        /// </summary>
+        public event Action<GlobalSystemMediaTransportControlsSessionMediaProperties>? OnMediaUpdated;
 
         /// <summary>
         /// 当前曲目的封面发生变化：参数 null 表示「本曲没有封面」。
         ///
-        /// <para>只在 <see cref="Session_MediaPropertiesChanged"/> 成功读到媒体属性后触发；
-        /// 会话消失（<see cref="DetachCurrentSession"/>）<b>不走这里</b> —— 上层由 <see cref="MediaCleared"/>
+        /// <para>只在 <see cref="ReadMediaPropertiesAsync"/> 成功读到媒体属性后触发；
+        /// 会话消失（<see cref="DetachCurrentSessionLocked"/>）<b>不走这里</b> —— 上层由 <see cref="MediaCleared"/>
         /// 同步清掉自己的封面缓存，以保持"会话消失不下发任何清场数据"的既有约定。</para>
         /// <para>同一首歌反复触发 MediaPropertiesChanged 时内容摘要不变，因此不会重复触发。</para>
         /// </summary>
-        public Action<byte[]?>? OnThumbnailUpdated;
+        public event Action<byte[]?>? OnThumbnailUpdated;
 
         public event Action? SessionsListChanged;
 
         /// <summary>
-        /// 当前会话消失（播放器退出/会话被关闭、或手动清空选择）时触发：
+        /// 当前会话消失（播放器退出/会话被关闭）、选中了空会话、或系统明确报告"没有媒体"时触发：
         /// 此时 CurrentTitle/Artist/Album 已被清空，上层应同步清掉自己的残留状态。
         /// </summary>
         public event Action? MediaCleared;
 
-        public async Task InitializeAsync()
+        public SmtcService()
         {
-            _manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
-            _manager.SessionsChanged += (s, e) => {
-                DetachIfSessionGone();
-                SessionsListChanged?.Invoke();
-            };
+            _sessionSyncTimer = new Timer(_ => ReconcileSessions(), null, Timeout.Infinite, Timeout.Infinite);
         }
 
-        public IReadOnlyList<GlobalSystemMediaTransportControlsSession> GetSessions()
-            => _manager?.GetSessions() ?? new List<GlobalSystemMediaTransportControlsSession>();
+        /// <summary>当前选中的会话（仅供 UI 做"始终保留当前项"的判断；没有则为 null）。</summary>
+        public GlobalSystemMediaTransportControlsSession? CurrentSession => Volatile.Read(ref _currentSession);
+
+        public async Task InitializeAsync()
+        {
+            if (_disposed || (_manager != null))
+            {
+                return;                                    // 幂等：重复调用不会重复订阅
+            }
+
+            var manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+            if (_disposed)
+            {
+                return;
+            }
+
+            _manager = manager;
+            _sessionsChangedHandler = (_, _) => ScheduleSessionSync();
+            manager.SessionsChanged += _sessionsChangedHandler;
+
+            ReconcileSessions();                           // 初始快照：UI 构造时可以直接拿到
+        }
 
         /// <summary>
-        /// 当前会话是否已被系统移除（播放器退出/会话关闭）：是则彻底清场并通知上层。
-        /// 不清场的话 CurrentTitle/Artist/Album 会一直保留上一首的残留值，
-        /// 界面与托盘会"假装还在播放"，而 GetCurrentProgress() 其实已经返回 null。
+        /// 当前会话快照（最近一次 <see cref="ReconcileSessions"/> 的结果）。
+        /// UI 直接读缓存，避免在 UI 线程反复做跨进程调用；快照变化时由 <see cref="SessionsListChanged"/> 通知。
         /// </summary>
-        private void DetachIfSessionGone()
+        public IReadOnlyList<GlobalSystemMediaTransportControlsSession> GetSessions()
+            => Volatile.Read(ref _lastSessions);
+
+        /// <summary>
+        /// 重新核对系统会话列表：重新取快照 → diff → 处理"当前会话已消失" → 必要时通知 UI。
+        ///
+        /// <para>为什么需要它：<c>SessionsChanged</c> 回调时刻的 <c>GetSessions()</c> 可能还没反映增删，
+        /// 而 WinRT 集合本身不通知变化。仅靠事件会偶发"关闭后残留 / 新开不显示"，
+        /// 因此这里既用于事件去抖后的复查，也由 UI 每秒调用一次做兜底。</para>
+        ///
+        /// <para>幂等、可跨线程调用；只有快照真的变化时才触发 <see cref="SessionsListChanged"/>。</para>
+        /// </summary>
+        public void ReconcileSessions()
         {
-            if (_currentSession == null) return;
+            if (_disposed)
+            {
+                return;
+            }
 
             try
             {
-                if (_manager?.GetSessions().Contains(_currentSession) == true) return;
-            }
-            catch { return; }   // 查询失败按"会话还在"处理，避免误清
+                IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions =
+                    _manager is { } manager
+                        ? manager.GetSessions()
+                        : (IReadOnlyList<GlobalSystemMediaTransportControlsSession>)
+                          Array.Empty<GlobalSystemMediaTransportControlsSession>();
 
-            DetachCurrentSession(notify: true);
+                bool changed;
+                bool notifyCleared = false;
+
+                lock (_sessionGate)
+                {
+                    changed = !SessionListsEqual(_lastSessions, sessions);
+                    if (changed)
+                    {
+                        Volatile.Write(ref _lastSessions, sessions);
+                    }
+
+                    if ((_currentSession != null) && !ContainsSession(sessions, _currentSession))
+                    {
+                        // 当前会话已不在系统列表里（播放器退出 / 会话关闭）：彻底清场并通知上层
+                        notifyCleared = DetachCurrentSessionLocked(notify: true);
+                    }
+                }
+
+                if (notifyCleared)
+                {
+                    SafeInvoke(MediaCleared);
+                }
+
+                if (changed)
+                {
+                    SafeInvoke(SessionsListChanged);
+                }
+            }
+            catch (Exception ex)
+            {
+                // 会话服务偶尔会在播放器退出瞬间抛 COMException；本轮跳过，下一轮对账会补上
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 会话列表同步失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>该会话当前是否处于 Closed（无媒体）状态；查询失败按"未关闭"处理，避免误隐藏。</summary>
+        public bool IsSessionClosed(GlobalSystemMediaTransportControlsSession? session)
+            => GetSessionPlaybackStatus(session) == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed;
+
+        /// <summary>读取会话播放状态；失败返回 null（调用方按未知处理）。</summary>
+        public GlobalSystemMediaTransportControlsSessionPlaybackStatus? GetSessionPlaybackStatus(
+            GlobalSystemMediaTransportControlsSession? session)
+        {
+            if (session == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                return session.GetPlaybackInfo().PlaybackStatus;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void ScheduleSessionSync()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _sessionSyncPending, 1) != 0)
+            {
+                return;                                    // 已经排了一次，等它执行
+            }
+
+            try
+            {
+                _sessionSyncTimer.Change(SessionSyncDebounceMs, Timeout.Infinite);
+            }
+            catch (ObjectDisposedException)
+            {
+                // 已释放：忽略
+            }
+        }
+
+        private static bool SessionListsEqual(
+            IReadOnlyList<GlobalSystemMediaTransportControlsSession> a,
+            IReadOnlyList<GlobalSystemMediaTransportControlsSession> b)
+        {
+            if (ReferenceEquals(a, b))
+            {
+                return true;
+            }
+            if (a.Count != b.Count)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < a.Count; i++)
+            {
+                if (!Equals(a[i], b[i]))
+                {
+                    return false;                          // WinRT 投影的 Equals = 原生指针身份（已核对）
+                }
+            }
+            return true;
+        }
+
+        private static bool ContainsSession(
+            IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions,
+            GlobalSystemMediaTransportControlsSession session)
+        {
+            for (int i = 0; i < sessions.Count; i++)
+            {
+                if (Equals(sessions[i], session))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>
-        /// 解绑并丢弃当前会话，同时清空缓存的元数据（残留信息的源头就在这里）。
-        /// notify = true 时通知上层"已经没有会话了"（MediaCleared）。
+        /// 解绑并丢弃当前会话（调用方必须持有 <see cref="_sessionGate"/>）。
+        /// 返回 true = 上层仍持有媒体、需要补发 <see cref="MediaCleared"/>。
         /// </summary>
-        private void DetachCurrentSession(bool notify)
+        private bool DetachCurrentSessionLocked(bool notify)
         {
-            bool hadSession = _currentSession != null;
-
-            if (_currentSession != null)
+            GlobalSystemMediaTransportControlsSession? session = _currentSession;
+            if (session == null)
             {
-                _currentSession.MediaPropertiesChanged -= Session_MediaPropertiesChanged;
-                _currentSession.TimelinePropertiesChanged -= Session_TimelinePropertiesChanged;
-                _currentSession.PlaybackInfoChanged -= Session_PlaybackInfoChanged;
+                return false;
             }
 
-            // 丢弃会话：使旧会话的所有在途事件全部失效
-            Interlocked.Increment(ref _mediaUpdateSeq);
+            UnbindSession(session);
 
-            // 跨会话重置状态，避免用上一个会话的播放状态/锚点误判
+            // 丢弃会话：让旧会话所有在途的媒体读取全部失效
+            _mediaGate.InvalidateAll();
+
             _lastStatus = GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed;
             _resumeAnchorValid = false;
+            _currentSession = null;
             _lastTimeline = null;
 
-            _currentSession = null;
-
-            // 元数据一并清空，否则界面/托盘会继续显示上一首
             CurrentTitle = null;
             CurrentArtist = null;
             CurrentAlbum = null;
-
-            // 封面状态同理：清空数据/就绪/去重（下一次会话的首个封面事件必须能发出去）。
-            // 不触发 OnThumbnailUpdated：会话消失按既有约定不下发、不提示。
             _thumbState.Reset();
 
-            if (notify && hadSession)
-                MediaCleared?.Invoke();
+            bool shouldNotify = notify && _mediaNotified;
+            if (shouldNotify)
+            {
+                _mediaNotified = false;
+            }
+            return shouldNotify;
         }
 
+        private bool BindSession(GlobalSystemMediaTransportControlsSession session)
+        {
+            try
+            {
+                session.MediaPropertiesChanged += Session_MediaPropertiesChanged;
+                session.TimelinePropertiesChanged += Session_TimelinePropertiesChanged;
+                session.PlaybackInfoChanged += Session_PlaybackInfoChanged;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 绑定会话失败: {ex.Message}");
+                UnbindSession(session);
+                return false;
+            }
+        }
+
+        private void UnbindSession(GlobalSystemMediaTransportControlsSession session)
+        {
+            try { session.MediaPropertiesChanged -= Session_MediaPropertiesChanged; }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[SMTC] 解绑媒体事件失败: {ex.Message}"); }
+
+            try { session.TimelinePropertiesChanged -= Session_TimelinePropertiesChanged; }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[SMTC] 解绑时间轴事件失败: {ex.Message}"); }
+
+            try { session.PlaybackInfoChanged -= Session_PlaybackInfoChanged; }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[SMTC] 解绑播放事件失败: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// 切换会话：先解绑旧会话（不通知上层），再绑定新会话并立即读取一次属性。
+        ///
+        /// <para>新会话如果本身就是"空会话"（没有标题），读取结果会按实际状态清场并补发
+        /// <see cref="MediaCleared"/>，不会继续显示上一首；读取失败也同样按"无媒体"处理，
+        /// 避免切换后残留旧内容。</para>
+        /// </summary>
         public void SelectSession(GlobalSystemMediaTransportControlsSession? session)
         {
-            // 切换会话只解绑、不通知（新会话紧接着会立刻推送自己的属性）；
-            // 但"清空选择"等于没有会话了，必须通知上层清掉残留的歌曲信息
-            bool hadSession = _currentSession != null;
+            bool notifyCleared = false;
+            bool bound = false;
 
-            DetachCurrentSession(notify: false);
-
-            _currentSession = session;
-
-            if (_currentSession != null)
+            lock (_sessionGate)
             {
-                _currentSession.MediaPropertiesChanged += Session_MediaPropertiesChanged;
-                _currentSession.TimelinePropertiesChanged += Session_TimelinePropertiesChanged;
-                _currentSession.PlaybackInfoChanged += Session_PlaybackInfoChanged;
+                DetachCurrentSessionLocked(notify: false);
 
-                try
+                _currentSession = session;
+                if (session != null)
                 {
-                    _lastTimeline = _currentSession.GetTimelineProperties();
+                    bound = BindSession(session);
+                    if (!bound)
+                    {
+                        _currentSession = null;
+                    }
                 }
-                catch { _lastTimeline = null; }
 
-                // 立即触发一次更新
-                Session_MediaPropertiesChanged(_currentSession, null);
+                if (bound && (session != null))
+                {
+                    // 新会话的初始时间轴锚点（后续由 TimelinePropertiesChanged 更新）
+                    try
+                    {
+                        _lastTimeline = session.GetTimelineProperties();
+                    }
+                    catch (Exception ex)
+                    {
+                        _lastTimeline = null;
+                        System.Diagnostics.Debug.WriteLine($"[SMTC] 读取初始时间轴失败: {ex.Message}");
+                    }
+                }
+
+                if (_currentSession == null)
+                {
+                    // 清空选择 / 绑定失败：上层仍持有旧媒体就必须清掉
+                    notifyCleared = _mediaNotified;
+                    if (notifyCleared)
+                    {
+                        _mediaNotified = false;
+                    }
+                }
             }
-            else if (hadSession)
+
+            if (notifyCleared)
             {
-                MediaCleared?.Invoke();
+                SafeInvoke(MediaCleared);
+            }
+
+            if (bound && (session != null))
+            {
+                // 关键：强制在线程池上开始读取。SelectSession 由 UI 线程调用，
+                // 若直接 await WinRT 操作会捕获 WPF 同步上下文，导致歌词目录扫描 / 封面解码跑在 UI 线程。
+                _ = Task.Run(() => ReadMediaPropertiesAsync(session, immediate: true));
             }
         }
 
         // ========== SMTC 直控方法（MediaKeyInvoker 主用路径，不依赖前台窗口/权限） ==========
 
         /// <summary>
-        /// 播放/暂停：直接调用系统 SMTC 会话，绕过 keybd_event 注入的环境限制
+        /// 播放/暂停：直接调用系统 SMTC 会话，绕过 keybd_event 注入的环境限制。
+        /// 返回 false = 没有会话 / 系统拒绝 / 抛异常，调用方可回退到键盘注入。
         /// </summary>
-        public async Task PlayPauseAsync()
+        public async Task<bool> PlayPauseAsync()
         {
-            if (_currentSession == null) return;
-            try { await _currentSession.TryTogglePlayPauseAsync(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"SMTC 播放/暂停失败: {ex.Message}"); }
-        }
-
-        /// <summary>
-        /// 下一曲：直接调用系统 SMTC 会话
-        /// </summary>
-        public async Task NextAsync()
-        {
-            if (_currentSession == null) return;
-            try { await _currentSession.TrySkipNextAsync(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"SMTC 下一曲失败: {ex.Message}"); }
-        }
-
-        /// <summary>
-        /// 上一曲：直接调用系统 SMTC 会话
-        /// </summary>
-        public async Task PrevAsync()
-        {
-            if (_currentSession == null) return;
-            try { await _currentSession.TrySkipPreviousAsync(); }
-            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"SMTC 上一曲失败: {ex.Message}"); }
-        }
-
-        private void Session_TimelinePropertiesChanged(GlobalSystemMediaTransportControlsSession sender, TimelinePropertiesChangedEventArgs args)
-        {
-            try
+            var session = Volatile.Read(ref _currentSession);
+            if (session == null)
             {
-                _lastTimeline = sender.GetTimelineProperties();
+                return false;
             }
-            catch { /* SMTC 时间线获取失败时忽略 */ }
+
+            try
+            {
+                bool ok = await session.TryTogglePlayPauseAsync();
+                if (!ok)
+                {
+                    System.Diagnostics.Debug.WriteLine("[SMTC] 播放/暂停请求被系统拒绝");
+                }
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 播放/暂停失败: {ex.Message}");
+                return false;
+            }
         }
 
-        private void Session_PlaybackInfoChanged(GlobalSystemMediaTransportControlsSession sender, PlaybackInfoChangedEventArgs args)
+        /// <summary>下一曲：直接调用系统 SMTC 会话；返回 false 表示没下发成功。</summary>
+        public async Task<bool> NextAsync()
+        {
+            var session = Volatile.Read(ref _currentSession);
+            if (session == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                bool ok = await session.TrySkipNextAsync();
+                if (!ok)
+                {
+                    System.Diagnostics.Debug.WriteLine("[SMTC] 下一曲请求被系统拒绝");
+                }
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 下一曲失败: {ex.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>上一曲：直接调用系统 SMTC 会话；返回 false 表示没下发成功。</summary>
+        public async Task<bool> PrevAsync()
+        {
+            var session = Volatile.Read(ref _currentSession);
+            if (session == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                bool ok = await session.TrySkipPreviousAsync();
+                if (!ok)
+                {
+                    System.Diagnostics.Debug.WriteLine("[SMTC] 上一曲请求被系统拒绝");
+                }
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 上一曲失败: {ex.Message}");
+                return false;
+            }
+        }
+
+        private void Session_TimelinePropertiesChanged(
+            GlobalSystemMediaTransportControlsSession sender, TimelinePropertiesChangedEventArgs args)
         {
             try
             {
+                if (!ReferenceEquals(sender, Volatile.Read(ref _currentSession)))
+                {
+                    return;                       // 旧会话的在途回调
+                }
+
+                var timeline = sender.GetTimelineProperties();
+
+                lock (_sessionGate)
+                {
+                    if (!ReferenceEquals(sender, _currentSession))
+                    {
+                        return;
+                    }
+                    _lastTimeline = timeline;
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 时间轴读取失败: {ex.Message}");
+            }
+        }
+
+        private void Session_PlaybackInfoChanged(
+            GlobalSystemMediaTransportControlsSession sender, PlaybackInfoChangedEventArgs args)
+        {
+            try
+            {
+                if (!ReferenceEquals(sender, Volatile.Read(ref _currentSession)))
+                {
+                    return;                       // 旧会话的在途回调：不允许污染新会话的状态
+                }
+
                 var status = sender.GetPlaybackInfo().PlaybackStatus;
 
                 // 检测"非播放 → 播放"转换：暂停/停止后恢复（含切歌后首播）。
                 // 用事件触发瞬间的 Position + 墙钟建立恢复锚点，
                 // 避免用陈旧的 LastUpdatedTime 外推导致首个进度包虚增整个暂停时长。
-                if (_lastStatus != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
-                    && status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                TimeSpan anchorPosition = TimeSpan.Zero;
+                bool hasAnchorPosition = false;
+                if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                 {
-                    _resumeBasePosition = sender.GetTimelineProperties().Position;
-                    _resumeBaseTime = DateTimeOffset.Now;
-                    _resumeAnchorValid = true;
+                    try
+                    {
+                        anchorPosition = sender.GetTimelineProperties().Position;
+                        hasAnchorPosition = true;
+                    }
+                    catch { /* 取不到就退回 0，下一次时间轴刷新会纠正 */ }
                 }
-                _lastStatus = status;
 
-                PlaybackChanged?.Invoke(status);
-            }
-            catch { /* SMTC 播放信息获取失败时忽略 */ }
-        }
-
-        private async void Session_MediaPropertiesChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs? args)
-        {
-            try
-            {
-                // 核心修复：防止在切歌或关闭时因 Session 失效导致的 COM 崩溃
-                long seq = Interlocked.Increment(ref _mediaUpdateSeq); // 本次事件序号
-
-                var props = await sender.TryGetMediaPropertiesAsync();
-
-                // 只有"最后一次触发的事件"才允许生效：
-                // 切歌瞬间系统可能连发多个事件，且 await 完成顺序不保证与触发一致，
-                // 旧事件的延迟完成会覆盖新歌词，必须用序号丢弃。
-                if (props != null && sender == _currentSession
-                    && seq == Volatile.Read(ref _mediaUpdateSeq))
+                lock (_sessionGate)
                 {
-                    // 过滤切歌过渡期的空属性事件（Title 为空），
-                    // 防止触发 LoadAndParse 清空已加载歌词、以及发出空的元数据包
-                    if (string.IsNullOrEmpty(props.Title))
+                    if (!ReferenceEquals(sender, _currentSession))
+                    {
                         return;
+                    }
 
-                    // 是否换曲：换曲时**同步**让旧封面失效（ready=false / data=null / 去重清零），
-                    // 新曲目的封面读取完成后才重新就绪；即使新旧封面字节完全相同，
-                    // 也不能沿用上一首的"已通知/已就绪"状态（规范 §9.8 / §11.2）。
-                    bool trackChanged = (CurrentTitle != props.Title)
-                                     || (CurrentArtist != props.Artist)
-                                     || (CurrentAlbum != props.AlbumTitle);
+                    if (_lastStatus != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
+                        && status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                    {
+                        _resumeBasePosition = hasAnchorPosition ? anchorPosition : TimeSpan.Zero;
+                        _resumeBaseTime = DateTimeOffset.Now;
+                        _resumeAnchorValid = true;
+                    }
 
-                    if (trackChanged)
-                        _thumbState.Reset();
-
-                    CurrentTitle = props.Title; // 赋值
-                    CurrentArtist = props.Artist; // 赋值
-                    CurrentAlbum = props.AlbumTitle;
-                    OnMediaUpdated?.Invoke(props);
-
-                    // 封面走独立异步支线：不阻塞元数据/歌词路径；
-                    // 内部自带 try/catch 与 sender/seq 校验，不会产生未观察异常、也不会让旧封面盖新封面。
-                    _ = UpdateThumbnailAsync(sender, props.Thumbnail, seq);
+                    _lastStatus = status;
                 }
+
+                SafeInvoke(() => PlaybackChanged?.Invoke(status));
             }
             catch (Exception ex)
             {
-                // 捕获 COMException (0x80030070) 等，保持程序不崩溃
-                System.Diagnostics.Debug.WriteLine($"SMTC 属性获取失败: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 播放状态读取失败: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 媒体属性变化：统一走 <see cref="ReadMediaPropertiesAsync"/>。
+        /// <para>用 <see cref="Task.Run(Action)"/> 强制在线程池上开始：即使事件被投递到 UI 线程，
+        /// 后续的属性读取 / 歌词重载 / 封面解码也不会捕获 WPF 同步上下文（否则整个歌词目录扫描会卡 UI）。</para>
+        /// 这里不是 async void，未观察异常由方法内部消化。
+        /// </summary>
+        private void Session_MediaPropertiesChanged(
+            GlobalSystemMediaTransportControlsSession sender,
+            MediaPropertiesChangedEventArgs? args)
+            => _ = Task.Run(() => ReadMediaPropertiesAsync(sender, immediate: args is null));
+
+        private async Task ReadMediaPropertiesAsync(
+            GlobalSystemMediaTransportControlsSession sender, bool immediate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            try
+            {
+                long seq;
+                lock (_sessionGate)
+                {
+                    if (!ReferenceEquals(sender, _currentSession))
+                    {
+                        return;                   // 先判 sender：旧会话的事件不参与序号，避免误杀新读取
+                    }
+                    seq = _mediaGate.Begin();
+                }
+
+                GlobalSystemMediaTransportControlsSessionMediaProperties? props = null;
+                bool readOk = true;
+                try
+                {
+                    props = await sender.TryGetMediaPropertiesAsync();
+                }
+                catch (Exception ex)
+                {
+                    readOk = false;
+                    System.Diagnostics.Debug.WriteLine($"[SMTC] 属性获取失败: {ex.Message}");
+                }
+
+                if (!ReferenceEquals(sender, Volatile.Read(ref _currentSession)))
+                {
+                    return;
+                }
+                if (_disposed)
+                {
+                    return;
+                }
+
+                if ((props == null) || string.IsNullOrEmpty(props.Title))
+                {
+                    if (!readOk && !immediate)
+                    {
+                        return;                   // 事件驱动读取失败：保持现状，等下一次事件
+                    }
+
+                    if (immediate)
+                    {
+                        // 用户主动切换到"空会话"：按实际状态立即清场（不再显示上一首）
+                        ClearMedia(seq, notify: true);
+                    }
+                    else
+                    {
+                        await ClearMediaAfterGraceAsync(sender, seq).ConfigureAwait(false);
+                    }
+                    return;
+                }
+
+                ApplyMedia(sender, props, seq);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 媒体属性处理失败: {ex.Message}");
+            }
+        }
+
+        private void ApplyMedia(
+            GlobalSystemMediaTransportControlsSession sender,
+            GlobalSystemMediaTransportControlsSessionMediaProperties props,
+            long seq)
+        {
+            bool trackChanged;
+
+            lock (_sessionGate)
+            {
+                if (!ReferenceEquals(sender, _currentSession))
+                {
+                    return;
+                }
+                if (!_mediaGate.TryApply(seq))
+                {
+                    return;                       // 已有更新的事件应用过，或序号过期
+                }
+
+                trackChanged = (CurrentTitle != props.Title)
+                            || (CurrentArtist != props.Artist)
+                            || (CurrentAlbum != props.AlbumTitle);
+
+                if (trackChanged)
+                {
+                    _thumbState.Reset();
+                }
+
+                CurrentTitle = props.Title;
+                CurrentArtist = props.Artist;
+                CurrentAlbum = props.AlbumTitle;
+                _mediaNotified = true;
+            }
+
+            if (trackChanged)
+            {
+                SafeInvoke(() => OnMediaUpdated?.Invoke(props));
+            }
+            _ = UpdateThumbnailAsync(sender, props.Thumbnail, seq);
+        }
+
+        private async Task ClearMediaAfterGraceAsync(
+            GlobalSystemMediaTransportControlsSession sender, long seq)
+        {
+            await Task.Delay(EmptyMediaGraceMs).ConfigureAwait(false);
+
+            if (!ReferenceEquals(sender, Volatile.Read(ref _currentSession)))
+            {
+                return;
+            }
+            if (_mediaGate.Applied > seq)
+            {
+                return;                           // 期间有更新的非空事件应用过：不是"空会话"
+            }
+
+            ClearMedia(seq, notify: true);
+        }
+
+        private void ClearMedia(long throughSeq, bool notify)
+        {
+            bool notifyCleared;
+
+            lock (_sessionGate)
+            {
+                if (!_mediaGate.TryClearThrough(throughSeq))
+                {
+                    return;                       // 期间已有更新事件应用，不能清掉新内容
+                }
+
+                CurrentTitle = null;
+                CurrentArtist = null;
+                CurrentAlbum = null;
+                _thumbState.Reset();
+
+                notifyCleared = notify && _mediaNotified;
+                if (notifyCleared)
+                {
+                    _mediaNotified = false;
+                }
+            }
+
+            if (notifyCleared)
+            {
+                SafeInvoke(MediaCleared);
             }
         }
 
         /// <summary>
         /// 读取 SMTC 封面原始字节并写入当前曲目的封面状态（不做缩放/重编码，压缩交给 Tools/ArtworkProcessor）。
         ///
-        /// <para>三点防护：</para>
+        /// <para>结果分三类：</para>
         /// <list type="bullet">
-        /// <item>整段 try/catch：会话消亡（播放器退出/切歌瞬间）OpenReadAsync 会抛 COMException(0x80030070)；</item>
-        /// <item><b>在状态锁内</b>校验 sender + seq：切歌/切会话瞬间系统会连发多个事件，
-        /// 且完成顺序不保证与触发顺序一致，旧事件的延迟完成必须丢弃；</item>
-        /// <item>内容摘要去重：同一首歌反复触发 MediaPropertiesChanged（Chrome 尤甚）时不重复通知。
-        /// <b>但换曲时 <see cref="ThumbnailState.Reset"/> 已同步清掉就绪标记</b>，所以
-        /// "新曲目封面字节与上一首相同"仍会通知（规范 §9.8-3 / §11.2 要求区分"没读出来"与"就是没有"）。</item>
+        /// <item><c>reference == null</c> / 流为空 → **确定没有封面**（§11 空资源）；</item>
+        /// <item>读取成功 → 正常字节；</item>
+        /// <item>读取抛异常（切歌瞬间 COMException 很常见）→ **暂时读不到**：做有限重试，
+        /// 仍失败则保持 not-ready（§9.8 的 NOT_READY），不会谎报"本曲无封面"。</item>
         /// </list>
+        ///
+        /// <para>状态写入仍在锁内校验 sender + 事件水位，切歌/切会话后旧结果直接丢弃。</para>
         /// </summary>
         private async Task UpdateThumbnailAsync(
             GlobalSystemMediaTransportControlsSession sender,
             IRandomAccessStreamReference? reference,
-            long seq)
+            long seq,
+            int attempt = 0)
         {
             byte[]? raw = null;
+            bool definitive = true;
 
             try
             {
                 if (reference != null)
                 {
-                    using IRandomAccessStreamWithContentType stream = await reference.OpenReadAsync();
-                    if (stream != null && stream.Size > 0)
+                    using IRandomAccessStreamWithContentType stream =
+                        await reference.OpenReadAsync();
+
+                    if ((stream != null) && (stream.Size > 0))
                     {
                         // AsStreamForRead 来自 System.IO.WindowsRuntimeStreamExtensions（Windows SDK 投影自带，无需额外 NuGet 包）
                         using Stream net = stream.AsStreamForRead();
                         using var ms = new MemoryStream();
-                        await net.CopyToAsync(ms);
-                        raw = ms.ToArray();
+                        await net.CopyToAsync(ms).ConfigureAwait(false);
+                        raw = (ms.Length == 0) ? null : ms.ToArray();
                     }
                 }
             }
             catch (Exception ex)
             {
-                // 部分播放器（Chrome 网页封面、某些 SMTC 提供方）拿不到缩略图 —— 按"无封面"降级即可
-                System.Diagnostics.Debug.WriteLine($"SMTC 封面读取失败: {ex.Message}");
+                definitive = false;
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 封面读取失败（第 {attempt + 1} 次）: {ex.Message}");
+            }
+
+            if (!definitive)
+            {
+                if (attempt < ThumbnailReadRetries)
+                {
+                    await Task.Delay(ThumbnailRetryDelayMs).ConfigureAwait(false);
+                    if (ReferenceEquals(sender, Volatile.Read(ref _currentSession)) && _mediaGate.IsLatest(seq))
+                    {
+                        await UpdateThumbnailAsync(sender, reference, seq, attempt + 1).ConfigureAwait(false);
+                    }
+                }
+                // 重试用尽：保持"还没读完"（资源层继续回 NOT_READY），等下一次媒体事件再试
+                return;
             }
 
             string? hash = raw == null ? null : Convert.ToHexString(SHA256.HashData(raw));
@@ -354,14 +825,18 @@ namespace MediaMonitor.Services
             // 在状态锁内再次校验 sender/seq：避免"读取期间刚好切歌"时把旧曲目封面
             // 写成新曲目的就绪状态。同曲目同字节只通知一次；换曲后的首个结果一定通知。
             bool accepted = _thumbState.TrySetIfCurrent(
-                () => sender == _currentSession && seq == Volatile.Read(ref _mediaUpdateSeq),
+                () => ReferenceEquals(sender, Volatile.Read(ref _currentSession)) && _mediaGate.IsLatest(seq),
                 raw, hash, out bool notify);
 
             if (!accepted)
-                return;   // 过期结果：会话已切换 / 已有更新的属性事件发出
+            {
+                return;   // 过期结果：会话已切换 / 已有更新的属性事件应用
+            }
 
             if (notify)
-                OnThumbnailUpdated?.Invoke(raw);
+            {
+                SafeInvoke(() => OnThumbnailUpdated?.Invoke(raw));
+            }
         }
 
         /// <summary>
@@ -390,15 +865,24 @@ namespace MediaMonitor.Services
 
         public MediaProgressInfo? GetCurrentProgress()
         {
-            if (_currentSession == null) return null;
+            var session = Volatile.Read(ref _currentSession);
+            if (session == null)
+            {
+                return null;
+            }
 
             try
             {
-                var timeline = _currentSession.GetTimelineProperties();
-                var playback = _currentSession.GetPlaybackInfo();
+                var timeline = session.GetTimelineProperties();
+                var playback = session.GetPlaybackInfo();
                 var status = playback.PlaybackStatus;
 
                 TimeSpan pos = timeline.Position;
+                double rate = playback.PlaybackRate ?? 1.0;
+                if (rate <= 0)
+                {
+                    rate = 1.0;
+                }
 
                 // Chrome 等浏览器不会像常规播放器那样频繁刷新 SMTC Position/LastUpdatedTime，
                 // 旧的 10 秒插值窗口会让进度在播放约 10 秒后停止前进（用户观察到的"卡住"）。
@@ -406,45 +890,109 @@ namespace MediaMonitor.Services
                 // 下方 EndTime/0 钳位兜底，确保外推永远不会越过曲目范围。
                 if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                 {
-                    if (_resumeAnchorValid)
+                    lock (_sessionGate)
                     {
-                        // 刚恢复播放：Timeline/LastUpdatedTime 仍停留在暂停时刻，
-                        // 必须从"恢复锚点"（进入 Playing 事件瞬间的 Position + 墙钟）外推，
-                        // 否则会把整个暂停时长虚增进第一个进度包。
-                        var resumePassed = DateTimeOffset.Now - _resumeBaseTime;
-                        if (resumePassed.TotalSeconds >= 0)
+                        if (!ReferenceEquals(session, _currentSession))
                         {
-                            pos = _resumeBasePosition + TimeSpan.FromTicks(
-                                (long)(resumePassed.Ticks * (playback.PlaybackRate ?? 1.0)));
+                            return null;           // 读取期间切换了会话：本次结果作废
                         }
 
-                        // 系统 Timeline 已刷新到恢复时刻之后 → 恢复正常 LastUpdatedTime 外推
-                        if (timeline.LastUpdatedTime >= _resumeBaseTime)
+                        if (_resumeAnchorValid)
                         {
-                            _resumeAnchorValid = false;
-                            pos = timeline.Position;
+                            // 刚恢复播放：Timeline/LastUpdatedTime 仍停留在暂停时刻，
+                            // 必须从"恢复锚点"（进入 Playing 事件瞬间的 Position + 墙钟）外推，
+                            // 否则会把整个暂停时长虚增进第一个进度包。
+                            var resumePassed = DateTimeOffset.Now - _resumeBaseTime;
+                            if (resumePassed.TotalSeconds >= 0)
+                            {
+                                pos = _resumeBasePosition + TimeSpan.FromTicks(
+                                    (long)(resumePassed.Ticks * rate));
+                            }
+
+                            // 系统 Timeline 已刷新到恢复时刻之后 → 恢复正常 LastUpdatedTime 外推
+                            if (timeline.LastUpdatedTime >= _resumeBaseTime)
+                            {
+                                _resumeAnchorValid = false;
+                                pos = timeline.Position;
+                            }
                         }
-                    }
-                    else
-                    {
-                        var timePassed = DateTimeOffset.Now - timeline.LastUpdatedTime;
-                        if (timePassed.TotalSeconds >= 0)
+                        else
                         {
-                            pos += TimeSpan.FromTicks((long)(timePassed.Ticks * (playback.PlaybackRate ?? 1.0)));
+                            var timePassed = DateTimeOffset.Now - timeline.LastUpdatedTime;
+                            if (timePassed.TotalSeconds >= 0)
+                            {
+                                pos += TimeSpan.FromTicks((long)(timePassed.Ticks * rate));
+                            }
                         }
                     }
                 }
 
-                if (pos > timeline.EndTime) pos = timeline.EndTime;
-                if (pos < TimeSpan.Zero) pos = TimeSpan.Zero;
+                // 时长 = EndTime - StartTime。部分直播/网页源不上报时长（EndTime=0），
+                // 此时绝不能拿 EndTime 去钳位，否则进度会被永久钉在 0。
+                TimeSpan duration = timeline.EndTime - timeline.StartTime;
+                if (duration < TimeSpan.Zero)
+                {
+                    duration = TimeSpan.Zero;
+                }
 
-                return new MediaProgressInfo(
-                    pos,
-                    timeline.EndTime,
-                    MapPlaybackStatus(status)
-                );
+                if ((duration > TimeSpan.Zero) && (pos > timeline.EndTime))
+                {
+                    pos = timeline.EndTime;
+                }
+                if (pos < TimeSpan.Zero)
+                {
+                    pos = TimeSpan.Zero;
+                }
+
+                return new MediaProgressInfo(pos, duration, MapPlaybackStatus(status));
             }
-            catch { return null; }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>安全触发事件：订阅者抛异常不能打断 SMTC 回调线程/异步支线。</summary>
+        private static void SafeInvoke(Action? action)
+        {
+            if (action == null)
+            {
+                return;
+            }
+
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 事件订阅者异常: {ex.Message}");
+            }
+        }
+
+        /// <summary>释放：摘除 manager 事件、停止去抖定时器、解绑当前会话（不向上层发清场通知）。</summary>
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+
+            try { _sessionSyncTimer.Dispose(); }
+            catch { /* 已释放 */ }
+
+            if ((_manager != null) && (_sessionsChangedHandler != null))
+            {
+                try { _manager.SessionsChanged -= _sessionsChangedHandler; }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[SMTC] 解绑会话列表事件失败: {ex.Message}"); }
+            }
+            _manager = null;
+
+            lock (_sessionGate)
+            {
+                DetachCurrentSessionLocked(notify: false);
+            }
         }
     }
 
@@ -521,6 +1069,89 @@ namespace MediaMonitor.Services
                 notify = true;
                 return true;
             }
+        }
+    }
+
+    /// <summary>
+    /// 媒体属性事件的排序闸门（纯逻辑，可单元测试）。
+    ///
+    /// <para><b>为什么不能用"最后发出的序号"判断有效性：</b>切歌过渡期的空属性事件、
+    /// 旧会话的在途回调都会取号，但它们<b>不应用</b>任何内容。若用"最新取号"作判据，
+    /// 这些事件会把同曲目正在读取的有效属性/封面作废，表现为标题不更新、封面长期 NOT_READY。</para>
+    ///
+    /// <para><b>规则：</b></para>
+    /// <list type="bullet">
+    /// <item><see cref="Begin"/>：为一次读取取号（调用方必须先确认 sender 是当前会话）；</item>
+    /// <item><see cref="TryApply"/>：只有比"已应用水位"更新的结果才能生效（属性应用、空会话清场）；</item>
+    /// <item><see cref="IsLatest"/>：封面等旁支结果只接受与当前水位相同的事件；</item>
+    /// <item><see cref="InvalidateAll"/>：切会话/会话消失时让所有在途读取失效。</item>
+    /// </list>
+    /// </summary>
+    internal sealed class MediaUpdateGate
+    {
+        private long _issued;
+        private long _applied;
+
+        /// <summary>已应用（或已清场）的最高事件号。</summary>
+        public long Applied => Volatile.Read(ref _applied);
+
+        /// <summary>取一个递增的事件号。</summary>
+        public long Begin() => Interlocked.Increment(ref _issued);
+
+        /// <summary>
+        /// 尝试把事件号 <paramref name="seq"/> 标记为已应用。
+        /// 返回 false = 已有更新的事件应用过（或序号非法），调用方应丢弃这次结果。
+        /// </summary>
+        public bool TryApply(long seq)
+        {
+            while (true)
+            {
+                long current = Volatile.Read(ref _applied);
+                if (seq <= current)
+                {
+                    return false;
+                }
+
+                if (Interlocked.CompareExchange(ref _applied, seq, current) == current)
+                {
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 把"清场"视为一次应用：只有当前水位不高于 <paramref name="seq"/> 时才允许清。
+        /// 返回 false = 期间已有更新的内容应用过，不能清掉新内容。
+        /// </summary>
+        public bool TryClearThrough(long seq)
+        {
+            while (true)
+            {
+                long current = Volatile.Read(ref _applied);
+                if (current > seq)
+                {
+                    return false;
+                }
+                if (current == seq)
+                {
+                    return true;
+                }
+
+                if (Interlocked.CompareExchange(ref _applied, seq, current) == current)
+                {
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>事件号是否仍是当前已应用水位（封面等旁支结果用它判断是否过期）。</summary>
+        public bool IsLatest(long seq) => Volatile.Read(ref _applied) == seq;
+
+        /// <summary>会话切换 / 会话消失：取一个新号并直接推进水位，使所有在途读取失效。</summary>
+        public void InvalidateAll()
+        {
+            long seq = Interlocked.Increment(ref _issued);
+            Interlocked.Exchange(ref _applied, seq);
         }
     }
 }

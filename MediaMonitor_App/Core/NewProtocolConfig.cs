@@ -66,5 +66,12 @@ namespace MediaMonitor.Core
         /// <summary>窗口位置与大小 "left,top,width,height"；程序自动维护（见 UI/WindowPlacement.cs）</summary>
         [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
         public string? WindowBounds { get; set; } = null;
+
+        /// <summary>
+        /// 媒体源下拉框里是否隐藏 <c>PlaybackStatus = Closed</c> 的会话（公共 UI 选项，
+        /// 与 Legacy 各存一份；界面切换时会把两份同时写成同一个值）。
+        /// 当前选中的会话永远保留，暂停/停止（Paused/Stopped）不会被隐藏。
+        /// </summary>
+        public bool HideClosedSessions { get; set; } = true;
     }
 }

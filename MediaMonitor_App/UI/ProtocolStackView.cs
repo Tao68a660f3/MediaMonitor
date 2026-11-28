@@ -85,6 +85,10 @@ namespace MediaMonitor.UI
                     App.Smtc?.CurrentTitle ?? "",
                     App.Smtc?.CurrentArtist ?? "",
                     App.Smtc?.CurrentAlbum ?? "");
+
+                // 断开期间硬件可能已经复位/清屏，重新连接后强制整屏重发歌词
+                //（同一首歌的重复 MediaPropertiesChanged 现在会被去重，不再依赖它来触发整车重发）
+                App.Master?.Invalidate();
             }
         }
 

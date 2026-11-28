@@ -13,8 +13,11 @@
         </Grid.RowDefinitions>
 
         <DockPanel Grid.Row="0" Margin="0,0,0,10">
-            <TextBlock Text="媒体源:" VerticalAlignment="Center" FontWeight="Bold" Margin="0,0,10,0"/>
-            <ComboBox x:Name="ComboSessions" DisplayMemberPath="SourceAppUserModelId" SelectionChanged="ComboSessions_SelectionChanged"/>
+            <TextBlock Text="媒体源:" DockPanel.Dock="Left" VerticalAlignment="Center" FontWeight="Bold" Margin="0,0,10,0"/>
+            <CheckBox x:Name="ChkHideClosedSessions" Content="隐藏已关闭会话"
+                      DockPanel.Dock="Right" VerticalAlignment="Center" Margin="10,0,0,0"
+                      IsChecked="True" Click="ChkHideClosedSessions_Click"/>
+            <ComboBox x:Name="ComboSessions" DisplayMemberPath="Display" SelectionChanged="ComboSessions_SelectionChanged"/>
         </DockPanel>
 
         <Border Grid.Row="1" Background="White" CornerRadius="5" Padding="15" Margin="0,0,0,10">

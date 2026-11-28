@@ -5,6 +5,8 @@ using MediaMonitor.Tools;
 using MediaMonitor.Tray;
 using MediaMonitor.UI;
 using System;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
@@ -19,6 +21,12 @@ namespace MediaMonitor
     {
         private DispatcherTimer _uiTimer;
         private bool _isInternalChange = false;
+
+        // 媒体源列表：只创建一次 ItemsSource，之后按会话身份增删（不重建，避免选择被清空/跳源）。
+        private readonly ObservableCollection<SessionListEntry> _sessionItems = new();
+        private bool _suppressSessionSelection;
+        private int _sessionReconcileTicks;      // 100ms UI 定时器计数：每 10 次（1s）做一次会话对账
+        private int _sessionRefreshQueued;       // 合并刷新请求（0/1）
 
         // 正在按代码设置模式单选（用于屏蔽 RadioButton 因程序赋值而产生的假"切换"事件）
         private bool _applyingMode = false;
@@ -81,7 +89,10 @@ namespace MediaMonitor
             // 3. 对接 SMTC 逻辑
             if (App.Smtc != null)
             {
-                // 记得我们刚才给 RefreshSessionList 加了 Dispatcher.Invoke 吗？
+                // ItemsSource 只绑定一次：之后由 RefreshSessionList 原地 diff，
+                // 不再整体重建（重建会清空选择 → 误发 SelectSession(null) → 硬件空元数据闪屏）
+                ComboSessions.ItemsSource = _sessionItems;
+
                 App.Smtc.SessionsListChanged += RefreshSessionList;
                 RefreshSessionList();
 
@@ -165,6 +176,7 @@ namespace MediaMonitor
                 // 只有彻底退出时才释放资源
                 _latencyTest?.Dispose();
                 _newView?.Shutdown();          // 新协议栈：摘掉 SMTC 事件 + 停掉心跳定时器
+                App.Smtc?.Dispose();           // SMTC：摘除 manager 事件、停止会话去抖定时器
                 _tray.Dispose();               // 串口扫描器随进程退出即可（SerialService 未实现 IDisposable）
             }
             base.OnClosing(e);
@@ -279,22 +291,224 @@ namespace MediaMonitor
             });
         }
 
+        /// <summary>
+        /// 会话列表刷新入口：可能由 SMTC 事件线程 / 去抖定时器 / UI 定时器调用。
+        /// 统一异步投递到 UI 线程并合并重复请求（绝不阻塞 SMTC 回调线程）。
+        /// </summary>
         private void RefreshSessionList()
         {
-            // 1. 获取数据可以在后台做，这没问题
-            if (App.Smtc == null)
-                return;
-
-            var sessions = App.Smtc.GetSessions();
-
-            // 2. 修改 UI 必须“翻墙”回到主线程
-            Application.Current.Dispatcher.Invoke(() =>
+            var dispatcher = Application.Current?.Dispatcher;
+            if (dispatcher == null || dispatcher.HasShutdownStarted)
             {
-                ComboSessions.ItemsSource = sessions;
+                return;
+            }
 
-                if (sessions.Count > 0 && ComboSessions.SelectedIndex == -1)
-                    ComboSessions.SelectedIndex = 0;
-            });
+            if (dispatcher.CheckAccess())
+            {
+                RebuildSessionItems();
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _sessionRefreshQueued, 1) != 0)
+            {
+                return;                            // 已排队，等它执行
+            }
+
+            dispatcher.BeginInvoke(new Action(() =>
+            {
+                Interlocked.Exchange(ref _sessionRefreshQueued, 0);
+                RebuildSessionItems();
+            }));
+        }
+
+        /// <summary>
+        /// 按最新会话快照原地更新下拉框：
+        /// * 隐藏 Closed 会话（当前选中的永远保留，避免选中项凭空消失）；
+        /// * 保留用户选择与顺序，不重建 ItemsSource（重建会误触发 SelectSession(null)）；
+        /// * 只有"原本没有选择"时才自动选第一个，避免自动改媒体源。
+        /// </summary>
+        private void RebuildSessionItems()
+        {
+            var smtc = App.Smtc;
+            if (smtc == null)
+            {
+                return;
+            }
+
+            bool hideClosed = GetHideClosedSessions();
+            var current = smtc.CurrentSession;
+            var sessions = smtc.GetSessions();
+
+            var desired = new List<SessionListEntry>(sessions.Count);
+            var aumidCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+
+            foreach (var session in sessions)
+            {
+                bool isCurrent = (current != null) && Equals(session, current);
+                var status = smtc.GetSessionPlaybackStatus(session);
+
+                if (hideClosed && !isCurrent &&
+                    status == Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed)
+                {
+                    continue;
+                }
+
+                string aumid = string.IsNullOrEmpty(session.SourceAppUserModelId)
+                    ? "(未知来源)"
+                    : session.SourceAppUserModelId;
+
+                aumidCounts.TryGetValue(aumid, out int count);
+                aumidCounts[aumid] = count + 1;
+
+                string label = (count == 0) ? aumid : $"{aumid} #{count + 1}";
+                if (status is { } st)
+                {
+                    label += $"（{StatusText(st)}）";
+                }
+
+                desired.Add(new SessionListEntry(session, label));
+            }
+
+            var previousSelected = ComboSessions.SelectedItem as SessionListEntry;
+            _suppressSessionSelection = true;
+            try
+            {
+                // 删除已经不存在的会话
+                for (int i = _sessionItems.Count - 1; i >= 0; i--)
+                {
+                    if (!desired.Any(d => Equals(d.Session, _sessionItems[i].Session)))
+                    {
+                        _sessionItems.RemoveAt(i);
+                    }
+                }
+
+                // 按 desired 的顺序插入/移动，并刷新状态文本
+                for (int i = 0; i < desired.Count; i++)
+                {
+                    int existing = IndexOfSession(desired[i].Session);
+                    if (existing < 0)
+                    {
+                        _sessionItems.Insert(Math.Min(i, _sessionItems.Count), desired[i]);
+                        continue;
+                    }
+
+                    if (existing != i)
+                    {
+                        _sessionItems.Move(existing, i);
+                    }
+
+                    _sessionItems[i].Display = desired[i].Display;
+                }
+
+                // 恢复选择（只按会话身份；不重新触发 SelectSession，避免无谓重载）
+                if (previousSelected != null)
+                {
+                    SessionListEntry? stillThere = FindSessionEntry(previousSelected.Session);
+                    if (stillThere != null)
+                    {
+                        ComboSessions.SelectedItem = stillThere;
+                    }
+                }
+            }
+            finally
+            {
+                _suppressSessionSelection = false;
+            }
+
+            // 原本没有选择才自动选第一个（用户已选的媒体源绝不自动改变）
+            if ((ComboSessions.SelectedItem == null) && (_sessionItems.Count > 0))
+            {
+                ComboSessions.SelectedIndex = 0;
+            }
+        }
+
+        private int IndexOfSession(Windows.Media.Control.GlobalSystemMediaTransportControlsSession session)
+        {
+            for (int i = 0; i < _sessionItems.Count; i++)
+            {
+                if (Equals(_sessionItems[i].Session, session))
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        private SessionListEntry? FindSessionEntry(Windows.Media.Control.GlobalSystemMediaTransportControlsSession session)
+        {
+            foreach (var entry in _sessionItems)
+            {
+                if (Equals(entry.Session, session))
+                {
+                    return entry;
+                }
+            }
+            return null;
+        }
+
+        private static string StatusText(
+            Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus status)
+            => status switch
+            {
+                Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus.Closed => "已关闭",
+                Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus.Opened => "已打开",
+                Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus.Changing => "切换中",
+                Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus.Stopped => "已停止",
+                Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing => "播放中",
+                Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackStatus.Paused => "已暂停",
+                _ => status.ToString()
+            };
+
+        /// <summary>隐藏已关闭会话：按“当前协议模式”的配置文件读取（界面保存时会同步写两份）。</summary>
+        private bool GetHideClosedSessions()
+        {
+            if ((App.Mode == ProtocolMode.New) && (App.NewConfigSvc != null))
+            {
+                return App.NewConfigSvc.Current.HideClosedSessions;
+            }
+            if ((App.Mode == ProtocolMode.Legacy) && (App.ConfigSvc != null))
+            {
+                return App.ConfigSvc.Current.HideClosedSessions;
+            }
+
+            return App.NewConfigSvc?.Current?.HideClosedSessions
+                ?? App.ConfigSvc?.Current?.HideClosedSessions
+                ?? true;
+        }
+
+        /// <summary>隐藏已关闭会话：两份配置文件同时写同一个值，切换协议模式后表现一致。</summary>
+        private void SaveHideClosedSessions(bool value)
+        {
+            bool changed = false;
+
+            if ((App.NewConfigSvc != null) && (App.NewConfigSvc.Current.HideClosedSessions != value))
+            {
+                App.NewConfigSvc.Current.HideClosedSessions = value;
+                App.NewConfigSvc.Save();
+                changed = true;
+            }
+
+            if ((App.ConfigSvc != null) && (App.ConfigSvc.Current.HideClosedSessions != value))
+            {
+                App.ConfigSvc.Current.HideClosedSessions = value;
+                App.ConfigSvc.Save();
+                changed = true;
+            }
+
+            if (changed)
+            {
+                RefreshSessionList();
+            }
+        }
+
+        private void ChkHideClosedSessions_Click(object sender, RoutedEventArgs e)
+        {
+            if (_isInternalChange)
+            {
+                return;
+            }
+
+            SaveHideClosedSessions(ChkHideClosedSessions.IsChecked == true);
         }
 
         private void LoadConfigToUI()
@@ -307,6 +521,9 @@ namespace MediaMonitor
                 if (App.ConfigSvc == null)
                     return;
                 var cfg = App.ConfigSvc.Current;
+
+                // 公共 UI 选项：隐藏已关闭会话（两份配置由 SaveHideClosedSessions 同步写）
+                ChkHideClosedSessions.IsChecked = GetHideClosedSessions();
 
                 // --- 1. 传输层与 IP ---
                 RbSerial.IsChecked = cfg.TransportMode == TransportType.Serial;
@@ -422,6 +639,18 @@ namespace MediaMonitor
 
             // 新协议面板的只读状态（会话 / 对端能力 / 延迟）：100ms 一次，跨线程由这里统一消化
             UpdateNewStatusUI();
+
+            // 会话列表对账（1s 一次）：兜底 SessionsChanged 漏事件 / 事件时刻快照过早。
+            // ReconcileSessions 内部先 diff，只有真的变化才触发 SessionsListChanged → 这里原地更新。
+            if (++_sessionReconcileTicks >= 10)
+            {
+                _sessionReconcileTicks = 0;
+                App.Smtc?.ReconcileSessions();
+
+                // ReconcileSessions 只在"会话增删"时通知；播放状态（Playing/Paused/Closed）变化
+                // 不会改变会话列表，但会影响"隐藏已关闭会话"的显示结果 → 每秒重算一次列表。
+                RefreshSessionList();
+            }
         }
 
         // MainWindow.xaml.cs 内部
@@ -593,8 +822,12 @@ namespace MediaMonitor
             if (App.Smtc == null)
                 return;
 
+            // 程序化增删/恢复选择时不要回灌 SmtcService（否则会无谓解绑重绑、重扫歌词）
+            if (_suppressSessionSelection)
+                return;
+
             // 从 ComboBox 中获取选中的会话并交给 SmtcService
-            var session = ComboSessions.SelectedItem as Windows.Media.Control.GlobalSystemMediaTransportControlsSession;
+            var session = (ComboSessions.SelectedItem as SessionListEntry)?.Session;
             App.Smtc.SelectSession(session);
         }
 
@@ -883,6 +1116,10 @@ namespace MediaMonitor
             {
                 _applyingMode = false;
             }
+
+            // 公共 UI 选项跟随“当前模式”的配置；隐藏规则变化后立即重算列表
+            ChkHideClosedSessions.IsChecked = GetHideClosedSessions();
+            RefreshSessionList();
 
             PanelNew.Visibility = isNew ? Visibility.Visible : Visibility.Collapsed;
             PanelLegacy.Visibility = isNew ? Visibility.Collapsed : Visibility.Visible;
@@ -1221,4 +1458,40 @@ namespace MediaMonitor
         /// <summary>查看当前 SMTC 封面（与协议模式无关：两种模式下都能用）</summary>
         private void BtnShowArtwork_Click(object sender, RoutedEventArgs e) => ShowArtworkPreview();
     }
+
+    /// <summary>
+    /// 媒体源下拉框条目：会话 + 显示文本（AUMID + 播放状态）。
+    /// <see cref="Display"/> 是可变可通知属性：状态变化时原地刷新，不重建列表（保持选择不变）。
+    /// </summary>
+    public sealed class SessionListEntry : INotifyPropertyChanged
+    {
+        private string _display;
+
+        public SessionListEntry(
+            Windows.Media.Control.GlobalSystemMediaTransportControlsSession session, string display)
+        {
+            Session = session ?? throw new ArgumentNullException(nameof(session));
+            _display = display;
+        }
+
+        public Windows.Media.Control.GlobalSystemMediaTransportControlsSession Session { get; }
+
+        public string Display
+        {
+            get => _display;
+            set
+            {
+                if (string.Equals(_display, value, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                _display = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Display)));
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+    }
+
 }

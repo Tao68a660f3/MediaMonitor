@@ -52,8 +52,9 @@ namespace MediaMonitor.Core
             _lyricService = lyricService;
             _smtc = smtc;
 
-            // 监听媒体更新
-            _smtc.OnMediaUpdated = props =>
+            // 监听媒体更新（用 +=：OnMediaUpdated 是事件，与 NewProtocolStack 的订阅共存，
+            // 构造顺序不再影响彼此 —— 过去用字段赋值，后构造的一方会静默覆盖前面的订阅）
+            _smtc.OnMediaUpdated += props =>
             {
                 // 过渡期空属性事件不触发加载/发送，避免清空歌词和发出空元数据包（双保险）
                 if (string.IsNullOrWhiteSpace(props.Title))

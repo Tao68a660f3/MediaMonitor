@@ -80,6 +80,15 @@ namespace MediaMonitor.Core
         public bool TransOccupies { get; set; } = true;     // 翻译是否占独立行
         public string LyricFolder { get; set; } = "";       // 歌词搜索路径
 
+        // === 媒体源列表（公共 UI 选项，两个模式各存一份、界面会同步写两份） ===
+        /// <summary>
+        /// 是否在「媒体源」下拉框里隐藏 <c>PlaybackStatus = Closed</c> 的会话。
+        /// <para>关闭窗口但进程常驻托盘的播放器、以及系统短暂保留的"已关闭"会话会被隐藏；
+        /// **当前选中的会话永远保留**，避免选中项突然消失导致下拉框跳变。
+        /// 暂停（Paused）/停止（Stopped）不算 Closed，不会被隐藏。</para>
+        /// </summary>
+        public bool HideClosedSessions { get; set; } = true;
+
         // === 时控配置 ===
         /// <summary>
         /// 进度同步包 (0x11) 的发送间隔

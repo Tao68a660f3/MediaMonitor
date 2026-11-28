@@ -653,6 +653,8 @@ internal static class Program
             Check("(a) 无文件 → New 默认（Com / COM3 / 115200 / 500ms）",
                   (fresh.TransportMode == NewTransportType.Com) && (fresh.ComPortName == "COM3") &&
                   (fresh.BaudRate == 115200) && (fresh.SyncIntervalMs == 500));
+            Check("(a2) 无文件 → 媒体源默认隐藏已关闭会话（HideClosedSessions=true）",
+                  fresh.HideClosedSessions);
 
             /* (b) 单项非法 → 只回退该项；未知键忽略；枚举可用字符串写 */
             WriteConfig(newFile, """
@@ -690,12 +692,13 @@ internal static class Program
             svc.Current.ComPortName = "COM7";
             svc.Current.SyncIntervalMs = 250;
             svc.Current.WindowBounds = "100,120,520,850";
+            svc.Current.HideClosedSessions = false;
             svc.Save();
 
             var reload = new ConfigService<NewProtocolConfig>(newFile).Current;
-            Check("(e) 保存后重载一致（ComPortName / SyncIntervalMs / WindowBounds）",
+            Check("(e) 保存后重载一致（ComPortName / SyncIntervalMs / WindowBounds / HideClosedSessions）",
                   (reload.ComPortName == "COM7") && (reload.SyncIntervalMs == 250) &&
-                  (reload.WindowBounds == "100,120,520,850"));
+                  (reload.WindowBounds == "100,120,520,850") && !reload.HideClosedSessions);
 
             /* (f) Legacy 服务泛型化后行为不变 */
             File.Delete(ConfigPath(legacyFile));
@@ -1741,6 +1744,56 @@ internal static class Program
               notify4 && state.Ready && state.TryGet(out byte[]? none) && none == null);
     }
 
+    /* ---------------- R20：媒体事件排序闸门 ---------------- */
+
+    /// <summary>
+    /// R20：验证 <see cref="MediaUpdateGate"/> 解决的两类问题：
+    /// 1) 切歌过渡期的空属性事件 / 旧会话在途事件**不应用**，不能把同曲目正在读取的有效属性/封面作废；
+    /// 2) 切会话时所有在途读取失效，新事件仍能正常应用。
+    /// </summary>
+    private static void TestMediaUpdateGate()
+    {
+        Console.WriteLine("R20 媒体事件排序闸门（空事件/旧会话不误杀有效读取）");
+
+        var gate = new MediaUpdateGate();
+        Check("R20 初始水位为 0", gate.Applied == 0);
+
+        long a = gate.Begin();
+        Check("R20 首个有效事件成功应用", gate.TryApply(a) && gate.IsLatest(a));
+
+        // 切歌过渡期：取号后读到空 Title（不应用）
+        long empty = gate.Begin();
+        Check("R20 空事件取号但不推进水位", gate.Applied == a);
+        Check("R20 空事件不会让封面旁支误判过期（IsLatest 仍认 a）", gate.IsLatest(a));
+
+        var gate2 = new MediaUpdateGate();
+        long pending = gate2.Begin();          // 有效读取（尚未完成）
+        gate2.Begin();                         // 空事件（只取号，不应用）
+        Check("R20 空事件之后，较早的有效读取仍可应用", gate2.TryApply(pending));
+        Check("R20 有效读取应用后水位等于该事件号", gate2.Applied == pending);
+
+        long newer = gate2.Begin();
+        Check("R20 更新的有效事件可覆盖旧事件", gate2.TryApply(newer));
+        Check("R20 已应用旧事件被拒绝、旧封面旁支识别为过期",
+              !gate2.TryApply(pending) && !gate2.IsLatest(pending) && gate2.IsLatest(newer));
+
+        var gate3 = new MediaUpdateGate();
+        long grace = gate3.Begin();
+        Check("R20 空会话清场：无更新内容时允许清", gate3.TryClearThrough(grace));
+        Check("R20 清场会推进水位（后续旧读取失效）", gate3.IsLatest(grace) && !gate3.TryApply(grace));
+
+        long afterClear = gate3.Begin();
+        Check("R20 清场后的新事件仍可应用", gate3.TryApply(afterClear));
+        Check("R20 更早的空事件不能清掉已应用的新内容", !gate3.TryClearThrough(grace));
+
+        var gate4 = new MediaUpdateGate();
+        long inFlight = gate4.Begin();
+        gate4.InvalidateAll();
+        Check("R20 切会话：在途读取全部失效", !gate4.TryApply(inFlight) && !gate4.IsLatest(inFlight));
+        long next = gate4.Begin();
+        Check("R20 切会话后新事件正常应用", gate4.TryApply(next));
+    }
+
     /// <summary>写一个两行的合法 LRC（R17 用）。</summary>
     private static void WriteLrcFile(string path, string first = "第一行", string second = "第二行")
         => File.WriteAllText(path, $"[00:00.00]{first}\n[00:01.00]{second}\n", new UTF8Encoding(false));
@@ -1831,6 +1884,8 @@ internal static class Program
         TestLyricMatching();
         Console.WriteLine();
         TestThumbnailState();
+        Console.WriteLine();
+        TestMediaUpdateGate();
         Console.WriteLine();
         TestResourceNotModified();
 
