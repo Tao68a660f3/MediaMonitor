@@ -20,7 +20,7 @@
     临时覆盖（打包/CI）：dotnet publish -p:Version=&lt;三段号&gt;
   -->
   <PropertyGroup>
-    <Version>3.3.5</Version>
+    <Version>3.3.6</Version>
     <AssemblyTitle>媒体同步调试终端</AssemblyTitle>
     <Product>媒体同步调试终端</Product>
   </PropertyGroup>

@@ -36,6 +36,25 @@ namespace MediaMonitor.Core
         // --- 当前绑定的媒体会话（用于识别“切换会话”并跳过第一帧，避免误判 Seek / 发旧歌词）---
         private GlobalSystemMediaTransportControlsSession? _lastSession;
 
+        /// <summary>
+        /// 两个会话是否属于同一个媒体源（AUMID 相同）。
+        /// 播放器切歌时经常“销毁旧会话对象 + 创建同 AUMID 的新对象”，
+        /// 这属于同一媒体源内部迁移，不应清空歌词账本。
+        /// </summary>
+        private static bool SameSource(
+            GlobalSystemMediaTransportControlsSession? a,
+            GlobalSystemMediaTransportControlsSession? b)
+        {
+            try
+            {
+                string? aumidA = a?.SourceAppUserModelId;
+                string? aumidB = b?.SourceAppUserModelId;
+                return !string.IsNullOrEmpty(aumidA)
+                    && string.Equals(aumidA, aumidB, StringComparison.Ordinal);
+            }
+            catch { return false; }
+        }
+
         // --- 统计学习变量 ---
         private double _lastSmtcMediaSec = -1;
         private double _lastSmtcWallSec = -1;
@@ -174,11 +193,20 @@ namespace MediaMonitor.Core
             var session = _smtc.CurrentSession;
             if (!ReferenceEquals(session, _lastSession))
             {
+                bool sameSource = SameSource(session, _lastSession);
+
                 _lastSession = session;
                 _lastSeenPositionMs = cur;
                 _lastSyncTimeMs = Environment.TickCount64;
-                Invalidate();
-                _lastProcessedCIdx = -2;
+
+                // 同一个 AUMID 的会话对象重建（播放器切歌常见）：媒体源没变，
+                // 屏幕上的歌词账本仍然有效，不能因为对象身份变了就整屏重发。
+                // 如果确实是新曲目，ApplyMedia 的 trackChanged=True 会触发 OnMediaUpdated，
+                // 由那里负责 LoadAndParse + Invalidate。
+                if (!sameSource)
+                {
+                    Invalidate();
+                }
                 return;
             }
 
@@ -198,9 +226,11 @@ namespace MediaMonitor.Core
             {
                 _lastLrcGeneration = _lyricService.Generation;
                 Invalidate();
-                _lastProcessedCIdx = -2;
             }
 
+            // 注意：部分播放器会先重置进度并触发本循环，稍后才发 MediaPropertiesChanged。
+            // 新歌词代际尚未更新时，本帧可能仍按上一首歌词发送（事件顺序决定的瞬态）；
+            // OnMediaUpdated 到达后由 Invalidate 立即纠正。
             int cIdx = lrc.FindLastIndex(l => l.Time <= prog.Position);
 
             LyricChanged?.Invoke(cIdx, _lyricService.GetLine(cIdx, lrc));
