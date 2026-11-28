@@ -80,6 +80,9 @@ namespace MediaMonitor.Services
         /// <summary>0/1：并发调用时保证只有一个线程在刷新进度缓存。</summary>
         private int _progressRefreshBusy;
 
+        /// <summary>正在读取/应用媒体属性的事件数；&gt;0 时 PackageMaster 暂停发送旧帧（原子发布闸门）。</summary>
+        private int _mediaUpdatePending;
+
         private const int ProgressFallbackRefreshMs = 1000;
         private IReadOnlyList<GlobalSystemMediaTransportControlsSession> _lastSessions =
             Array.Empty<GlobalSystemMediaTransportControlsSession>();
@@ -149,6 +152,13 @@ namespace MediaMonitor.Services
         /// <summary>当前选中的会话（仅供 UI 做"始终保留当前项"的判断；没有则为 null）。</summary>
         public GlobalSystemMediaTransportControlsSession? CurrentSession => Volatile.Read(ref _currentSession);
 
+        /// <summary>
+        /// 是否有媒体属性更新正在读取/应用。
+        /// <para>为 true 时上层（Legacy PackageMaster）应暂停发送旧帧：
+        /// 避免切换会话/切歌瞬间先发出 seek 包或旧账本差分歌词，等新元数据/歌词就绪后再发。</para>
+        /// </summary>
+        public bool MediaUpdatePending => Volatile.Read(ref _mediaUpdatePending) > 0;
+
         public async Task InitializeAsync()
         {
             if (_disposed || (_manager != null))
@@ -202,6 +212,7 @@ namespace MediaMonitor.Services
 
                 bool changed;
                 bool notifyCleared = false;
+                GlobalSystemMediaTransportControlsSession? migratedTo = null;
 
                 lock (_sessionGate)
                 {
@@ -213,9 +224,49 @@ namespace MediaMonitor.Services
 
                     if ((_currentSession != null) && !ContainsSession(sessions, _currentSession))
                     {
-                        // 当前会话已不在系统列表里（播放器退出 / 会话关闭）：彻底清场并通知上层
-                        notifyCleared = DetachCurrentSessionLocked(notify: true);
+                        // 播放器每次切歌都可能新建会话对象：同 AUMID 的新会话视为“同一媒体源重建”，
+                        // 平滑迁移、保留旧标题/封面，避免 MediaCleared 清屏与 UI 选择跳变。
+                        var replacement = FindReplacementSession(sessions, _currentSession);
+
+                        if ((replacement != null) && BindSession(replacement))
+                        {
+                            var old = _currentSession;
+                            UnbindSession(old);
+
+                            _currentSession = replacement;
+                            _mediaGate.InvalidateAll();
+                            _resumeAnchorValid = false;
+
+                            // 进度缓存切到新会话；标题/封面保留到新属性读出后再统一应用
+                            try
+                            {
+                                var timeline = replacement.GetTimelineProperties();
+                                var playback = replacement.GetPlaybackInfo();
+                                StoreProgressCacheLocked(replacement, timeline, playback, updateAnchor: false);
+                            }
+                            catch (Exception ex)
+                            {
+                                _lastTimeline = null;
+                                _lastPlayback = null;
+                                _lastProgressCacheAt = DateTimeOffset.MinValue;
+                                System.Diagnostics.Debug.WriteLine($"[SMTC] 迁移会话的初始进度读取失败: {ex.Message}");
+                            }
+
+                            migratedTo = replacement;
+                        }
+                        else
+                        {
+                            // 没有同 AUMID 的替代会话 → 播放器真的退出了
+                            notifyCleared = DetachCurrentSessionLocked(notify: true);
+                        }
                     }
+                }
+
+                if (migratedTo != null)
+                {
+                    // 先进入 pending 闸门，再通知列表/上层：避免切换后的第一拍被当成 Seek。
+                    // 不 immediate：属性读失败时保留旧内容，等下一次事件。
+                    StartMediaRead(migratedTo, immediate: false);
                 }
 
                 if (notifyCleared)
@@ -315,6 +366,49 @@ namespace MediaMonitor.Services
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// 找同 AUMID 的替代会话（播放器切歌时常见的“旧对象销毁 + 新对象创建”）。
+        /// 优先返回正在播放的，其次返回第一个同 AUMID 的。
+        /// </summary>
+        private static GlobalSystemMediaTransportControlsSession? FindReplacementSession(
+            IReadOnlyList<GlobalSystemMediaTransportControlsSession> sessions,
+            GlobalSystemMediaTransportControlsSession current)
+        {
+            string aumid = current.SourceAppUserModelId;
+            if (string.IsNullOrEmpty(aumid))
+            {
+                return null;
+            }
+
+            GlobalSystemMediaTransportControlsSession? first = null;
+
+            for (int i = 0; i < sessions.Count; i++)
+            {
+                var candidate = sessions[i];
+                if (!string.Equals(candidate.SourceAppUserModelId, aumid, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                first ??= candidate;
+
+                try
+                {
+                    if (candidate.GetPlaybackInfo().PlaybackStatus ==
+                        GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
+                    {
+                        return candidate;
+                    }
+                }
+                catch
+                {
+                    // 查询失败就按普通候选处理
+                }
+            }
+
+            return first;
         }
 
         /// <summary>
@@ -537,7 +631,7 @@ namespace MediaMonitor.Services
             {
                 // 关键：强制在线程池上开始读取。SelectSession 由 UI 线程调用，
                 // 若直接 await WinRT 操作会捕获 WPF 同步上下文，导致歌词目录扫描 / 封面解码跑在 UI 线程。
-                _ = Task.Run(() => ReadMediaPropertiesAsync(session, immediate: true));
+                StartMediaRead(session, immediate: true);
             }
         }
 
@@ -697,7 +791,34 @@ namespace MediaMonitor.Services
         private void Session_MediaPropertiesChanged(
             GlobalSystemMediaTransportControlsSession sender,
             MediaPropertiesChangedEventArgs? args)
-            => _ = Task.Run(() => ReadMediaPropertiesAsync(sender, immediate: args is null));
+        {
+            if (!ReferenceEquals(sender, Volatile.Read(ref _currentSession)))
+            {
+                return;                       // 旧会话的在途事件：不进入 pending 闸门
+            }
+
+            StartMediaRead(sender, immediate: args is null);
+        }
+
+        /// <summary>
+        /// 启动一次媒体属性读取，并在读取+应用（含歌词闸门）期间把 <see cref="MediaUpdatePending"/> 置位。
+        /// </summary>
+        private void StartMediaRead(GlobalSystemMediaTransportControlsSession session, bool immediate)
+        {
+            Interlocked.Increment(ref _mediaUpdatePending);
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ReadMediaPropertiesAsync(session, immediate).ConfigureAwait(false);
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _mediaUpdatePending);
+                }
+            });
+        }
 
         private async Task ReadMediaPropertiesAsync(
             GlobalSystemMediaTransportControlsSession sender, bool immediate)

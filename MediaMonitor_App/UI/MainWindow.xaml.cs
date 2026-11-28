@@ -25,6 +25,9 @@ namespace MediaMonitor
         // 媒体源列表：只创建一次 ItemsSource，之后按会话身份增删（不重建，避免选择被清空/跳源）。
         private readonly ObservableCollection<SessionListEntry> _sessionItems = new();
         private bool _suppressSessionSelection;
+        private bool _autoSelectingSession;      // 程序自动选第一个时为 true（不覆盖用户选择）
+        private string? _userSelectedSessionKey;     // 上一次“用户亲手选择”的媒体源 Key
+        private string? _internalSelectedSessionKey; // 上一次“程序恢复/自动选择”的媒体源 Key
         private int _sessionReconcileTicks;      // 100ms UI 定时器计数：每 10 次（1s）做一次会话对账
         private int _sessionRefreshQueued;       // 合并刷新请求（0/1）
 
@@ -340,7 +343,7 @@ namespace MediaMonitor
             var sessions = smtc.GetSessions();
 
             var desired = new List<SessionListEntry>(sessions.Count);
-            var aumidCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+            var keyCounts = new Dictionary<string, int>(StringComparer.Ordinal);
 
             foreach (var session in sessions)
             {
@@ -357,35 +360,38 @@ namespace MediaMonitor
                     ? "(未知来源)"
                     : session.SourceAppUserModelId;
 
-                aumidCounts.TryGetValue(aumid, out int count);
-                aumidCounts[aumid] = count + 1;
+                keyCounts.TryGetValue(aumid, out int count);
+                keyCounts[aumid] = count + 1;
 
+                // 稳定 key：AUMID（同 AUMID 多会话加 #2/#3）。
+                // 播放器切歌重建会话时 AUMID 不变 → key 不变 → 下拉框选择不会被清掉。
+                string key = (count == 0) ? aumid : $"{aumid}#{count + 1}";
                 string label = (count == 0) ? aumid : $"{aumid} #{count + 1}";
                 if (status is { } st)
                 {
                     label += $"（{StatusText(st)}）";
                 }
 
-                desired.Add(new SessionListEntry(session, label));
+                desired.Add(new SessionListEntry(session, key, label));
             }
 
             var previousSelected = ComboSessions.SelectedItem as SessionListEntry;
             _suppressSessionSelection = true;
             try
             {
-                // 删除已经不存在的会话
+                // 删除已经不存在的 key
                 for (int i = _sessionItems.Count - 1; i >= 0; i--)
                 {
-                    if (!desired.Any(d => Equals(d.Session, _sessionItems[i].Session)))
+                    if (!desired.Any(d => string.Equals(d.Key, _sessionItems[i].Key, StringComparison.Ordinal)))
                     {
                         _sessionItems.RemoveAt(i);
                     }
                 }
 
-                // 按 desired 的顺序插入/移动，并刷新状态文本
+                // 按 desired 顺序插入/移动；同 key 只更新会话对象与文本，不替换 entry
                 for (int i = 0; i < desired.Count; i++)
                 {
-                    int existing = IndexOfSession(desired[i].Session);
+                    int existing = IndexOfSessionKey(desired[i].Key);
                     if (existing < 0)
                     {
                         _sessionItems.Insert(Math.Min(i, _sessionItems.Count), desired[i]);
@@ -397,16 +403,34 @@ namespace MediaMonitor
                         _sessionItems.Move(existing, i);
                     }
 
+                    _sessionItems[i].SetSession(desired[i].Session);
                     _sessionItems[i].Display = desired[i].Display;
                 }
 
-                // 恢复选择（只按会话身份；不重新触发 SelectSession，避免无谓重载）
-                if (previousSelected != null)
+                // 选择优先级：用户选择 > 上次程序选择 > 当前选中项
+                SessionListEntry? target = null;
+                if (!string.IsNullOrEmpty(_userSelectedSessionKey))
                 {
-                    SessionListEntry? stillThere = FindSessionEntry(previousSelected.Session);
-                    if (stillThere != null)
+                    target = FindSessionEntryByKey(_userSelectedSessionKey);
+                }
+                if (target == null && !string.IsNullOrEmpty(_internalSelectedSessionKey))
+                {
+                    target = FindSessionEntryByKey(_internalSelectedSessionKey);
+                }
+                if (target == null && previousSelected != null)
+                {
+                    target = FindSessionEntryByKey(previousSelected.Key);
+                }
+
+                if (target != null)
+                {
+                    ComboSessions.SelectedItem = target;
+                    _internalSelectedSessionKey = target.Key;   // 这是程序恢复，不是用户操作
+
+                    if ((previousSelected == null) ||
+                        !string.Equals(previousSelected.Key, target.Key, StringComparison.Ordinal))
                     {
-                        ComboSessions.SelectedItem = stillThere;
+                        Debug.WriteLine($"[媒体源] 程序恢复选择: {target.Key}");
                     }
                 }
             }
@@ -415,18 +439,35 @@ namespace MediaMonitor
                 _suppressSessionSelection = false;
             }
 
-            // 原本没有选择才自动选第一个（用户已选的媒体源绝不自动改变）
+            // 原本没有选择才自动选第一个（记为内部选择，不覆盖用户选择）
             if ((ComboSessions.SelectedItem == null) && (_sessionItems.Count > 0))
             {
-                ComboSessions.SelectedIndex = 0;
+                _autoSelectingSession = true;
+                try
+                {
+                    ComboSessions.SelectedIndex = 0;
+                }
+                finally
+                {
+                    _autoSelectingSession = false;
+                }
+            }
+
+            // 会话对象可能被播放器重建：让 SmtcService 指向 UI 当前选中的新对象。
+            // 这属于“同一媒体源内部更新”，不改变 _userSelectedSessionKey。
+            if ((ComboSessions.SelectedItem is SessionListEntry selected) &&
+                !ReferenceEquals(smtc.CurrentSession, selected.Session))
+            {
+                _internalSelectedSessionKey = selected.Key;
+                smtc.SelectSession(selected.Session);
             }
         }
 
-        private int IndexOfSession(Windows.Media.Control.GlobalSystemMediaTransportControlsSession session)
+        private int IndexOfSessionKey(string key)
         {
             for (int i = 0; i < _sessionItems.Count; i++)
             {
-                if (Equals(_sessionItems[i].Session, session))
+                if (string.Equals(_sessionItems[i].Key, key, StringComparison.Ordinal))
                 {
                     return i;
                 }
@@ -434,11 +475,11 @@ namespace MediaMonitor
             return -1;
         }
 
-        private SessionListEntry? FindSessionEntry(Windows.Media.Control.GlobalSystemMediaTransportControlsSession session)
+        private SessionListEntry? FindSessionEntryByKey(string key)
         {
             foreach (var entry in _sessionItems)
             {
-                if (Equals(entry.Session, session))
+                if (string.Equals(entry.Key, key, StringComparison.Ordinal))
                 {
                     return entry;
                 }
@@ -826,9 +867,33 @@ namespace MediaMonitor
             if (_suppressSessionSelection)
                 return;
 
-            // 从 ComboBox 中获取选中的会话并交给 SmtcService
-            var session = (ComboSessions.SelectedItem as SessionListEntry)?.Session;
-            App.Smtc.SelectSession(session);
+            var entry = ComboSessions.SelectedItem as SessionListEntry;
+
+            if (entry == null)
+            {
+                if (!_autoSelectingSession)
+                {
+                    // 用户清空 / 列表自然清空：不保留“用户选择”
+                    _userSelectedSessionKey = null;
+                    App.Smtc.SelectSession(null);
+                }
+                return;
+            }
+
+            if (_autoSelectingSession)
+            {
+                // 程序自动选第一个：记录为“内部选择”，不覆盖用户选择
+                _internalSelectedSessionKey = entry.Key;
+                Debug.WriteLine($"[媒体源] 自动选择: {entry.Key}");
+            }
+            else
+            {
+                // 用户亲手选择：这份记录优先，程序刷新不会覆盖它
+                _userSelectedSessionKey = entry.Key;
+                Debug.WriteLine($"[媒体源] 用户选择: {entry.Key}");
+            }
+
+            App.Smtc.SelectSession(entry.Session);
         }
 
         private void BtnBrowse_Click(object sender, RoutedEventArgs e)
@@ -1468,13 +1533,28 @@ namespace MediaMonitor
         private string _display;
 
         public SessionListEntry(
-            Windows.Media.Control.GlobalSystemMediaTransportControlsSession session, string display)
+            Windows.Media.Control.GlobalSystemMediaTransportControlsSession session,
+            string key,
+            string display)
         {
             Session = session ?? throw new ArgumentNullException(nameof(session));
+            Key = key;
             _display = display;
         }
 
-        public Windows.Media.Control.GlobalSystemMediaTransportControlsSession Session { get; }
+        /// <summary>稳定标识（AUMID[#n]）：播放器切歌重建会话对象时保持不变。</summary>
+        public string Key { get; }
+
+        /// <summary>当前实际指向的 WinRT 会话（重建会话时原地替换）。</summary>
+        public Windows.Media.Control.GlobalSystemMediaTransportControlsSession Session { get; private set; }
+
+        /// <summary>播放器重建会话时更新指向，不改变列表项对象（保持选中不变）。</summary>
+        public void SetSession(Windows.Media.Control.GlobalSystemMediaTransportControlsSession session)
+        {
+            Session = session ?? throw new ArgumentNullException(nameof(session));
+        }
+
+        public override string ToString() => _display;
 
         public string Display
         {

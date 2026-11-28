@@ -33,6 +33,9 @@ namespace MediaMonitor.Core
         // --- Seek/进度跳变检测（切歌的大跳变也归入 Seek，立即补发同步包）---
         private double _lastSeenPositionMs = -1;   // 上一帧看到的播放器进度
 
+        // --- 当前绑定的媒体会话（用于识别“切换会话”并跳过第一帧，避免误判 Seek / 发旧歌词）---
+        private GlobalSystemMediaTransportControlsSession? _lastSession;
+
         // --- 统计学习变量 ---
         private double _lastSmtcMediaSec = -1;
         private double _lastSmtcWallSec = -1;
@@ -77,6 +80,14 @@ namespace MediaMonitor.Core
             // 监听播放状态
             _smtc.PlaybackChanged += status =>
             {
+                // 新会话的首个播放状态：此时元数据/新歌词可能还没就绪，
+                // 先不发同步包（由 OnMediaUpdated / ProcessTick 重置后发），避免 0x11 抢在 0x10 前面。
+                var session = _smtc.CurrentSession;
+                if (!ReferenceEquals(session, _lastSession) || _smtc.MediaUpdatePending)
+                {
+                    return;
+                }
+
                 _isPlaying = (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
 
                 // 立即获取当前进度并同步给硬件（单位：毫秒）
@@ -98,6 +109,7 @@ namespace MediaMonitor.Core
             _smtc.MediaCleared += () =>
             {
                 _isPlaying = false;
+                _lastSession = null;
                 _lastSeenPositionMs = -1;
                 _totalSeconds = 0;
                 _lastSmtcMediaSec = -1;
@@ -155,6 +167,27 @@ namespace MediaMonitor.Core
             UpdateStatistics(prog);
 
             double cur = prog.Position.TotalMilliseconds;
+
+            // 切换会话 / 播放器重建会话：第一帧只重置基线，不发任何旧帧。
+            // 否则新会话位置相对上一首会跳变 → 被误判为 Seek → 先发同步包/旧账本差分歌词，
+            // 之后 OnMediaUpdated 才发出新元数据和新歌词。
+            var session = _smtc.CurrentSession;
+            if (!ReferenceEquals(session, _lastSession))
+            {
+                _lastSession = session;
+                _lastSeenPositionMs = cur;
+                _lastSyncTimeMs = Environment.TickCount64;
+                Invalidate();
+                _lastProcessedCIdx = -2;
+                return;
+            }
+
+            // 媒体属性/歌词正在更新（含同一会话内切歌）：不要用旧账本/旧歌词发帧，
+            // 等 OnMediaUpdated 把新内容准备好后再发。
+            if (_smtc.MediaUpdatePending)
+            {
+                return;
+            }
 
             // ① 原子捕获歌词快照：整帧内所有歌词读取基于同一实例，
             // 与 LoadAndParse 的局部构建 + 一次性发布配合，保证绝不读到新旧混杂的半成品

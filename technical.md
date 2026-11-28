@@ -38,6 +38,8 @@
 * **上层约定**：`PackageMaster` 订阅 `MediaCleared` 后**只清上位机侧状态**（复位统计量 → `LyricService.LoadAndParse("", "", "")` 发布空歌词 → `Invalidate()` 清账本 → 主动触发一次 `LyricChanged(-1, 空行)` 清掉界面预览），**不向硬件下发任何清场/停止包**，硬件保留最后一帧画面。
 * **清屏/复位走既有通路**：新协议 `NewProtocolStack.OnMediaCleared` 会 `AbortCurrent` + 发空元数据（三字段全 0）请硬件复位；Legacy 仍是“无歌曲状态下重新点一次「开始连接」补发空元数据” —— 见 readme 协议说明里的注记。
 * **媒体源下拉框**：`ItemsSource` 只绑定一次（`ObservableCollection<SessionListEntry>`），之后按会话身份原地增删/改状态文本，保留用户选择；只有“原本没有选择”时才自动选第一个，绝不因为别的会话出现/消失而改媒体源。`HideClosedSessions`（默认 true，两份配置同步写）控制是否隐藏 `PlaybackStatus=Closed` 的会话，**当前选中的会话永远保留**；暂停/停止不会被隐藏。
+* **媒体源选择记录（用户 vs 程序）**：稳定 key = `AUMID[#n]`，会话对象重建只更新 `SessionListEntry.Session`，不触发 `SelectionChanged`。`_userSelectedSessionKey` 只记录用户亲手选择，`_internalSelectedSessionKey` 记录程序恢复/自动选择；刷新时优先用户 key，其次内部 key，用户 key 对应的会话重新出现会自动选回。
+* **会话重建迁移 + 原子发布闸门**：同 AUMID 的新会话视为“同一媒体源重建”，`ReconcileSessions` 平滑迁移（解绑旧、绑定新、保留旧标题/封面，不触发 `MediaCleared`）；媒体属性读取/应用期间 `MediaUpdatePending=true`，`PackageMaster` 暂停发送，并在 `CurrentSession` 变化的第一帧重置 Seek 基线与账本，保证顺序是 `MEDIA → SYNC → 新歌词`，不会先发 Seek 包或旧账本差分帧。
 
 ### 1.3 歌词：LyricService（快照）+ LyricMatcher（元数据匹配）+ LyricParser（格式插件）
 
