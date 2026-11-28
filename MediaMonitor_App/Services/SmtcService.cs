@@ -72,6 +72,15 @@ namespace MediaMonitor.Services
         /// 避免 10ms/100ms 循环重复发起跨进程调用。</para>
         /// </summary>
         private GlobalSystemMediaTransportControlsSessionTimelineProperties? _lastTimeline;
+        private GlobalSystemMediaTransportControlsSessionPlaybackInfo? _lastPlayback;
+
+        /// <summary>进度缓存（Timeline + Playback）的写入时间；超过 1s 由 GetCurrentProgress 兜底刷新一次。</summary>
+        private DateTimeOffset _lastProgressCacheAt;
+
+        /// <summary>0/1：并发调用时保证只有一个线程在刷新进度缓存。</summary>
+        private int _progressRefreshBusy;
+
+        private const int ProgressFallbackRefreshMs = 1000;
         private IReadOnlyList<GlobalSystemMediaTransportControlsSession> _lastSessions =
             Array.Empty<GlobalSystemMediaTransportControlsSession>();
         private bool _disposed;
@@ -329,6 +338,8 @@ namespace MediaMonitor.Services
             _resumeAnchorValid = false;
             _currentSession = null;
             _lastTimeline = null;
+            _lastPlayback = null;
+            _lastProgressCacheAt = default;
 
             CurrentTitle = null;
             CurrentArtist = null;
@@ -372,8 +383,98 @@ namespace MediaMonitor.Services
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"[SMTC] 解绑播放事件失败: {ex.Message}"); }
         }
 
+        /// <summary>写入进度缓存（调用方必须持有 <see cref="_sessionGate"/>）。</summary>
+        private void StoreProgressCacheLocked(
+            GlobalSystemMediaTransportControlsSession session,
+            GlobalSystemMediaTransportControlsSessionTimelineProperties? timeline,
+            GlobalSystemMediaTransportControlsSessionPlaybackInfo? playback,
+            bool updateAnchor)
+        {
+            if (!ReferenceEquals(session, _currentSession))
+            {
+                return;
+            }
+
+            if (playback != null)
+            {
+                var status = playback.PlaybackStatus;
+
+                if (updateAnchor &&
+                    (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing) &&
+                    (_lastStatus != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing))
+                {
+                    _resumeBasePosition = timeline?.Position
+                                       ?? _lastTimeline?.Position
+                                       ?? TimeSpan.Zero;
+                    _resumeBaseTime = DateTimeOffset.Now;
+                    _resumeAnchorValid = true;
+                }
+
+                _lastStatus = status;
+                _lastPlayback = playback;
+            }
+
+            if (timeline != null)
+            {
+                _lastTimeline = timeline;
+            }
+
+            _lastProgressCacheAt = DateTimeOffset.Now;
+        }
+
         /// <summary>
-        /// 切换会话：先解绑旧会话（不通知上层），再绑定新会话并立即读取一次属性。
+        /// 缓存超过 1 秒（或缺失）时兜底刷新一次。
+        ///
+        /// <para>正常进度由 <c>TimelinePropertiesChanged</c> / <c>PlaybackInfoChanged</c> 更新；
+        /// 这里只处理"播放器不发事件 / 漏事件"的少数情况，最多约 2 次 COM/秒，
+        /// 代替原来 10ms/100ms 循环里的 200～400 次/秒。</para>
+        /// </summary>
+        private void RefreshProgressCacheIfStale(GlobalSystemMediaTransportControlsSession session)
+        {
+            DateTimeOffset at;
+            bool missing;
+
+            lock (_sessionGate)
+            {
+                if (!ReferenceEquals(session, _currentSession))
+                {
+                    return;
+                }
+
+                at = _lastProgressCacheAt;
+                missing = (_lastTimeline == null) || (_lastPlayback == null);
+            }
+
+            if (!missing && ((DateTimeOffset.Now - at).TotalMilliseconds < ProgressFallbackRefreshMs))
+            {
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _progressRefreshBusy, 1) != 0)
+            {
+                return;                       // 已有线程在刷新，本次直接用旧缓存
+            }
+
+            try
+            {
+                var timeline = session.GetTimelineProperties();
+                var playback = session.GetPlaybackInfo();
+
+                lock (_sessionGate)
+                {
+                    StoreProgressCacheLocked(session, timeline, playback, updateAnchor: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SMTC] 进度缓存刷新失败: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _progressRefreshBusy, 0);
+            }
+        }
+
         ///
         /// <para>新会话如果本身就是"空会话"（没有标题），读取结果会按实际状态清场并补发
         /// <see cref="MediaCleared"/>，不会继续显示上一首；读取失败也同样按"无媒体"处理，
@@ -400,15 +501,19 @@ namespace MediaMonitor.Services
 
                 if (bound && (session != null))
                 {
-                    // 新会话的初始时间轴锚点（后续由 TimelinePropertiesChanged 更新）
+                    // 初始进度锚点：之后由 Timeline/Playback 事件更新，GetCurrentProgress 只读缓存
                     try
                     {
-                        _lastTimeline = session.GetTimelineProperties();
+                        var timeline = session.GetTimelineProperties();
+                        var playback = session.GetPlaybackInfo();
+                        StoreProgressCacheLocked(session, timeline, playback, updateAnchor: false);
                     }
                     catch (Exception ex)
                     {
                         _lastTimeline = null;
-                        System.Diagnostics.Debug.WriteLine($"[SMTC] 读取初始时间轴失败: {ex.Message}");
+                        _lastPlayback = null;
+                        _lastProgressCacheAt = DateTimeOffset.MinValue;
+                        System.Diagnostics.Debug.WriteLine($"[SMTC] 读取初始进度失败: {ex.Message}");
                     }
                 }
 
@@ -530,11 +635,7 @@ namespace MediaMonitor.Services
 
                 lock (_sessionGate)
                 {
-                    if (!ReferenceEquals(sender, _currentSession))
-                    {
-                        return;
-                    }
-                    _lastTimeline = timeline;
+                    StoreProgressCacheLocked(sender, timeline, null, updateAnchor: false);
                 }
             }
             catch (Exception ex)
@@ -553,21 +654,20 @@ namespace MediaMonitor.Services
                     return;                       // 旧会话的在途回调：不允许污染新会话的状态
                 }
 
-                var status = sender.GetPlaybackInfo().PlaybackStatus;
+                var playback = sender.GetPlaybackInfo();
+                var status = playback.PlaybackStatus;
 
                 // 检测"非播放 → 播放"转换：暂停/停止后恢复（含切歌后首播）。
                 // 用事件触发瞬间的 Position + 墙钟建立恢复锚点，
                 // 避免用陈旧的 LastUpdatedTime 外推导致首个进度包虚增整个暂停时长。
-                TimeSpan anchorPosition = TimeSpan.Zero;
-                bool hasAnchorPosition = false;
+                GlobalSystemMediaTransportControlsSessionTimelineProperties? anchorTimeline = null;
                 if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
                 {
                     try
                     {
-                        anchorPosition = sender.GetTimelineProperties().Position;
-                        hasAnchorPosition = true;
+                        anchorTimeline = sender.GetTimelineProperties();
                     }
-                    catch { /* 取不到就退回 0，下一次时间轴刷新会纠正 */ }
+                    catch { /* 取不到就用缓存里的位置，下一次时间轴刷新会纠正 */ }
                 }
 
                 lock (_sessionGate)
@@ -577,15 +677,7 @@ namespace MediaMonitor.Services
                         return;
                     }
 
-                    if (_lastStatus != GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
-                        && status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
-                    {
-                        _resumeBasePosition = hasAnchorPosition ? anchorPosition : TimeSpan.Zero;
-                        _resumeBaseTime = DateTimeOffset.Now;
-                        _resumeAnchorValid = true;
-                    }
-
-                    _lastStatus = status;
+                    StoreProgressCacheLocked(sender, anchorTimeline, playback, updateAnchor: true);
                 }
 
                 SafeInvoke(() => PlaybackChanged?.Invoke(status));
@@ -706,6 +798,9 @@ namespace MediaMonitor.Services
                 CurrentArtist = props.Artist;
                 CurrentAlbum = props.AlbumTitle;
                 _mediaNotified = true;
+
+                // 新曲目：旧时间轴通常属于上一首，强制下一次 GetCurrentProgress 立即重读一次
+                _lastProgressCacheAt = DateTimeOffset.MinValue;
             }
 
             if (trackChanged)
@@ -871,10 +966,29 @@ namespace MediaMonitor.Services
                 return null;
             }
 
+            RefreshProgressCacheIfStale(session);
+
+            GlobalSystemMediaTransportControlsSessionTimelineProperties? timeline;
+            GlobalSystemMediaTransportControlsSessionPlaybackInfo? playback;
+
+            lock (_sessionGate)
+            {
+                if (!ReferenceEquals(session, _currentSession))
+                {
+                    return null;
+                }
+
+                timeline = _lastTimeline;
+                playback = _lastPlayback;
+            }
+
+            if ((timeline == null) || (playback == null))
+            {
+                return null;
+            }
+
             try
             {
-                var timeline = session.GetTimelineProperties();
-                var playback = session.GetPlaybackInfo();
                 var status = playback.PlaybackStatus;
 
                 TimeSpan pos = timeline.Position;
@@ -942,6 +1056,11 @@ namespace MediaMonitor.Services
                 if (pos < TimeSpan.Zero)
                 {
                     pos = TimeSpan.Zero;
+                }
+
+                if (!ReferenceEquals(session, Volatile.Read(ref _currentSession)))
+                {
+                    return null;                   // 计算期间切换了会话：本次结果作废
                 }
 
                 return new MediaProgressInfo(pos, duration, MapPlaybackStatus(status));
